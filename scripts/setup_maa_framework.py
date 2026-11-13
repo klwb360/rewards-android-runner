@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+从 GitHub Release 下载 MaaFramework 的 Android 产物，把 .so 铺进 app/src/main/jniLibs/<abi>/
+
+用法:
+    python scripts/setup_maa_framework.py                  # 取 latest release
+    python scripts/setup_maa_framework.py --tag v5.13.0    # 取指定 tag
+    python scripts/setup_maa_framework.py --skip-download  # 不联网，用缓存里最新的版本重新铺（可配 --tag）
+    python scripts/setup_maa_framework.py --abi arm64-v8a  # 只处理一个 ABI
+    python scripts/setup_maa_framework.py --force          # 内容一致也重新铺
+
+说明:
+  - release 产物是 zip（`MAA-android-<arch>-<tag>.zip`），.so 在压缩包的 bin/ 下
+  - libc++_shared.so 保留上游那份：MaaFramework 各 so 都链接它
+  - bin/plugins/ 是 MaaPluginDemo 的示例插件，默认不打包，要的话加 --with-plugins
+  - 目标目录和产物一致时跳过；否则先解到暂存目录，再整体换掉旧目录，不残留上个版本的 .so
+  - 下载先写 .part，下完整了才改名，缓存里不会留下残缺的 zip
+  - 低于 MIN_VERSION 的 release 拒绝下载，缓存里的旧版本产物铺开时跳过
+  - 代理读 http_proxy / https_proxy；只设了 ALL_PROXY 时用它补上
+"""
+
+import argparse
+import io
+import json
+import os
+import re
+import shutil
+import sys
+import urllib.error
+import urllib.request
+import zipfile
+from pathlib import Path
+
+# Windows 控制台编码
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
+DEFAULT_GITHUB_REPO = "MaaXYZ/MaaFramework"
+API_BASE = f"https://api.github.com/repos/{DEFAULT_GITHUB_REPO}"
+
+# release 产物名里的 arch 关键字 -> jniLibs 子目录
+ABI_MAP = {
+    "android-aarch64": "arm64-v8a",
+    "android-x86_64": "x86_64",
+}
+
+# 默认不排除任何 so
+# 特别注意 libc++_shared.so：MaaFramework 的各个 so 都动态链接它，且是上游那套 NDK 编的；
+# 换成本地 NDK 的那份等于同进程混两套 libc++。bridge 侧改用 c++_static，不参与竞争
+EXCLUDE_SO: set[str] = {"libc++_shared.so"}
+
+# 示例插件，默认不打包
+PLUGIN_DIR_PART = "plugins"
+
+JNILIBS_DIR = "app/src/main/jniLibs"
+CACHE_DIR = ".maa-cache"
+VERSION_FILE = ".maafwversion"
+
+# 缺了这些库 native 侧起不来，铺完校验一遍
+REQUIRED_SO = {
+    "libMaaFramework.so",
+    "libMaaUtils.so",
+    "libMaaAndroidNativeControlUnit.so",
+}
+
+# MAA-android-aarch64-v4.5.0.zip / MAA-android-x86_64-v4.5.0-beta.1.zip
+ZIP_VERSION_RE = re.compile(r"-android-(?:aarch64|x86_64)-(v[0-9A-Za-z.\-+]+)\.zip$")
+
+# 外壳支持的最低 MaaFramework 版本；bridge 无条件读 TouchArgs.contact（#1447，v5.13.0-beta.3 起），
+# 更旧的产物不会报错，只会让多指静默退化成单指
+MIN_VERSION = (5, 13, 0)
+SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.\-]+)?(\+[0-9A-Za-z.\-]+)?$")
+
+
+def version_key(tag: str) -> tuple:
+    """同一核心版本里正式版排在 pre-release 之后"""
+    m = SEMVER_RE.match(tag)
+    return tuple(int(part) for part in m.group(1, 2, 3)), m.group(4) is None, m.group(4) or ""
+
+
+def min_version_text() -> str:
+    return "v" + ".".join(map(str, MIN_VERSION))
+
+
+def is_supported_version(tag: str) -> bool:
+    """解析不出版本号的 tag 一律不认；5.13.0-beta.x 按 semver 排在 5.13.0 之前"""
+    m = SEMVER_RE.match(tag)
+    if not m:
+        return False
+    core = tuple(int(part) for part in m.group(1, 2, 3))
+    if core != MIN_VERSION:
+        return core > MIN_VERSION
+    return m.group(4) is None
+
+
+def get_project_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _request(url: str, accept: str, with_auth: bool, token: str | None):
+    req = urllib.request.Request(url)
+    req.add_header("Accept", accept)
+    req.add_header("User-Agent", "MaaFwApp-Setup")
+    if with_auth and token:
+        req.add_header("Authorization", f"token {token}")
+    return req
+
+
+def install_proxy_opener() -> None:
+    """urllib 不认 ALL_PROXY：没设 http_proxy / https_proxy 时拿它补上，socks 代理 urllib 用不了，不补"""
+    proxies = urllib.request.getproxies()
+    fallback = proxies.get("all")
+    if fallback and fallback.lower().startswith(("http://", "https://")):
+        for scheme in ("http", "https"):
+            proxies.setdefault(scheme, fallback)
+    urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHandler(proxies)))
+
+
+def _print_rate_limit_hint(
+    error: urllib.error.HTTPError, *, token_configured: bool
+) -> None:
+    """GitHub 返回限流信息时，提示用户下一步操作，并保留响应体。"""
+    response_bytes = b""
+    try:
+        # 直接读底层流，避免 HTTPError 将旧流的 read 方法缓存到实例上。
+        response_bytes = error.fp.read()
+    except (OSError, AttributeError):
+        pass
+    finally:
+        # HTTPError 是可读取的响应对象。恢复已读取的内容，避免提示逻辑吞掉诊断信息。
+        if response_bytes:
+            restored_response = io.BytesIO(response_bytes)
+            error.fp = restored_response
+            error.file = restored_response
+
+    response = response_bytes.decode("utf-8", errors="replace")
+    remaining = error.headers.get("X-RateLimit-Remaining")
+    retry_after = error.headers.get("Retry-After")
+    error_message = f"{error.reason}\n{response}".lower()
+    if remaining != "0" and retry_after is None and "rate limit" not in error_message:
+        return
+
+    if token_configured:
+        print(
+            "[HINT] 已配置 GITHUB_TOKEN，但 GitHub 请求仍触发 rate limit；"
+            "若此前收到 401，请更换为可访问目标仓库的 token，否则请等待限额恢复后重试"
+        )
+    else:
+        print("[HINT] GitHub 请求已触发 rate limit，请配置环境变量 GITHUB_TOKEN 后重试")
+
+
+def fetch_json(url: str) -> dict:
+    token = os.environ.get("GITHUB_TOKEN")
+
+    def _do(with_auth: bool) -> dict:
+        with urllib.request.urlopen(
+            _request(url, "application/vnd.github.v3+json", with_auth, token), timeout=30
+        ) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    if not token:
+        return _do(with_auth=False)
+    try:
+        return _do(with_auth=True)
+    except urllib.error.HTTPError as e:
+        # GITHUB_TOKEN 作用域限于当前仓库，访问别的公开仓库时会 401，退回匿名
+        if e.code == 401:
+            print(f"[WARN] 带 token 请求被拒（{e.code}），改用匿名重试")
+            return _do(with_auth=False)
+        raise
+
+
+def download_file(url: str, dest: Path):
+    print(f"  [DOWNLOAD] {dest.name}")
+    token = os.environ.get("GITHUB_TOKEN")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        resp_ctx = urllib.request.urlopen(
+            _request(url, "application/octet-stream", bool(token), token), timeout=600
+        )
+    except urllib.error.HTTPError as e:
+        if e.code == 401 and token:
+            print(f"[WARN] 带 token 下载被拒（{e.code}），改用匿名重试")
+            try:
+                resp_ctx = urllib.request.urlopen(
+                    _request(url, "application/octet-stream", False, token), timeout=600
+                )
+            except urllib.error.HTTPError as retry_error:
+                _print_rate_limit_hint(retry_error, token_configured=bool(token))
+                raise
+        else:
+            _print_rate_limit_hint(e, token_configured=bool(token))
+            raise
+    part = dest.with_name(dest.name + ".part")
+    with resp_ctx as resp:
+        total = int(resp.headers.get("Content-Length", 0))
+        downloaded = 0
+        with open(part, "wb") as f:
+            while True:
+                chunk = resp.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total > 0:
+                    pct = downloaded * 100 // total
+                    print(
+                        f"\r    {downloaded / (1024 * 1024):.1f}/{total / (1024 * 1024):.1f} MB ({pct}%)",
+                        end="",
+                        flush=True,
+                    )
+        print()
+    if total and downloaded != total:
+        raise OSError(f"{dest.name} 下载不完整：{downloaded}/{total} 字节")
+    part.replace(dest)
+
+
+def get_release_assets(tag: str | None) -> tuple[str, list]:
+    url = f"{API_BASE}/releases/tags/{tag}" if tag else f"{API_BASE}/releases/latest"
+    print(f"[FETCH] {url}")
+    try:
+        data = fetch_json(url)
+    except urllib.error.HTTPError as e:
+        print(f"[ERROR] 请求失败: {e.code} {e.reason}")
+        _print_rate_limit_hint(
+            e, token_configured=bool(os.environ.get("GITHUB_TOKEN"))
+        )
+        sys.exit(1)
+    tag_name = data.get("tag_name", "unknown")
+    print(f"  tag: {tag_name}")
+    return tag_name, data.get("assets", [])
+
+
+def find_android_assets(assets: list) -> dict:
+    result = {}
+    for asset in assets:
+        name = asset["name"]
+        if not name.endswith(".zip"):
+            continue
+        for keyword, abi in ABI_MAP.items():
+            if keyword in name:
+                result[abi] = {
+                    "name": name,
+                    "url": asset["browser_download_url"],
+                    "size": asset["size"],
+                }
+    return result
+
+
+def cached_archives(cache_dir: Path) -> dict[str, dict[str, Path]]:
+    """缓存里支持的产物：版本 -> {abi: zip}"""
+    result: dict[str, dict[str, Path]] = {}
+    for archive in cache_dir.glob("MAA-android-*.zip"):
+        m = ZIP_VERSION_RE.search(archive.name)
+        if not m or not is_supported_version(m.group(1)):
+            continue
+        for keyword, abi in ABI_MAP.items():
+            if keyword in archive.name:
+                result.setdefault(m.group(1), {})[abi] = archive
+    return result
+
+
+def deploy_zip(archive: Path, abi: str, project_root: Path, with_plugins: bool, force: bool) -> dict:
+    jnilib_dir = project_root / JNILIBS_DIR / abi
+    stats = {"so": 0, "skipped": 0, "plugins": 0}
+    with zipfile.ZipFile(archive) as zf:
+        picked: dict[str, zipfile.ZipInfo] = {}
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            parts = Path(info.filename).parts
+            name = parts[-1]
+            if not name.endswith(".so"):
+                continue
+            if name in EXCLUDE_SO:
+                stats["skipped"] += 1
+                continue
+            if PLUGIN_DIR_PART in parts[:-1]:
+                if not with_plugins:
+                    stats["plugins"] += 1
+                    continue
+            # jniLibs/<abi>/ 是平铺的，同名会互相覆盖
+            if name in picked:
+                print(f"    [WARN] 同名 .so 冲突，后者覆盖前者: {info.filename}")
+            picked[name] = info
+        stats["so"] = len(picked)
+
+        current = {f.name: f.stat().st_size for f in jnilib_dir.iterdir()} if jnilib_dir.is_dir() else {}
+        if not force and current == {name: info.file_size for name, info in picked.items()}:
+            print(f"  [SKIP] {abi} 与 {archive.name} 一致，不重新铺")
+            return stats
+
+        print(f"  [EXTRACT] {archive.name} -> {abi}")
+        # 解压失败（残缺的 zip、磁盘满）时旧的 jniLibs 还在
+        staging = project_root / CACHE_DIR / f"deploy-{abi}"
+        if staging.exists():
+            shutil.rmtree(staging)
+        staging.mkdir(parents=True)
+        for name, info in picked.items():
+            with zf.open(info) as src, open(staging / name, "wb") as out:
+                shutil.copyfileobj(src, out)
+
+    if jnilib_dir.exists():
+        shutil.rmtree(jnilib_dir)
+    jnilib_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging.replace(jnilib_dir)
+
+    missing = REQUIRED_SO - set(picked)
+    if missing:
+        print(f"    [WARN] 缺少关键库: {', '.join(sorted(missing))}")
+
+    plugin_note = f", plugins 跳过: {stats['plugins']}" if stats["plugins"] else ""
+    print(f"    so: {stats['so']}, 排除: {stats['skipped']}{plugin_note}")
+    return stats
+
+
+def main():
+    parser = argparse.ArgumentParser(description="下载并铺开 MaaFramework 的 Android .so")
+    parser.add_argument("--repo", "-r", default=DEFAULT_GITHUB_REPO,
+                        help=f"GitHub 仓库（owner/repo，默认 {DEFAULT_GITHUB_REPO}）")
+    parser.add_argument("--tag", "-t", help="指定 release tag，默认取 latest")
+    parser.add_argument("--skip-download", "-s", action="store_true", help="跳过下载，只用缓存")
+    parser.add_argument("--abi", choices=["arm64-v8a", "x86_64", "all"], default="all",
+                        help="只处理指定 ABI，默认全部")
+    parser.add_argument("--with-plugins", action="store_true",
+                        help="连 bin/plugins/ 下的示例插件一起打包")
+    parser.add_argument("--force", "-f", action="store_true", help="jniLibs 与产物一致也重新铺")
+    args = parser.parse_args()
+    install_proxy_opener()
+
+    global API_BASE
+    API_BASE = f"https://api.github.com/repos/{args.repo}"
+
+    project_root = get_project_root()
+    cache_dir = project_root / CACHE_DIR
+    target_abis = list(ABI_MAP.values()) if args.abi == "all" else [args.abi]
+
+    print("=" * 55)
+    print("==> MaaFramework Android 产物部署")
+    print("=" * 55)
+
+    if not args.skip_download:
+        tag_name, assets = get_release_assets(args.tag)
+        if not is_supported_version(tag_name):
+            print(f"[ERROR] {tag_name} 低于最低支持版本 {min_version_text()}（或解析不出版本号），拒绝安装")
+            sys.exit(1)
+        android_assets = find_android_assets(assets)
+        if not android_assets:
+            print("[ERROR] release 里没有 Android 产物，确认该 tag 是否包含 MAA-android-*.zip")
+            sys.exit(1)
+
+        print(f"\n[INFO] 找到 {len(android_assets)} 个 Android 产物:")
+        for abi, info in android_assets.items():
+            print(f"  {abi}: {info['name']} ({info['size'] / (1024 * 1024):.1f} MB)")
+
+        print(f"\n[DOWNLOAD] 缓存到 {cache_dir}")
+        for abi, info in android_assets.items():
+            if abi not in target_abis:
+                continue
+            dest = cache_dir / info["name"]
+            if dest.exists() and dest.stat().st_size == info["size"]:
+                print(f"  [CACHE] {info['name']} 已存在，跳过")
+            else:
+                download_file(info["url"], dest)
+    else:
+        print("[SKIP] 跳过下载，使用缓存")
+
+    # 只铺这一个版本，缓存里的其他版本不参与
+    cached = cached_archives(cache_dir) if cache_dir.is_dir() else {}
+    if args.skip_download:
+        version = args.tag or max(cached, key=version_key, default=None)
+    else:
+        version = tag_name
+    if version is None:
+        print(f"[ERROR] 缓存里没有 {min_version_text()} 及以上的 MAA-android-*.zip，先不带 --skip-download 跑一次")
+        sys.exit(1)
+    if not is_supported_version(version):
+        print(f"[ERROR] {version} 低于最低支持版本 {min_version_text()}（或解析不出版本号），拒绝安装")
+        sys.exit(1)
+    archives = cached.get(version, {})
+    missing = [abi for abi in target_abis if abi not in archives]
+    if missing:
+        print(f"[ERROR] 缓存里没有 {version} 的 {', '.join(missing)} 产物，先不带 --skip-download 跑一次")
+        sys.exit(1)
+
+    print(f"\n[DEPLOY] 铺开 {version}")
+    for abi in target_abis:
+        try:
+            deploy_zip(archives[abi], abi, project_root, args.with_plugins, args.force)
+        except zipfile.BadZipFile as e:
+            shutil.rmtree(cache_dir / f"deploy-{abi}", ignore_errors=True)
+            print(f"[ERROR] {archives[abi].name} 已损坏（{e}），删掉它后重新运行；{abi} 的 jniLibs 没有改动")
+            sys.exit(1)
+
+    (project_root / VERSION_FILE).write_text(version + "\n", encoding="utf-8")
+    print(f"  [VERSION] {VERSION_FILE}: {version}")
+
+    print("\n" + "=" * 55)
+    print("[DONE] 部署完成")
+    print("=" * 55)
+    for abi in target_abis:
+        jnilib_dir = project_root / JNILIBS_DIR / abi
+        if not jnilib_dir.exists():
+            continue
+        so_files = sorted(f for f in jnilib_dir.iterdir() if f.suffix == ".so")
+        total = sum(f.stat().st_size for f in so_files)
+        print(f"  {abi}/: {len(so_files)} 个 so, {total / (1024 * 1024):.1f} MB")
+        for f in so_files:
+            print(f"    {f.name}  {f.stat().st_size / (1024 * 1024):.1f} MB")
+
+
+if __name__ == "__main__":
+    main()

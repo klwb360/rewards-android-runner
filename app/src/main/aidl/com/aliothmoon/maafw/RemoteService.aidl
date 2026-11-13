@@ -1,0 +1,187 @@
+package com.aliothmoon.maafw;
+
+import android.view.Surface;
+import com.aliothmoon.maafw.ITouchEventCallback;
+import com.aliothmoon.maafw.IMaaRunnerCallback;
+import com.aliothmoon.maafw.ITextInputSink;
+
+/**
+ * 特权进程的服务面（docs/privileged-runtime.md §6）
+ *
+ * transaction id 必须显式写死且只增不改：app 升级后旧特权进程可能仍存活，
+ * 双方按 transaction code 通信，改动方法顺序会错位
+ * destroy() 的 16777114 是 Shizuku user service 的保留 id
+ */
+interface RemoteService {
+
+    oneway void destroy() = 16777114;
+
+    // ── 生命周期 ──
+    void exit() = 1;
+
+    String version() = 2;
+
+    int pid() = 3;
+
+    /** app 侧上报自己的 pid，特权进程据此做 /proc 看门狗，app 消失即自杀 */
+    oneway void heartbeat(int appPid) = 4;
+
+    /**
+     * piRoot 是解包后的 PI 根目录绝对路径
+     * logDir 交给 MaaFramework 落 maa.log 与 Screencap 动作的产物；不设时它按进程 CWD 算，特权进程的 CWD 不可写
+     */
+    boolean setup(String piRoot, String logDir, boolean isDebug) = 5;
+
+    // ── 显示 ──
+    boolean setVirtualDisplayMode(int mode) = 10;
+
+    void setVirtualDisplayResolution(int width, int height, int dpi) = 11;
+
+    /** 返回 display id，失败返回 -1 */
+    int startVirtualDisplay() = 12;
+
+    void stopVirtualDisplay() = 13;
+
+    boolean isAppOnVirtualDisplay(String packageName) = 14;
+
+    boolean moveAppToVirtualDisplay(String packageName) = 15;
+
+    oneway void setForceFullscreenOnVirtualDisplay(boolean enabled) = 16;
+
+    oneway void setDisplayPower(boolean on) = 17;
+
+    /**
+     * 强改**主屏**分辨率；前台模式要求主屏是 16:9，这是唯一的改法
+     * 与 setVirtualDisplayResolution 不是一回事：那个改的是后台虚拟屏，改完只影响虚拟屏上的应用
+     */
+    boolean setForcedDisplaySize(int width, int height) = 18;
+
+    /** 撤掉 setForcedDisplaySize，主屏回到出厂分辨率 */
+    boolean clearForcedDisplaySize() = 19;
+
+    // ── 预览 ──
+    void setMonitorSurface(in Surface surface) = 20;
+
+    oneway void setTouchCallback(ITouchEventCallback callback) = 21;
+
+    // ── 预览上的手动操作 ──
+
+    /**
+     * contact 是 0..15 的手指槽位，与 MotionEvent 的 pointer id 同义
+     * 单指版本占的 30..32 作废不复用：同 id 换签名会让挺过升级的旧进程拿两个 int 解三个 int
+     */
+    oneway void touchDown(int x, int y, int contact) = 33;
+
+    oneway void touchMove(int x, int y, int contact) = 34;
+
+    oneway void touchUp(int x, int y, int contact) = 35;
+
+    // ── 代授权限 ──
+
+    /**
+     * 用特权身份给 app 自己授权，省掉用户逐个点系统页
+     *
+     * permissions 与返回值都是 PrivilegedGrant 的位掩码，返回实际授到的那些
+     * 用位掩码而不是 Parcelable：Parcelable 的线格式跟着 Kotlin 类布局走，
+     * app 升级但旧特权进程仍存活时会解不出来（同本文件开头的 transaction id 约定）
+     */
+    int grantPermissions(String packageName, int uid, int permissions) = 41;
+
+    // ── 目标应用 ──
+    boolean isPackageInstalled(String packageName) = 40;
+
+    // ── 执行 ──
+    oneway void setRunnerCallback(IMaaRunnerCallback callback) = 50;
+
+    /** payload 是 RunPlanPayload 的 JSON；立即返回是否受理，进度与结果走回调 */
+    boolean startRun(String runPlanJson) = 51;
+
+    /** 幂等；未在跑时也返回 true */
+    boolean stopRun() = 52;
+
+    boolean isRunning() = 53;
+
+    /** MaaFramework 版本；未加载返回 null */
+    String maaVersion() = 54;
+
+    /**
+     * MaaGlobalOption_SaveOnError：节点出错时把现场截图落到 logDir/on_error
+     * app 每轮 setup 后现读设置再调；框架核心默认 false，不设就永远不存
+     */
+    boolean setSaveOnError(boolean enabled) = 55;
+
+    /** 看门狗状态：0=IDLE / 1=WATCHING / 2=APP_DIED（目标 app 是否仍在虚拟屏上） */
+    int watchdogState() = 60;
+
+    /** 看门狗当下盯着的包名；没有目标时为空串。运行日志要把它写进那句提示里 */
+    String watchdogTargetPackage() = 61;
+
+    // ── 亮屏与解锁 ──
+
+    /**
+     * 亮屏并解除锁屏；credential 是纯数字 PIN，无凭证锁屏传空串
+     * 返回值见 WakeUnlockResult。整段在特权进程内同步完成——息屏后 app 侧协程会被挂起
+     */
+    int unlock(String credential) = 70;
+
+    /** 设置页自测：先上锁息屏再解一次 */
+    int testUnlock(String credential) = 71;
+
+    /** 上锁并息屏；跑完自动熄屏用它 */
+    int lockAndSleep() = 72;
+
+    /**
+     * 强停虚拟屏上的目标应用；包名取自看门狗运行期反推的那个
+     * 放在特权侧而不是让 app 传包名：外壳不维护包名表，运行期只有这边知道
+     */
+    boolean stopTargetApp() = 73;
+
+    /** 屏幕当前是否亮着；采「本轮开始时手机是不是醒着」用它 */
+    boolean isScreenOn() = 74;
+
+    /**
+     * 把 controller 的缓存截图落到 [path]，供 focus 模板的 {image} 用
+     *
+     * 走文件不回传字节：一张 720p PNG 几百 KB，binder 事务缓冲总共才 1MB
+     */
+    boolean saveCachedImage(String path) = 75;
+
+    /** 把虚拟屏帧缓冲的当前画面存成 PNG 到 [path]；不经 controller，没在跑任务也能截，帧缓冲为空返回 false */
+    boolean saveDisplayFrame(String path) = 85;
+
+    /** 后台虚拟屏上的目标游戏帧率；未监控返回 -1 */
+    float getGameFps() = 76;
+    /** app 每轮开始前注册；InputText 里按键打不出来的文本经它交给无障碍写入 */
+    oneway void setTextInputSink(ITextInputSink sink) = 77;
+
+    // ── 解锁手势（docs/scheduled-triggers.md）──
+    // 录制整段在特权进程里跑：要锁屏、读 /dev/input 原始触摸，app 侧那时多半已被挂起
+
+    /** 开始录制：锁屏息屏 → 亮屏 → 等用户解锁一次；立即返回，结果靠轮询取 */
+    oneway void startGestureRecord(int timeoutMs) = 78;
+
+    /** 录制状态快照，GestureRecordResult 的 JSON；终态被读走一次后回到 IDLE */
+    String pollGestureRecord() = 79;
+
+    oneway void cancelGestureRecord() = 80;
+
+    /** 按录好的手势解锁；gestureJson 是 UnlockGesture 的 JSON */
+    int unlockWithGesture(String gestureJson) = 81;
+
+    /** 设置页自测：先上锁息屏再按手势解一次 */
+    int testUnlockGesture(String gestureJson) = 82;
+
+    // ── 系统显示设置 ──
+
+    /** 荣耀「智能分辨率」是否开着（global low_resolution_switch）；开着时后台模式识别会出错 */
+    boolean isSmartResolutionEnabled() = 83;
+
+    // ── 运行通知 ──
+
+    /**
+     * 断开 / 恢复某个包的联网；只认 com.xiaomi.xmsf，别的包一律拒绝
+     *
+     * 超级岛的云端鉴权断网即放行，运行通知选「超级岛」时在进度通知期间断开它
+     */
+    boolean setPackageNetworkingEnabled(String packageName, boolean enabled) = 84;
+}

@@ -1,0 +1,112 @@
+package com.aliothmoon.maafw.runner
+
+import com.aliothmoon.maafw.i18n.UiText
+import kotlinx.serialization.Serializable
+
+/**
+ * 运行日志的一条
+ *
+ * 本类型只在内存，进程重启即清空——[text] 带的是资源 id，跨版本会变，落不了盘。
+ * 要落盘的那份由 [RunLogRecorder] 渲染成 [RunSessionRecord.Line] 另写
+ * （docs/persistence-diagnostics.md §2「诊断产物」）
+ *
+ * [text] 与 [detail] 分开存：正文是给人读的一句话，原始 details_json 收在折叠区，
+ * 拼成一个串就既没法单独上色也没法折叠
+ */
+data class RunLogEntry(
+    val id: Long,
+    val atMillis: Long,
+    val kind: RunLogKind,
+    val text: UiText,
+    /** 原样 details_json；外壳自产与已合成的行没有 */
+    val detail: String? = null,
+)
+
+/**
+ * 日志分级，取自桌面端 MXU 的 `LogType`（info / success / warning / error / agent / focus）
+ *
+ * 按名字进会话日志文件。外壳自产行走 [RunNote]，由 [RunLogRecorder] 映到 Info/Warning/Error
+ */
+@Serializable
+enum class RunLogKind {
+    Info,
+    Success,
+    Warning,
+    Error,
+
+    /** agent child 自己 print 的（stdout） */
+    Agent,
+
+    /** agent child 的 stderr：它自己的 traceback，也可能是加载器、解释器写的 */
+    AgentError,
+
+    /** PI 声明的消息模板，正文按 Markdown 渲染（见 [FocusMessage]） */
+    Focus,
+
+    /**
+     * 没被合成成人话的原始回调；现在与 MXU 一样直接丢掉，不再产出
+     *
+     * 只为读得动旧版本写下的会话文件而留：kind 按名字落盘，删了旧文件整行解不出来
+     */
+    Verbose,
+}
+
+/**
+ * 屏上每一档各留多少：超过就丢这一档最老的。一次长跑能积上万条，全留住会吃光内存也拖慢列表
+ *
+ * 进度行与原始行（agent 输出）分开限额：agent 刷起屏来一秒几十行，共用一个窗口会把更早的进度行挤掉
+ */
+const val RUN_LOG_CAPACITY = 500
+
+/**
+ * 屏上那份的一拍快照；两档与省略信息一起发，界面不会拿到彼此对不上的半份
+ *
+ * [all] 是 [progress] 与保留下来的原始行按 id 归并：进度行永远不因原始行洪泛而丢
+ */
+data class RunLogSnapshot(
+    val progress: List<RunLogEntry> = emptyList(),
+    val all: List<RunLogEntry> = emptyList(),
+    /** 因限额丢掉的原始行数；完整记录仍在会话文件里 */
+    val omittedRaw: Long = 0,
+    /** 最老一条仍保留的原始行：省略提示插在它前面 */
+    val firstRawId: Long? = null,
+) {
+    companion object {
+        val EMPTY = RunLogSnapshot()
+    }
+}
+
+/**
+ * 「进度」档留下的：这一轮跑到哪了
+ *
+ * agent 的两条流都不在内，是排障信息。agent 崩了照样看得见：
+ * [RunnerEvent.AgentExited] 那句进这一档，再切「全部」看 stderr 上的现场
+ */
+val RunLogEntry.isEssential: Boolean
+    get() = kind !in NON_ESSENTIAL_KINDS
+
+private val NON_ESSENTIAL_KINDS =
+    setOf(RunLogKind.Verbose, RunLogKind.Agent, RunLogKind.AgentError)
+
+/**
+ * 屏保那一行只要一句话，带上 details_json 就糊了
+ *
+ * [taskLabel] 是信封里冻结的展示名（PI 本地化过）；进度行用它，拿不到才退回内部 name
+ *
+ * 那一行是纯文本面，focus 的 Markdown 与 HTML 记号要剥掉
+ */
+fun RunnerEvent.toLogText(taskLabel: String? = null): String = when (this) {
+    is RunnerEvent.Marker -> ""
+    is RunnerEvent.Log -> message
+    is RunnerEvent.Progress -> "${taskLabel?.takeIf(String::isNotBlank) ?: taskName} $completed/$total"
+    is RunnerEvent.Focus -> focusPlainText(focus.content)
+    is RunnerEvent.AgentOutput -> line
+    is RunnerEvent.AgentConnected -> label
+    // 这里出的是裸 String，没有本地化入口；留空让屏保保持上一句，这句在运行日志里看
+    is RunnerEvent.AgentExited -> ""
+    is RunnerEvent.MalformedCallback -> MALFORMED_LABEL
+    is RunnerEvent.Callback -> message
+}
+
+/** 事件名为空时拿不到可指称的东西，给个固定标签，原文进 detail */
+internal const val MALFORMED_LABEL = "<malformed callback>"

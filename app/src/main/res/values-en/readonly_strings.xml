@@ -1,0 +1,43 @@
+<resources>
+    <string name="ro_title">Rewards · Read-only readiness</string>
+    <string name="ro_subtitle">Native product preview · Status only\nThis build does not capture, recognize pages or perform Rewards tasks.</string>
+    <string name="ro_current">This build</string>
+    <string name="ro_idle">Not started</string>
+    <string name="ro_running">Recognition running</string>
+    <string name="ro_stopping">Awaiting cleanup evidence</string>
+    <string name="ro_cleanup_unconfirmed">Cleanup unconfirmed; restart blocked</string>
+    <string name="ro_completed">Completed; cleanup confirmed</string>
+    <string name="ro_failed">Failed; cleanup confirmed</string>
+    <string name="ro_cancelled">Cancelled; cleanup confirmed</string>
+    <string name="ro_no_execution">Only status and integration requirements are available. Stock task, permission, schedule and remote-service routes are not integrated.</string>
+    <string name="ro_authorization">New recognition authorization</string>
+    <string name="ro_not_authorized">Not authorized</string>
+    <string name="ro_approved_once">Approved once; durable claim still required</string>
+    <string name="ro_new_approval">The historical diagnostic approval does not cover this build. This page cannot grant, reset or reuse screenshot authorization.</string>
+    <string name="ro_backend">Runtime backend</string>
+    <string name="ro_backend_unbound">Unbound · Execution disabled</string>
+    <string name="ro_backend_boundary">The replaceable one-shot interface and coordinator are included, but no capture or OCR adapter is bound. The preserved Maa streaming backend has unresolved stop and ownership issues and is not integrated as a safe backend.</string>
+    <string name="ro_device">Device property hints</string>
+    <string name="ro_device_hint_match">Matches legacy property allowlist; still not ready</string>
+    <string name="ro_device_blocked">Outside legacy conditions · Blocked</string>
+    <string name="ro_device_detail">Legacy limits remain Android 15 / API 35, ranchu and sdk_gphone. Only app-readable Build properties are compared, not device attestation. Remote shell UID 2000 is not verified. This does not authorize Android 14 operation.</string>
+    <string name="ro_resources">Resources and remote identity</string>
+    <string name="ro_not_verified">Not verified</string>
+    <string name="ro_resource_detail">Read-only resource hashes and task restrictions remain in the preserved source. This page does not extract resources, start privileged processes or perform execution preflight.</string>
+    <string name="ro_history">Finished independent Bing diagnostic · Historical record</string>
+    <string name="ro_consumed">That authorization was consumed</string>
+    <string name="ro_history_detail">One independent attempt at 2026-11-10 18:35 UTC reported text present only, without validating page contents, values or points. Worker Binder death followed, and the consumed claim survived restart. This is a build-time record, not live device evidence. Binder death alone does not prove external shell exit.</string>
+    <string name="ro_execution_disabled">Recognition is not available</string>
+    <string name="ro_show_requirements">View integration requirements</string>
+    <string name="ro_hide_requirements">Hide integration requirements</string>
+    <string name="ro_future">Future integration</string>
+    <string name="ro_future_title">Technical readiness still needs fresh approval</string>
+    <string name="ro_future_detail">A reviewed read-only backend, device and resource checks, fresh scope-specific approval and a durable one-use claim before dispatch are required. Ready for future approval does not mean authorized. This build has no approval or start path.</string>
+    <string name="ro_stop">Cancellation and cleanup</string>
+    <string name="ro_stop_title">Stop requested does not mean stopped</string>
+    <string name="ro_stop_detail">Timeout, cancellation return, an available result or Binder death does not replace full cleanup evidence. A future backend must confirm producer quiescence, consumer release and external-child exit. Missing evidence keeps cleanup unconfirmed and blocks restart.</string>
+    <string name="ro_privacy">Recognition and privacy boundaries</string>
+    <string name="ro_privacy_title">No system-wide zero-retention promise</string>
+    <string name="ro_privacy_detail">The historical diagnostic used full-screen capture. Before/after window checks are not atomic or single-app isolation. Read-only still has risks. Android, ART, drivers, crash dumps and native libraries may retain data.</string>
+</resources>
+

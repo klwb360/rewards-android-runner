@@ -1,0 +1,28 @@
+package com.aliothmoon.maafw.once;
+import org.junit.Test;
+import static org.junit.Assert.*;
+import static com.aliothmoon.maafw.once.BingNavigationFixture.*;
+/** Synthetic strict metadata only. No old action/return result is reused. */
+public class StatusRecoveryInitialTest {
+ static String w(){return RootReadOnlyAnimationGuardTest.w();}static String a(){return RootReadOnlyAnimationGuardTest.a();}
+ static BingNavigationSnapshot.StatusRecoveryInitial parse(String w,String a){return BingNavigationSnapshot.parseStatusRecovery(w,a,PROFILE,RootReadOnlyAnimationGuardTest.G,1000,1010);}
+ static String browserW(){return w().replace(BingNavigationSnapshot.TEMPLATE,BingNavigationSnapshot.BROWSER)+window(BingNavigationSnapshot.TEMPLATE,"b11",false)
+  +"    mActivityRecord=ActivityRecord{a11 u0 "+BingNavigationSnapshot.TEMPLATE+" t15}\n";}
+ static String browserA(){String own="  * Task{abc #41";return a().replace(BingNavigationSnapshot.TEMPLATE,BingNavigationSnapshot.BROWSER)
+  .replace(own,activityBlock(BingNavigationSnapshot.TEMPLATE,"a11","15",false)+own);}
+ @Test public void templateInitialProducesOnlyPrivateCurrentProofAndNoBackClaim(){var r=parse(w(),a());assertEquals(BingNavigationSnapshot.Status.READY,r.status());assertNotNull(r.template());assertNull(r.browser());assertTrue(r.template().fresh(1010));assertTrue(r.template().summary().contains("backEvidence=false"));}
+ @Test public void browserInitialRequiresFreshFullHiddenTemplateBinding(){var r=parse(browserW(),browserA());assertEquals(BingNavigationSnapshot.Status.READY,r.status());assertNull(r.template());assertNotNull(r.browser());assertEquals(BingNavigationSnapshot.ReadOnlyGate.METADATA_STABLE_ONLY,r.readOnlyGate());assertEquals(BingNavigationSnapshot.Kind.BROWSER,r.browser().browser().kind());assertTrue(r.browser().templateMatches(result(BingNavigationSnapshot.Kind.TEMPLATE,1000,"b11","a11","15").ready()));}
+ @Test public void browserMissingOrChangedHiddenAnchorIsUnknownNotDirectReady(){var missing=parse(w().replace(BingNavigationSnapshot.TEMPLATE,BingNavigationSnapshot.BROWSER),a().replace(BingNavigationSnapshot.TEMPLATE,BingNavigationSnapshot.BROWSER));assertEquals(BingNavigationSnapshot.Status.UNKNOWN,missing.status());assertNull(missing.browser());assertNull(missing.template());assertNull(parse(browserW().replace("ActivityRecord{a11","ActivityRecord{a22"),browserA()).browser());}
+ @Test public void noTokenForStaleWrongGuardOrMissingDraw(){assertNull(BingNavigationSnapshot.parseStatusRecovery(w(),a(),PROFILE,RootReadOnlyAnimationGuardTest.G,1000,7000).template());assertNull(BingNavigationSnapshot.parseStatusRecovery(w(),a(),PROFILE,null,1000,1010).template());assertEquals(BingNavigationSnapshot.Status.BING_TRANSITION,parse(w().replace("HAS_DRAWN","DRAW_PENDING"),a()).status());}
+ @Test public void missingDuplicateSameDuplicateDifferentAndNullTopRemainUnknown(){String top="    topResumedActivity=ActivityRecord{ddd u0 "+BingNavigationSnapshot.TEMPLATE+" t15}\n";
+  for(String raw:new String[]{a().replace(top,""),a()+top,a()+top.replace("ddd","a11"),a().replace(top,"    topResumedActivity=null\n")}){var r=parse(w(),raw);assertEquals(BingNavigationSnapshot.Status.UNKNOWN,r.status());assertNull(r.template());assertNull(r.browser());}}
+ @Test public void diagnosticDistinguishesActualZeroDuplicateAndDifferentTuples(){String top="  topResumedActivity=ActivityRecord{abc u0 com.example.app/.Activity t51}\n";
+  var zero=BingNavigationSnapshot.topDiagnostic("other=true\n");assertTrue(zero.observed());assertEquals(0,zero.tokens());
+  var duplicate=BingNavigationSnapshot.topDiagnostic(top+top);assertEquals(2,duplicate.tokens());assertEquals(2,duplicate.lineStarts());assertEquals(2,duplicate.validLines());assertEquals(1,duplicate.distinctTuples());
+  var different=BingNavigationSnapshot.topDiagnostic(top+top.replace("abc","bcd"));assertEquals(2,different.distinctTuples());
+  var nil=BingNavigationSnapshot.topDiagnostic("  topResumedActivity=null\n");assertEquals(1,nil.tokens());assertEquals(1,nil.nullLines());assertEquals(0,nil.validLines());assertEquals(0,nil.distinctTuples());}
+ @Test public void diagnosticCountsGenericNonBingWithoutUpgradingAuthority(){var d=BingNavigationSnapshot.topDiagnostic("  topResumedActivity=ActivityRecord{abc u0 com.example.app/.Activity t51}\n");assertEquals(1,d.validLines());assertEquals(1,d.distinctTuples());assertEquals(0,d.nullLines());assertFalse(BingNavigationSnapshot.topDiagnostic(null).observed());
+  var embedded=BingNavigationSnapshot.topDiagnostic("echo topResumedActivity=broken\n");assertEquals(1,embedded.tokens());assertEquals(0,embedded.lineStarts());assertEquals(0,embedded.validLines());}
+ @Test public void safeDiagnosticsCannotContainTokenOrDocumentText(){var d=BingNavigationSnapshot.topDiagnostic("topResumedActivity=ActivityRecord{abc u0 com.example.app/.Activity t51}\n");String text=d.toString()+parse(w(),a()).summary();assertFalse(text.contains("abc"));assertFalse(text.contains("com.example"));assertFalse(text.contains("ddd"));assertTrue(text.length()<600);for(var f:BingNavigationSnapshot.TopDiagnostic.class.getDeclaredFields())assertTrue(f.getType().isPrimitive());}
+ @Test public void uninvokedOrFailedAmHasNoObservedZeroTopCount(){var d=new ReviewBingNavigation.ReadDiagnostic(1,ReviewBingNavigation.PairGate.ACTIVITIES_READ,ReviewBingNavigation.FixedRead.notRun(),ReviewBingNavigation.FixedRead.notRun(),BingNavigationSnapshot.FirstGate.NOT_APPLIED,BingNavigationSnapshot.ReadOnlyGate.NOT_APPLIED,true);assertFalse(d.top().observed());assertEquals(-1,d.top().tokens());assertTrue(d.summary().contains("observed=false"));}
+}

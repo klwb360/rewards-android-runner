@@ -1,0 +1,7 @@
+package com.aliothmoon.maafw.once;
+import org.junit.Test;import static org.junit.Assert.*;
+public class EntryDiagnosticBudgetTest {
+ @Test public void runFirstAndEachSlotOnce()throws Exception{var b=new EntryDiagnosticBudget(s->{});assertThrows(SecurityException.class,()->b.burn(EntryDiagnosticBudget.Slot.DIAGNOSTIC_READ_1));b.burn(EntryDiagnosticBudget.Slot.RUN_1);b.burn(EntryDiagnosticBudget.Slot.DIAGNOSTIC_READ_1);for(var s:EntryDiagnosticBudget.Slot.values())assertThrows(SecurityException.class,()->b.burn(s));}
+ @Test public void uncertainBurnCannotBeRetried()throws Exception{var b=new EntryDiagnosticBudget(s->{throw new java.io.IOException();});assertThrows(java.io.IOException.class,()->b.burn(EntryDiagnosticBudget.Slot.RUN_1));assertThrows(SecurityException.class,()->b.burn(EntryDiagnosticBudget.Slot.RUN_1));assertThrows(SecurityException.class,()->b.burn(EntryDiagnosticBudget.Slot.DIAGNOSTIC_READ_1));assertTrue(b.summary().contains("slotWriteUncertain=true"));}
+ @Test public void newWindowDoesNotRenewV46(){var p=ReadOnlyCheckpoint.ENTRY_DIAGNOSTIC_V47;assertEquals(1794479100000L,p.starts());assertEquals(1794484800000L,p.expires());assertFalse(p.admissionCurrent(p.expires()-180000));assertEquals(1794483900000L,ReadOnlyCheckpoint.REWARDS_ENTRY_V46.expires());assertNotEquals(p.directory(),ReadOnlyCheckpoint.REWARDS_ENTRY_V46.directory());assertEquals(-1,p.sourceTask());}
+}

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+   API 30 及以下的自动备份规则；API 31+ 看 data_extraction_rules.xml
+   See https://developer.android.com/guide/topics/data/autobackup
+-->
+<full-backup-content>
+    <!-- 录制的解锁手势等价于锁屏凭证，且按本机屏幕录制，不进备份 -->
+    <exclude domain="file" path="unlock/" />
+</full-backup-content>

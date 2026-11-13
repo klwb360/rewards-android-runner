@@ -1,0 +1,174 @@
+package com.aliothmoon.maafw.runner
+
+import com.aliothmoon.maafw.domain.RunConfigurationId
+import com.aliothmoon.maafw.i18n.UiText
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
+
+/** 与 MaaFramework 的唯一执行边界；隐藏 JNI / handle / callback */
+interface RunnerPort {
+    val state: StateFlow<RunnerState>
+    val events: Flow<RunnerEventEnvelope>
+
+    /** [executionId] 由编排层先生成：会话日志在 start 之前就要按它开文件 */
+    suspend fun start(plan: RunPlan, executionId: String): RunnerCommandResult
+    suspend fun stop(): RunnerCommandResult
+}
+
+/** 轮次与任务名在收到回调时冻下：日志异步消费，那时 state 可能已进下一个任务甚至下一轮 */
+data class RunnerEventEnvelope(
+    val executionId: String,
+    val taskLabel: String?,
+    val event: RunnerEvent,
+)
+
+data class RunnerState(
+    val phase: RunnerPhase = RunnerPhase.Idle,
+    val activeExecution: ActiveExecution? = null,
+    /** 仅内存；进程重启可清空 */
+    val latestResult: ExecutionResult? = null,
+)
+
+sealed interface RunnerPhase {
+    data class Unavailable(val reason: String) : RunnerPhase
+    data object Idle : RunnerPhase
+    data object Preparing : RunnerPhase
+    data object Running : RunnerPhase
+    data object Stopping : RunnerPhase
+}
+
+/** 配置锁定与启停态共用；新增 phase 时只改此处 */
+val RunnerPhase.isBusy: Boolean
+    get() = this == RunnerPhase.Preparing || this == RunnerPhase.Running || this == RunnerPhase.Stopping
+
+data class ActiveExecution(
+    val executionId: String,
+    val runConfigurationId: RunConfigurationId,
+    val currentTaskName: String?,
+    /** 恒等于 [taskResults] 的条数：已结束的才算完成，正在跑的那条不算 */
+    val completedTaskCount: Int,
+    val totalTaskCount: Int,
+    val taskResults: List<TaskResult>,
+    /** 本轮冻住的 name → 展示名；缺的回落 [currentTaskName] */
+    val taskLabels: Map<String, String> = emptyMap(),
+) {
+    val currentTaskLabel: String?
+        get() = currentTaskName?.let { taskLabels[it]?.takeIf(String::isNotBlank) ?: it }
+}
+
+data class TaskResult(
+    val taskName: String,
+    val success: Boolean,
+    val message: String? = null,
+)
+
+sealed interface ExecutionResult {
+    val taskResults: List<TaskResult>
+
+    data class Completed(override val taskResults: List<TaskResult>) : ExecutionResult
+    data class CompletedWithFailures(override val taskResults: List<TaskResult>) : ExecutionResult
+    data class Cancelled(override val taskResults: List<TaskResult>) : ExecutionResult
+    data class Failed(val reason: UiText, override val taskResults: List<TaskResult> = emptyList()) : ExecutionResult
+}
+
+/** 旁路观测（日志/进度）；不参与状态机判定 */
+sealed interface RunnerEvent {
+    /** 只给观察者对账用的节点，本身不成行；日志、屏保这类展示面一律跳过 */
+    sealed interface Marker : RunnerEvent
+
+    /**
+     * 一轮的最后一个事件，带着这一轮的结局；会话日志等它被消费到再关文件
+     *
+     * 结局随事件走而不是让消费方回头看 state：marker 先于 phase 收回 Idle 发出，
+     * 回头看的那一刻 state 可能还没翻过来，也可能已经是下一轮
+     */
+    data class ExecutionFinished(val result: ExecutionResult) : Marker
+
+    /** 外壳自产的一句话，不是 MaaFramework 的原话 */
+    data class Log(val message: String) : RunnerEvent
+
+    data class Progress(val taskName: String, val completed: Int, val total: Int) : RunnerEvent
+
+    /**
+     * 一个任务跑完，[index] 与开跑时那条 [Progress.completed] 相同
+     *
+     * 与 [Progress]、[ExecutionFinished] 同走这一条有序流：遥测按它收任务 Span，
+     * 看 state 里的 taskResults 会与事件乱序，看框架的 `Tasker.Task.*` 又可能晚于整轮终局
+     *
+     * [cancelled] 为真时任务没成功是因为外壳叫停了这一轮（手动停、抢占、时长上限），不是它自己失败
+     */
+    data class TaskFinished(val index: Int, val success: Boolean, val cancelled: Boolean = false) : Marker
+
+    /**
+     * MaaFramework 的一条原样通知
+     *
+     * 两段分开带，不在这里拼串：拼上之后消费方既没法按事件名分类，也没法把
+     * [details] 单独折叠起来。识别哪一类看 [message] 前缀，不另设事件类型
+     */
+    data class Callback(val message: String, val details: String) : RunnerEvent
+
+    /** 事件名为空——协议异常，[raw] 是原样详情 */
+    data class MalformedCallback(val raw: String) : RunnerEvent
+
+    /**
+     * agent child 的一行输出；与 MaaFramework 的通知不是同一回事，单列一档
+     *
+     * [fromStderr] 的用处是把「agent 自己 print 的」与「加载器、解释器写的」分开——
+     * 链接器的 unused DT entry 警告走 stderr，那不是 agent 在说话
+     */
+    data class AgentOutput(val line: String, val fromStderr: Boolean) : RunnerEvent {
+        /** 特权进程按窗口攒批，[line] 可能是用换行连起来的好几行 */
+        val lineCount: Int get() = line.count { it == '\n' } + 1
+    }
+
+    /**
+     * 一个 agent child 已经 MaaAgentClientConnect 成功（或本轮复用了还活着的）
+     *
+     * 不是 child 自己 print 的，也不是 MaaFramework 回调——编排层的事实，单独一档才能进进度档
+     *
+     * [exec] 是特权进程真正 exec 的那条路径（来自 `agent-runtime.json`），不是 PI 的 child_exec：
+     * 后者按桌面端整条命令行写，设备上根本没跑那个东西，显示出来只会误导排障
+     *
+     * [name] 来自配方 `agent.runtimes[].name`，写了就优先显示
+     */
+    data class AgentConnected(val index: Int, val total: Int, val exec: String, val name: String? = null) : RunnerEvent {
+        val label: String get() = agentLabel(name, exec, index)
+    }
+
+    /**
+     * 一个 agent child 没被要求退出却退了：崩溃、被系统杀掉、或自己提前退出
+     *
+     * 特权进程等在 child 上得来的事实，不靠 MaaFramework 报——框架要到下一次 custom 调用超时才知道对端没了
+     *
+     * [crashReport] 是 `log/crash/` 下的现场文件名，只有被 debuggerd 接管的信号（SIGSEGV、SIGABRT 这些）才有
+     */
+    data class AgentExited(
+        val index: Int,
+        val exec: String,
+        val exitCode: Int,
+        val crashReport: String? = null,
+        val name: String? = null,
+    ) : RunnerEvent {
+        val label: String get() = agentLabel(name, exec, index)
+
+        val signal: Int? get() = AgentExitCode.signalOf(exitCode)
+    }
+
+    /**
+     * PI 声明的消息模板，唯一一条不是原始转储的事件（见 [FocusMessage]）
+     *
+     * [details] 是同一条回调的原始详情：遥测要从 `node_details` 里分出失败阶段，展示侧不用它
+     */
+    data class Focus(val focus: FocusMessage, val details: String = "") : RunnerEvent
+}
+
+/** 配方 `agent.runtimes[].name` 写了就用它，否则取可执行体的文件名 */
+internal fun agentLabel(name: String?, exec: String, index: Int): String =
+    name?.takeIf(String::isNotBlank)
+        ?: exec.substringAfterLast('/').substringAfterLast('\\').ifBlank { "agent[$index]" }
+
+sealed interface RunnerCommandResult {
+    data object Accepted : RunnerCommandResult
+    /** [error] 是外壳这一侧接住的异常；特权进程里的失败只回一个 false，现场在调试模式抓的 logcat 里 */
+    data class Rejected(val reason: UiText, val error: Throwable? = null) : RunnerCommandResult
+}

@@ -1,0 +1,870 @@
+package com.aliothmoon.maafw.session
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.aliothmoon.maafw.config.ConfigurationResolver
+import com.aliothmoon.maafw.config.UserConfigurationStore
+import com.aliothmoon.maafw.config.passwordFields
+import com.aliothmoon.maafw.config.withPasswordFieldsMarked
+import com.aliothmoon.maafw.config.withSecretFields
+import com.aliothmoon.maafw.R
+import com.aliothmoon.maafw.constant.AppFiles
+import com.aliothmoon.maafw.constant.AppPaths
+import com.aliothmoon.maafw.domain.ConfiguredTask
+import com.aliothmoon.maafw.domain.Diagnostic
+import com.aliothmoon.maafw.domain.DiagnosticSeverity
+import com.aliothmoon.maafw.domain.OptionValue
+import com.aliothmoon.maafw.domain.duplicateTask
+import com.aliothmoon.maafw.domain.renameTask
+import com.aliothmoon.maafw.domain.RunConfiguration
+import com.aliothmoon.maafw.domain.OverlayControlMode
+import com.aliothmoon.maafw.domain.RunConfigurationId
+import com.aliothmoon.maafw.domain.RunMode
+import com.aliothmoon.maafw.domain.UserConfiguration
+import com.aliothmoon.maafw.domain.duplicate
+import com.aliothmoon.maafw.privileged.DisplaySizeGateway
+import com.aliothmoon.maafw.privileged.DisplaySizeResult
+import com.aliothmoon.maafw.privileged.PermissionGateway
+import com.aliothmoon.maafw.privileged.PrivilegedServicePort
+import com.aliothmoon.maafw.privileged.RemoteAccessFailure
+import com.aliothmoon.maafw.privileged.remoteAccessMessage
+import com.aliothmoon.maafw.privileged.PrivilegedServiceState
+import com.aliothmoon.maafw.privileged.RemoteAccessState
+import com.aliothmoon.maafw.privileged.ServiceBindResult
+import com.aliothmoon.maafw.privileged.ShizukuReadiness
+import com.aliothmoon.maafw.privileged.SystemPermission
+import com.aliothmoon.maafw.privileged.SystemPermissionState
+import com.aliothmoon.maafw.privileged.callWithTimeout
+import com.aliothmoon.maafw.project.PiInstallCoordinator
+import com.aliothmoon.maafw.project.ProjectRepository
+import com.aliothmoon.maafw.project.ProjectState
+import com.aliothmoon.maafw.project.ResolvedWelcome
+import com.aliothmoon.maafw.project.WelcomeResolver
+import com.aliothmoon.maafw.domain.ResolvedProjectSession
+import com.aliothmoon.maafw.runner.FocusChannel
+import com.aliothmoon.maafw.runner.FocusDispatcher
+import com.aliothmoon.maafw.runner.FocusMessage
+import com.aliothmoon.maafw.runner.GameFpsWatcher
+import com.aliothmoon.maafw.runner.PreviewPort
+import com.aliothmoon.maafw.runner.PreviewTouchMarker
+import com.aliothmoon.maafw.runner.RunLogSnapshot
+import com.aliothmoon.maafw.runner.RunLaunchResult
+import com.aliothmoon.maafw.runner.RunLauncher
+import com.aliothmoon.maafw.runner.RunTrigger
+import com.aliothmoon.maafw.runner.ConfirmToken
+import com.aliothmoon.maafw.runner.RunLogRecorder
+import com.aliothmoon.maafw.runner.RunnerCommandResult
+import com.aliothmoon.maafw.runner.RunnerPort
+import com.aliothmoon.maafw.runner.RunnerState
+import com.aliothmoon.maafw.runner.focusPlainText
+import com.aliothmoon.maafw.runner.isBusy
+import com.aliothmoon.maafw.runner.ResolutionPreset
+import com.aliothmoon.maafw.theme.ThemeStyle
+import com.aliothmoon.maafw.i18n.uiTextFormatted
+import com.aliothmoon.maafw.i18n.uiTextFromProject
+import com.aliothmoon.maafw.i18n.uiTextOf
+import com.aliothmoon.maafw.ui.i18n.diagnosticsSummaryUiText
+import com.aliothmoon.maafw.settings.AppSettingsGateway
+import com.aliothmoon.maafw.MaaDispatchers
+import com.aliothmoon.maafw.i18n.AppLocales
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import timber.log.Timber
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.time.Duration.Companion.seconds
+
+/** app 设置的一次快照；combine 的元数上限是 5，几项设置得先并成一个 */
+private data class SettingsSnapshot(
+    val runMode: RunMode,
+    val overlayControlMode: OverlayControlMode,
+    val screenSaverEnabled: Boolean,
+    val resolutionPreset: ResolutionPreset,
+    val debugMode: Boolean,
+    val saveOnError: Boolean = true,
+    val themeStyle: ThemeStyle = ThemeStyle.DEFAULT,
+    val quick: QuickSnapshot = QuickSnapshot(),
+)
+
+
+/** 快捷面板「自动设置」那两项；同样只为压元数 */
+private data class QuickSnapshot(
+    val closeAppAfterTask: Boolean = false,
+    val touchPreviewEnabled: Boolean = true,
+    val telemetryEnabled: Boolean = true,
+)
+
+/** 提权相关几条流的一次快照；只为把外层 combine 的元数压回 4 以内 */
+private data class PrivilegedSnapshot(
+    val access: RemoteAccessState,
+    val granting: Boolean,
+    val readiness: ShizukuReadiness,
+    val serviceState: PrivilegedServiceState,
+    val systemPermissions: SystemPermissionState,
+)
+
+class SessionViewModel(
+    private val projectRepository: ProjectRepository,
+    private val configurationStore: UserConfigurationStore,
+    private val runnerPort: RunnerPort,
+    private val runLauncher: RunLauncher,
+    private val previewPort: PreviewPort,
+    private val permissionGateway: PermissionGateway,
+    /** 只为「立刻关掉目标应用」这一个动作 */
+    private val servicePort: PrivilegedServicePort,
+    /** 主屏分辨率的改与撤；前台模式的前置条件都由它判 */
+    private val displaySize: DisplaySizeGateway,
+    private val appSettings: AppSettingsGateway,
+    /** 已补完的 focus 模板；补完在进程级做，见 [FocusDispatcher] */
+    private val focusDispatcher: FocusDispatcher,
+    /** 运行日志的产地；VM 只转发它的流并转达「清空」 */
+    private val recorder: RunLogRecorder,
+    /** 后台运行期的实时 FPS；单独转发，不并入聚合 UI 状态 */
+    private val gameFpsWatcher: GameFpsWatcher,
+    private val piInstall: PiInstallCoordinator,
+    /** URL 形态的 welcome 要先拉正文才知道看没看过 */
+    private val welcomeResolver: WelcomeResolver,
+) : ViewModel() {
+
+    private val privilegedState: Flow<PrivilegedSnapshot> = combine(
+        permissionGateway.state,
+        permissionGateway.isGranting,
+        permissionGateway.readiness,
+        permissionGateway.serviceState,
+        permissionGateway.systemPermissions,
+    ) { access, granting, readiness, service, system ->
+        PrivilegedSnapshot(access, granting, readiness, service, system)
+    }
+
+    private val settingsState: Flow<SettingsSnapshot> = combine(
+        appSettings.runMode,
+        appSettings.overlayControlMode,
+        appSettings.screenSaverEnabled,
+        appSettings.resolutionPreset,
+        appSettings.debugMode,
+    ) { runMode, overlayMode, screenSaver, resolution, debug ->
+        SettingsSnapshot(runMode, overlayMode, screenSaver, resolution, debug)
+    }.combine(appSettings.themeStyle) { snapshot, style ->
+        snapshot.copy(themeStyle = style)
+    }.combine(appSettings.saveOnError) { snapshot, save ->
+        snapshot.copy(saveOnError = save)
+    }.combine(
+            combine(
+                appSettings.closeAppAfterTask,
+                appSettings.touchPreviewEnabled,
+                appSettings.telemetryEnabled,
+                ::QuickSnapshot,
+            ),
+        ) { snapshot, quick -> snapshot.copy(quick = quick) }
+
+    /** 当前 PI 的公告正文与指纹；未就绪、在拉取或拉取失败时为 null */
+    private val resolvedWelcome = MutableStateFlow<ResolvedWelcome?>(null)
+
+    private val welcomePrompt: Flow<List<String>> =
+        combine(resolvedWelcome, configurationStore.data) { welcome, config ->
+            welcome?.bodies?.takeIf { welcome.fingerprint != config.welcomeFingerprint }.orEmpty()
+        }.distinctUntilChanged()
+
+    /** 失效的 resource 选择写回 null 后 Resolver 不再报，这条提示只留在本进程里，重开即丢 */
+    private val staleResourceNotice = MutableStateFlow<Diagnostic?>(null)
+
+    val uiState: StateFlow<SessionUiState> = combine(
+        projectRepository.state,
+        configurationStore.data,
+        runnerPort.state,
+        privilegedState,
+        settingsState,
+    ) { project, config, runner, privileged, settings ->
+        buildUiState(project, config, runner, privileged, settings)
+    }.flowOn(MaaDispatchers.Default) // resolve 属重计算，不占用主线程
+        .combine(permissionGateway.watchdogState) { base, wd -> base.copy(watchdogState = wd) }
+        .combine(piInstall.state) { base, install -> base.copy(piInstallState = install) }
+        .combine(welcomePrompt) { base, welcome -> base.copy(welcomePrompt = welcome) }
+        .combine(staleResourceNotice) { base, notice ->
+            // 写回落定前 Resolver 自己还在报同一条，不去重会闪出两行
+            if (notice == null || base.projectState !is ProjectState.Ready || notice in base.sessionDiagnostics) {
+                base
+            } else {
+                base.copy(sessionDiagnostics = listOf(notice) + base.sessionDiagnostics)
+            }
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = SessionUiState(),
+        )
+
+    /**
+     * 预览上的触点，单独一条流不进 SessionUiState：
+     * 一次滑动能连发几十个触点，混进聚合态会让整棵树按触摸频率重组
+     */
+    val previewMarkers: StateFlow<List<PreviewTouchMarker>> = previewPort.markers
+
+    /** 预览面按它重建，见 [PreviewPort.surfaceEpoch] */
+    val previewSurfaceEpoch: StateFlow<Int> = previewPort.surfaceEpoch
+
+    /** FPS 每秒更新，独立成流避免整棵 UI 树跟着重组 */
+    val gameFps: StateFlow<Float?> = gameFpsWatcher.fps
+
+    /**
+     * 运行日志，同样单独一条流：一次长跑上千条，混进聚合态会让整棵树按日志频率重组
+     *
+     * 合成与落盘都在进程级的 [RunLogRecorder] 里，这里只是转发——挂在 VM 上时切语言
+     * Activity 一重建日志就没了，定时触发更是压根没有 VM
+     */
+    val runLog: StateFlow<RunLogSnapshot> = recorder.runLog
+
+    private val _effects = MutableSharedFlow<SessionEffect>(
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val effects: SharedFlow<SessionEffect> = _effects.asSharedFlow()
+
+    private fun emitEffect(effect: SessionEffect) {
+        _effects.tryEmit(effect)
+    }
+
+    // Intent 串行消费，保证配置写入不交错
+    private val intents = Channel<SessionIntent>(Channel.UNLIMITED)
+
+    init {
+        // 解包在前、加载在后；解包没成不要 reload，半包会被当成已解包
+        viewModelScope.launch {
+            if (piInstall.ensureInstalled()) projectRepository.ensureLoaded()
+        }
+        viewModelScope.launch {
+            for (intent in intents) handle(intent)
+        }
+        viewModelScope.launch {
+            focusDispatcher.resolved.collect { focus -> dispatchFocus(focus) }
+        }
+        viewModelScope.launch {
+            projectRepository.state
+                .map { project ->
+                    (project as? ProjectState.Ready)?.definition?.let { it.metadata to it.version }
+                }
+                .distinctUntilChanged()
+                .collectLatest { current ->
+                    resolvedWelcome.value = null
+                    resolvedWelcome.value = current?.let { (metadata, version) ->
+                        welcomeResolver.resolve(metadata, version)
+                    }
+                }
+        }
+        viewModelScope.launch {
+            combine(projectRepository.state, configurationStore.data) { p, c -> p to c }
+                .collect { (project, config) ->
+                    if (project !is ProjectState.Ready) return@collect
+                    val definition = project.definition
+                    val staleResource = ConfigurationResolver.staleResourceSelection(definition, config)
+                    if (!config.initialized) {
+                        configurationStore.update { current ->
+                            if (current.initialized) current
+                            else ConfigurationResolver.initialize(definition, current)
+                        }
+                    } else if (staleResource != null) {
+                        // PI 更新后 resource 改名或下架：存的名字清成 null（跟随第一个），提示只留本进程
+                        Timber.w("stored resource %s is no longer declared, cleared", config.activeResourceName)
+                        staleResourceNotice.value = staleResource
+                        configurationStore.update { current ->
+                            if (ConfigurationResolver.staleResourceSelection(definition, current) == null) current
+                            else current.copy(activeResourceName = null)
+                        }
+                    } else if (config.withPasswordFieldsMarked(definition) !== config) {
+                        // PI 更新后才把某个字段改成 password：旧配置里的明文补上标记，这一次写回就加密了
+                        configurationStore.update { it.withPasswordFieldsMarked(definition) }
+                    }
+                }
+        }
+    }
+
+    fun onIntent(intent: SessionIntent) {
+        intents.trySend(intent)
+    }
+
+    /**
+     * Toast 那一档
+     *
+     * Log 档归 [RunLogRecorder]，Notification 档归前台服务——后者在 app 退到后台时也得响，
+     * 拿不到 VM。三档各收各的，同一条 focus 因此可能同时走三条路，这是协议本来的语义
+     */
+    private fun dispatchFocus(focus: FocusMessage) {
+        if (FocusChannel.Toast !in focus.channels) return
+        // snackbar 是纯文本面；只有一张图的模板剥完记号什么都不剩，不弹空条
+        val text = focusPlainText(focus.content).ifEmpty { return }
+        emitEffect(SessionEffect.ShowMessage(uiTextFromProject(text)))
+    }
+
+    /** 写入口当场补 password 标记：等加载时的迁移去补的话，这一笔会先以明文落一次盘 */
+    private fun OptionValue.secured(optionName: String): OptionValue {
+        val definition = (projectRepository.state.value as? ProjectState.Ready)?.definition ?: return this
+        return withSecretFields(definition.passwordFields()[optionName])
+    }
+
+    /** Android 上跑不了的任务不让加、不让勾；UI 已锁住，这里兜住所有入口 */
+    private fun isTaskSupported(taskName: String): Boolean {
+        val definition = (projectRepository.state.value as? ProjectState.Ready)?.definition ?: return true
+        val task = definition.task(taskName) ?: return true
+        return ConfigurationResolver.isControllerSupported(definition, task)
+    }
+
+    // resolve 只依赖 (project, config)；runner tick 触发 combine 时复用缓存
+    private var resolveCacheKey: Pair<ProjectState, UserConfiguration>? = null
+    private var resolveCacheValue: ResolvedProjectSession? = null
+
+    private fun resolveCached(project: ProjectState.Ready, config: UserConfiguration): ResolvedProjectSession {
+        val cached = resolveCacheValue
+        val key = resolveCacheKey
+        if (cached != null && key != null && key.first === project && key.second === config) return cached
+        return ConfigurationResolver.resolve(project.definition, config).also {
+            resolveCacheKey = project to config
+            resolveCacheValue = it
+        }
+    }
+
+    private fun buildUiState(
+        project: ProjectState,
+        config: UserConfiguration,
+        runner: RunnerState,
+        privileged: PrivilegedSnapshot,
+        settings: SettingsSnapshot,
+    ): SessionUiState {
+        val runMode = settings.runMode
+        val base = SessionUiState(
+            projectState = project,
+            runner = runner,
+            themeMode = config.themeMode,
+            debugMode = settings.debugMode,
+            saveOnError = settings.saveOnError,
+            themeStyle = settings.themeStyle,
+            runMode = runMode,
+            overlayControlMode = settings.overlayControlMode,
+            screenSaverEnabled = settings.screenSaverEnabled,
+            closeAppAfterTask = settings.quick.closeAppAfterTask,
+            touchPreviewEnabled = settings.quick.touchPreviewEnabled,
+            telemetryEnabled = settings.quick.telemetryEnabled,
+            resolutionPreset = settings.resolutionPreset,
+            remoteAccess = privileged.access,
+            remoteAccessGranting = privileged.granting,
+            shizukuReadiness = privileged.readiness,
+            privilegedService = privileged.serviceState,
+            systemPermissions = privileged.systemPermissions,
+        )
+        if (project !is ProjectState.Ready) return base
+        val session = resolveCached(project, config)
+        val metadata = project.definition.metadata
+        return base.copy(
+            projectMetadata = metadata,
+            telemetryDeclared = project.definition.telemetry != null,
+            configurationList = session.configurationList,
+            activeConfiguration = session.activeConfiguration,
+            taskCatalog = session.taskCatalog,
+            globalOptions = session.globalOptions,
+            settingSections = session.settingSections,
+            resourceOptions = session.resourceOptions,
+            controllerOptions = session.controllerOptions,
+            environment = session.environment,
+            sessionDiagnostics = session.diagnostics,
+            previewResolution = settings.resolutionPreset.resolution,
+        )
+    }
+
+    private suspend fun handle(intent: SessionIntent) {
+        when (intent) {
+            is SessionIntent.CreateConfiguration -> guarded {
+                appendAndActivate(RunConfiguration(ConfigurationResolver.newConfigurationId(), intent.name))
+            }
+
+            is SessionIntent.CreateFromTemplate -> guarded {
+                val definition = (projectRepository.state.value as? ProjectState.Ready)?.definition
+                val created = definition?.let {
+                    ConfigurationResolver.createFromTemplate(
+                        definition = it,
+                        templateName = intent.templateName,
+                        configurationName = intent.configurationName,
+                        taskNames = intent.taskNames,
+                    )
+                }
+                if (created == null) {
+                    emitEffect(SessionEffect.ShowMessage(uiTextOf(R.string.msg_template_not_found, intent.templateName)))
+                } else {
+                    appendAndActivate(created)
+                }
+            }
+
+            is SessionIntent.SelectConfiguration -> guarded {
+                configurationStore.update { config ->
+                    if (config.configurations.any { it.id == intent.id }) {
+                        config.copy(activeConfigurationId = intent.id)
+                    } else {
+                        config
+                    }
+                }
+            }
+
+            is SessionIntent.DuplicateConfiguration -> guarded {
+                configurationStore.update { config ->
+                    val source = config.configuration(intent.id) ?: return@update config
+                    val duplicated = source.duplicate(
+                        id = ConfigurationResolver.newConfigurationId(),
+                        name = intent.name,
+                    )
+                    config.copy(
+                        configurations = config.configurations + duplicated,
+                        activeConfigurationId = duplicated.id,
+                    )
+                }
+            }
+
+            is SessionIntent.RenameConfiguration -> guarded {
+                mutateConfiguration(intent.id) { it.copy(name = intent.name) }
+            }
+
+            is SessionIntent.DeleteConfiguration -> guarded {
+                configurationStore.update { config ->
+                    val remaining = config.configurations.filterNot { it.id == intent.id }
+                    config.copy(
+                        configurations = remaining,
+                        activeConfigurationId = if (config.activeConfigurationId == intent.id) {
+                            remaining.firstOrNull()?.id
+                        } else {
+                            config.activeConfigurationId
+                        },
+                    )
+                }
+            }
+
+            is SessionIntent.ConfirmAddTasks -> guarded {
+                mutateConfiguration(intent.configurationId) { configuration ->
+                    val added = intent.orderedTaskNames.filter(::isTaskSupported).map { ConfiguredTask(taskName = it) }
+                    configuration.copy(tasks = configuration.tasks + added)
+                }
+            }
+
+            is SessionIntent.RemoveTask -> guarded {
+                mutateConfiguration(intent.configurationId) { configuration ->
+                    configuration.copy(
+                        tasks = configuration.tasks.filterNot { it.instanceId == intent.taskInstanceId },
+                    )
+                }
+            }
+            is SessionIntent.DuplicateTask -> guarded {
+                mutateConfiguration(intent.configurationId) {
+                    it.duplicateTask(intent.taskInstanceId, intent.customLabel)
+                }
+            }
+
+            is SessionIntent.RenameTask -> guarded {
+                mutateConfiguration(intent.configurationId) {
+                    it.renameTask(intent.taskInstanceId, intent.customLabel)
+                }
+            }
+
+            is SessionIntent.ToggleTask -> guarded {
+                mutateTask(intent.configurationId, intent.taskInstanceId) {
+                    if (intent.enabled && !isTaskSupported(it.taskName)) it else it.copy(enabled = intent.enabled)
+                }
+            }
+
+            is SessionIntent.MoveTask -> guarded {
+                mutateConfiguration(intent.configurationId) { configuration ->
+                    val tasks = configuration.tasks.toMutableList()
+                    val index = tasks.indexOfFirst { it.instanceId == intent.taskInstanceId }
+                    if (index < 0) return@mutateConfiguration configuration
+                    val task = tasks.removeAt(index)
+                    tasks.add(intent.targetIndex.coerceIn(0, tasks.size), task)
+                    configuration.copy(tasks = tasks)
+                }
+            }
+
+            is SessionIntent.SetTaskOption -> guarded {
+                val value = intent.value.secured(intent.optionName)
+                mutateTask(intent.configurationId, intent.taskInstanceId) { task ->
+                    task.copy(optionValues = task.optionValues + (intent.optionName to value))
+                }
+            }
+
+            is SessionIntent.SetGlobalOption -> guarded {
+                val value = intent.value.secured(intent.optionName)
+                configurationStore.update {
+                    it.copy(globalOptionValues = it.globalOptionValues + (intent.optionName to value))
+                }
+            }
+
+            is SessionIntent.SetResourceOption -> guarded {
+                val known = (projectRepository.state.value as? ProjectState.Ready)
+                    ?.definition?.resources?.any { it.name == intent.resourceName } == true
+                if (!known) return@guarded
+                val value = intent.value.secured(intent.optionName)
+                configurationStore.update { config ->
+                    val current = config.resourceOptionValues[intent.resourceName].orEmpty()
+                    config.copy(
+                        resourceOptionValues = config.resourceOptionValues +
+                            (intent.resourceName to (current + (intent.optionName to value))),
+                    )
+                }
+            }
+
+            is SessionIntent.SetControllerOption -> guarded {
+                val known = (projectRepository.state.value as? ProjectState.Ready)
+                    ?.definition?.controllers?.any { it.name == intent.controllerName } == true
+                if (!known) return@guarded
+                val value = intent.value.secured(intent.optionName)
+                configurationStore.update { config ->
+                    val current = config.controllerOptionValues[intent.controllerName].orEmpty()
+                    config.copy(
+                        controllerOptionValues = config.controllerOptionValues +
+                            (intent.controllerName to (current + (intent.optionName to value))),
+                    )
+                }
+            }
+
+            is SessionIntent.SelectResource -> guarded {
+                configurationStore.update { it.copy(activeResourceName = intent.resourceName) }
+                // 用户自己选过了，「已回退到 X」那句不再成立
+                staleResourceNotice.value = null
+            }
+
+            is SessionIntent.SelectController -> guarded {
+                configurationStore.update { it.copy(activeControllerName = intent.controllerName) }
+            }
+
+            // 展示偏好不锁配置、不改变 Definition/RunPlan
+            is SessionIntent.SetThemeMode ->
+                configurationStore.update { it.copy(themeMode = intent.mode) }
+
+            // 只有开启才重启：setup() 每轮现读 debugMode，关掉之后下一轮自然是 false，
+            // 没必要把用户的页面掀掉；已经起来的 logcat 抓取不去停它，多抓几行不影响什么
+            is SessionIntent.SetDebugMode -> {
+                appSettings.setDebugMode(intent.enabled)
+                if (intent.enabled) emitEffect(SessionEffect.RestartApp)
+            }
+
+            // 环境开关：每轮 setup 后现读，运行中改不影响本轮已冻结的状态
+            is SessionIntent.SetSaveOnError ->
+                appSettings.setSaveOnError(intent.enabled)
+
+            is SessionIntent.SetThemeStyle ->
+                appSettings.setThemeStyle(intent.style)
+
+
+            // 运行模式在 prepare 阶段读一次就固定，运行中改会让这轮的屏与下轮的判定对不上
+            is SessionIntent.SetRunMode -> guarded {
+                appSettings.setRunMode(intent.mode)
+            }
+
+            is SessionIntent.SetOverlayControlMode -> guarded {
+                appSettings.setOverlayControlMode(intent.mode)
+            }
+
+            is SessionIntent.SetResolutionPreset -> guarded {
+                appSettings.setResolutionPreset(intent.preset)
+            }
+
+            // 以下几项都不走 guarded：改的是环境动作，与运行配置无关，
+            // 运行中恰恰是它们最该动的时候
+            is SessionIntent.SetScreenSaverEnabled ->
+                appSettings.setScreenSaverEnabled(intent.enabled)
+
+            is SessionIntent.SetCloseAppAfterTask ->
+                appSettings.setCloseAppAfterTask(intent.enabled)
+
+            is SessionIntent.SetTelemetryEnabled ->
+                appSettings.setTelemetryEnabled(intent.enabled)
+
+            is SessionIntent.SetTouchPreviewEnabled ->
+                appSettings.setTouchPreviewEnabled(intent.enabled)
+
+            SessionIntent.ShowOverlay -> openControlOverlay()
+            SessionIntent.ApplyForegroundResolution -> applyForegroundResolution()
+            SessionIntent.ResetForegroundResolution -> resetForegroundResolution()
+            SessionIntent.ShowScreenSaver -> emitEffect(SessionEffect.ShowScreenSaver)
+            SessionIntent.CaptureVirtualDisplay -> captureVirtualDisplay()
+            // 关目标应用即停虚拟屏：屏没了应用跟着退，不必让 app 侧知道包名
+            // 只用现成连接：一颗次级按钮，不值得为它弹授权请求。stopVirtualDisplay 不是 oneway，远端卡住会挂住调用方
+            SessionIntent.CloseTargetApp -> servicePort.callWithTimeout(CLOSE_TARGET_TIMEOUT) {
+                it.stopVirtualDisplay()
+            }
+
+            // 语言切换会触发 PI 重载（翻译加载期物化），运行中同样拦截
+            is SessionIntent.SetLanguage -> guarded {
+                AppLocales.apply(intent.localeTag)
+            }
+
+            SessionIntent.ReloadProject -> guarded {
+                projectRepository.reload()
+            }
+
+            SessionIntent.DismissWelcome -> {
+                val fingerprint = resolvedWelcome.value?.fingerprint
+                if (fingerprint != null) {
+                    configurationStore.update { it.copy(welcomeFingerprint = fingerprint) }
+                }
+            }
+
+            SessionIntent.ReinstallPi -> guarded {
+                if (piInstall.reinstall()) projectRepository.reload()
+            }
+
+            is SessionIntent.Start -> start(intent.surface, intent.acknowledged)
+            SessionIntent.Stop -> stop()
+
+            // 不走 guarded：预览与配置写入无关，运行中反而更需要它
+            is SessionIntent.AttachPreviewSurface -> previewPort.attachSurface(intent.surface)
+            SessionIntent.DetachPreviewSurface -> previewPort.detachSurface()
+
+            is SessionIntent.PreviewTouch -> when (intent.action) {
+                PreviewTouchAction.Down -> previewPort.touchDown(intent.x, intent.y, intent.contact)
+                PreviewTouchAction.Move -> previewPort.touchMove(intent.x, intent.y, intent.contact)
+                PreviewTouchAction.Up -> previewPort.touchUp(intent.x, intent.y, intent.contact)
+            }
+
+            // 提权一律不走 guarded：它不改 UserConfiguration，运行中断了连也得能重授
+            SessionIntent.RequestRemoteAccess -> permissionGateway.requestRemoteAccess()
+            SessionIntent.TogglePrivilegedService -> togglePrivilegedService()
+            SessionIntent.SkipShizukuCheck -> permissionGateway.skipShizukuCheck()
+            SessionIntent.InstallShizuku -> emitEffect(SessionEffect.InstallShizuku)
+            SessionIntent.OpenShizuku -> emitEffect(SessionEffect.OpenShizuku)
+            is SessionIntent.RequestSystemPermission -> requestSystemPermission(intent.permission)
+
+            SessionIntent.RefreshPermissions -> permissionGateway.refresh()
+
+            SessionIntent.ClearRunLog -> recorder.clear()
+        }
+    }
+
+    private suspend fun captureVirtualDisplay() {
+        if (appSettings.runMode.value != RunMode.BACKGROUND) {
+            emitEffect(SessionEffect.ShowMessage(uiTextOf(R.string.msg_screenshot_failed)))
+            return
+        }
+
+        val dir = File(AppPaths.LOG_DIR, AppFiles.MANUAL_SCREENSHOT_DIR)
+        val target = File(dir, "manual_${SCREENSHOT_STAMP.format(Date())}.png")
+        val saved = servicePort.callWithTimeout(CAPTURE_TIMEOUT) {
+            it.saveDisplayFrame(target.absolutePath).also { pruneManualScreenshots(dir) }
+        } == true
+
+        emitEffect(
+            SessionEffect.ShowMessage(
+                uiTextOf(if (saved) R.string.msg_screenshot_saved else R.string.msg_screenshot_failed),
+            ),
+        )
+    }
+
+    private fun pruneManualScreenshots(dir: File) {
+        dir.listFiles()
+            ?.filter { it.isFile }
+            ?.sortedByDescending { it.lastModified() }
+            ?.drop(MANUAL_SCREENSHOT_KEEP)
+            ?.forEach { it.delete() }
+    }
+
+    /** Screen 禁用之外的第二层写锁：写入前再读 RunnerState */
+    private suspend fun guarded(block: suspend () -> Unit) {
+        if (locked()) {
+            emitEffect(SessionEffect.ShowMessage(uiTextOf(R.string.msg_locked_while_running)))
+            return
+        }
+        block()
+    }
+
+    private fun locked(): Boolean = runnerPort.state.value.phase.isBusy
+
+    private suspend fun appendAndActivate(configuration: RunConfiguration) {
+        configurationStore.update { config ->
+            config.copy(
+                configurations = config.configurations + configuration,
+                activeConfigurationId = configuration.id,
+            )
+        }
+    }
+
+    private suspend fun mutateConfiguration(
+        id: RunConfigurationId,
+        transform: (RunConfiguration) -> RunConfiguration,
+    ) {
+        configurationStore.update { config ->
+            config.copy(
+                configurations = config.configurations.map {
+                    if (it.id == id) transform(it) else it
+                },
+            )
+        }
+    }
+
+    private suspend fun mutateTask(
+        configurationId: RunConfigurationId,
+        taskInstanceId: String,
+        transform: (ConfiguredTask) -> ConfiguredTask,
+    ) {
+        mutateConfiguration(configurationId) { configuration ->
+            configuration.copy(
+                tasks = configuration.tasks.map {
+                    if (it.instanceId == taskInstanceId) transform(it) else it
+                },
+            )
+        }
+    }
+
+    /**
+     * 先试特权代授，不成再把用户送去系统权限页
+     *
+     * 两条路都得留：代授要特权进程在线，而无障碍这类项被系统页撤掉之后
+     * 只靠上线那次全集代授补不回来
+     */
+    private suspend fun requestSystemPermission(permission: SystemPermission) {
+        if (permissionGateway.quickGrant(permission)) return
+        emitEffect(SessionEffect.RequestSystemPermission(permission))
+    }
+
+    /**
+     * 断开只是解绑，特权进程本体还在（它有自己的看门狗）
+     * 运行中不拦：跑飞了的时候用户就该能一脚踹开这条连接
+     */
+    private suspend fun togglePrivilegedService() {
+        if (permissionGateway.serviceState.value == PrivilegedServiceState.Connected) {
+            permissionGateway.unbindService()
+            return
+        }
+        val message = when (val result = permissionGateway.bindService()) {
+            ServiceBindResult.Started, ServiceBindResult.AlreadyConnected -> return
+            is ServiceBindResult.BackendUnavailable ->
+                remoteAccessMessage(result.backend, RemoteAccessFailure.UNAVAILABLE)
+
+            is ServiceBindResult.AuthRejected ->
+                remoteAccessMessage(result.backend, RemoteAccessFailure.NOT_GRANTED)
+
+            is ServiceBindResult.Failed -> uiTextOf(R.string.msg_bind_service_failed, result.reason)
+        }
+        emitEffect(SessionEffect.ShowMessage(message))
+    }
+
+    /**
+     * 打开控制层前的两道闸：特权后端连上了没、主屏比例合不合
+     *
+     * 校验放在这里而不是 `OverlayController`：那一层只管挂窗口，判不出「该不该挂」；
+     * 而且拦下之后要给的是可操作的提示（去改分辨率），那是 UI 层的事
+     */
+    private suspend fun openControlOverlay() {
+        if (permissionGateway.serviceState.value != PrivilegedServiceState.Connected) {
+            emitEffect(SessionEffect.ShowMessage(uiTextOf(R.string.foreground_service_required)))
+            return
+        }
+        if (!displaySize.isAspectSupported()) {
+            emitEffect(SessionEffect.ShowMessage(uiTextOf(R.string.foreground_resolution_required)))
+            return
+        }
+        emitEffect(SessionEffect.ShowOverlay)
+    }
+
+    private suspend fun applyForegroundResolution() {
+        report(displaySize.applyFit16x9())
+    }
+
+    private suspend fun resetForegroundResolution() {
+        report(displaySize.reset())
+    }
+
+    private suspend fun report(result: DisplaySizeResult) {
+        val message = when (result) {
+            is DisplaySizeResult.Applied ->
+                uiTextOf(
+                    R.string.foreground_resolution_applied,
+                    uiTextFormatted("${result.width}x${result.height}"),
+                )
+
+            DisplaySizeResult.Cleared -> uiTextOf(R.string.foreground_resolution_cleared)
+            DisplaySizeResult.ServiceUnavailable -> uiTextOf(R.string.foreground_service_required)
+            is DisplaySizeResult.Failed -> result.reason
+        }
+        emitEffect(SessionEffect.ShowMessage(message))
+    }
+
+    /**
+     * 发起本身在 [RunLauncher]（进程级，定时触发共用同一条）；这里只把结局翻成 UI 消息
+     *
+     * 前台拦截分两层：这里拦应用内入口（前台模式没有应用内的预览环境），
+     * ForegroundModePrecheck 拦定时（没人看着的那轮不占主屏）；悬浮窗手动放行
+     */
+    private suspend fun start(surface: TaskSurface, acknowledged: Set<ConfirmToken>) {
+        if (surface == TaskSurface.InApp && appSettings.runMode.value == RunMode.FOREGROUND) {
+            emitEffect(SessionEffect.ShowMessage(uiTextOf(R.string.runner_foreground_blocked)))
+            return
+        }
+        // 悬浮窗里弹不了确认框：提醒类照跑，由运行日志兜底
+        val trigger = when (surface) {
+            TaskSurface.InApp -> RunTrigger.Manual
+            TaskSurface.Overlay -> RunTrigger.Overlay
+        }
+        when (val result = runLauncher.launch(trigger, acknowledged)) {
+            // 手动发起不传 requestId，这条到不了
+            RunLaunchResult.Started, RunLaunchResult.DuplicateRequest -> Unit
+
+            RunLaunchResult.ProjectNotReady ->
+                emitEffect(SessionEffect.ShowMessage(uiTextOf(R.string.msg_project_not_loaded)))
+
+            RunLaunchResult.NoExecutableTasks ->
+                emitEffect(SessionEffect.ShowMessage(uiTextOf(R.string.msg_no_executable_tasks)))
+
+            // 首页只跑当前激活的配置，不点名，所以这条到不了这里；定时才会撞上
+            RunLaunchResult.ConfigurationMissing ->
+                emitEffect(
+                    SessionEffect.ShowMessage(uiTextOf(R.string.schedule_reason_configuration_missing)),
+                )
+
+            is RunLaunchResult.Invalid -> {
+                emitEffect(SessionEffect.ShowDiagnostics(result.diagnostics))
+                if (surface == TaskSurface.Overlay) {
+                    val errors = result.diagnostics.count { it.severity == DiagnosticSeverity.Error }
+                    emitEffect(
+                        SessionEffect.ShowMessage(
+                            diagnosticsSummaryUiText(result.diagnostics.size, errors),
+                        ),
+                    )
+                }
+            }
+
+            is RunLaunchResult.Rejected ->
+                emitEffect(SessionEffect.ShowMessage(uiTextOf(R.string.msg_cannot_start, result.reason)))
+
+            is RunLaunchResult.Blocked ->
+                emitEffect(SessionEffect.ShowMessage(result.reason))
+
+            is RunLaunchResult.NeedsConfirmation ->
+                emitEffect(SessionEffect.ConfirmStart(result.prompt, acknowledged + result.token))
+        }
+    }
+
+    private suspend fun stop() {
+        when (val command = runnerPort.stop()) {
+            is RunnerCommandResult.Accepted -> Unit
+            is RunnerCommandResult.Rejected ->
+                emitEffect(SessionEffect.ShowMessage(uiTextOf(R.string.msg_cannot_stop, command.reason)))
+        }
+    }
+
+    private companion object {
+        // 整帧 PNG 编码在特权进程里做，高分辨率下要几百毫秒
+        val CAPTURE_TIMEOUT = 5.seconds
+        val CLOSE_TARGET_TIMEOUT = 5.seconds
+        const val MANUAL_SCREENSHOT_KEEP = 20
+        val SCREENSHOT_STAMP = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
+    }
+}

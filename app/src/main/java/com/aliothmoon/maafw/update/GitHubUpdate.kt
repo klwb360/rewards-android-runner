@@ -1,0 +1,313 @@
+package com.aliothmoon.maafw.update
+
+import com.aliothmoon.maafw.R
+import com.aliothmoon.maafw.constant.MiscConstants
+import com.aliothmoon.maafw.i18n.uiTextFromFramework
+import com.aliothmoon.maafw.i18n.uiTextOf
+import com.aliothmoon.maafw.util.HttpClientHelper
+import com.aliothmoon.maafw.util.boolean
+import com.aliothmoon.maafw.util.parseJsonArray
+import com.aliothmoon.maafw.util.parseJsonObject
+import com.aliothmoon.maafw.util.readBody
+import com.aliothmoon.maafw.util.string
+import io.github.z4kn4fein.semver.Version
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import timber.log.Timber
+import kotlin.coroutines.cancellation.CancellationException
+
+/**
+ * GitHub releases 的 API 取数与解析：分页拉全量 release 列表，检查与解析在其上各取所需
+ */
+internal class GitHubReleasesApi(
+    private val helper: HttpClientHelper,
+) {
+    internal data class Release(
+        val tag: String,
+        val htmlUrl: String?,
+        val body: String?,
+        val assets: List<Asset>,
+        val prerelease: Boolean = false,
+    )
+
+    internal data class Eligible(
+        val release: Release,
+        val version: Version,
+        val asset: Asset,
+    )
+
+    internal data class Asset(
+        val name: String,
+        val downloadUrl: String,
+        val sha256: String?,
+    ) {
+        val isApk: Boolean get() = name.isApkUrl() || downloadUrl.isApkUrl()
+    }
+
+    /** 只认 `owner/repo`；URL 形式在 PiParser.parseMetadata 里已截成这两段，这里只兜异常输入 */
+    fun parseRepository(rawUrl: String?): String? =
+        rawUrl?.trim()?.takeIf(REPOSITORY_PATTERN::matches)
+
+    suspend fun releases(repository: String): UpdateSourceOutcome<List<Release>> {
+        val releases = mutableListOf<Release>()
+        for (page in 1..MAX_PAGES) {
+            val response = helper.get(
+                buildApiUrl(repository),
+                buildMap {
+                    put("per_page", PAGE_SIZE.toString())
+                    put("page", page.toString())
+                }, API_HEADERS
+            )
+            val sc = response.code
+            val body = response.readBody()
+            if (!sc.isSuccess()) {
+                val serverMessage = parseJsonObject(body)?.string("message")
+                return UpdateSourceOutcome.Failed(
+                    apiFailureReason(sc),
+                    detail = serverMessage?.let(::uiTextFromFramework)
+                        ?: uiTextOf(R.string.update_detail_http_status, sc),
+                )
+            }
+            val parsed = parseJsonArray(body)
+                ?: return UpdateSourceOutcome.Failed(UpdateCheckFailure.INVALID_RESPONSE)
+            if (parsed.isEmpty()) break
+            releases += parsed.filterIsInstance<JsonObject>().mapNotNull(::release)
+            if (parsed.size < PAGE_SIZE) break
+        }
+        return UpdateSourceOutcome.Ok(releases)
+    }
+
+    /** 渠道过滤 + 版本解析 + 本机能装的安装包（发版时安装包晚于 release 公开）；无一条合格返回 null */
+    fun latestEligible(releases: List<Release>, channel: UpdateChannel, abi: AndroidAbi): Eligible? =
+        releases
+            .mapNotNull { candidate ->
+                val version = UpdateVersion.parse(candidate.tag) ?: return@mapNotNull null
+                if (!version.allowedFor(channel)) return@mapNotNull null
+                if (channel == UpdateChannel.STABLE && candidate.prerelease) return@mapNotNull null
+                val asset = selectAsset(candidate.assets, abi) ?: return@mapNotNull null
+                Eligible(candidate, version, asset)
+            }
+            .maxByOrNull { it.version }
+
+    /** tag 有没有 `v` 前缀都认；不看渠道 */
+    fun releaseFor(releases: List<Release>, version: Version, abi: AndroidAbi): Eligible? =
+        releases.firstNotNullOfOrNull { candidate ->
+            if (UpdateVersion.parse(candidate.tag) != version) return@firstNotNullOfOrNull null
+            selectAsset(candidate.assets, abi)?.let { Eligible(candidate, version, it) }
+        }
+
+    fun releasesPageUrl(repository: String): String = "https://github.com/$repository/releases"
+
+    /**
+     * 单 ABI 包先挑同 ABI 的变体（标记按优先级排），没拆到再回退 universal；
+     * universal 包只挑 universal（不带任何 ABI 标记的单个 apk），不换成单 ABI 包。
+     * 都没有或 universal 歧义返回 null，交由上层报 NO_MATCHING_ASSET
+     */
+    fun selectAsset(assets: List<Asset>, abi: AndroidAbi): Asset? {
+        val apkAssets = assets.filter(Asset::isApk)
+        apkAssets
+            .mapNotNull { asset ->
+                ABI_MARKERS[abi].orEmpty().indexOfFirst { asset.name.matchesAlias(it) }
+                    .takeIf { it >= 0 }
+                    ?.let { it to asset }
+            }
+            .minByOrNull { it.first }
+            ?.second
+            ?.let { return it }
+        return apkAssets
+            .filterNot { asset -> ALL_ABI_MARKERS.any { asset.name.matchesAlias(it) } }
+            .singleOrNull()
+    }
+
+    private fun release(raw: JsonObject): Release? {
+        val tag = raw.string("tag_name") ?: return null
+        return Release(
+            tag = tag,
+            htmlUrl = raw.string("html_url"),
+            body = raw.string("body")?.replace(DOWNLOAD_SECTION_PATTERN, ""),
+            assets = (raw["assets"] as? JsonArray)
+                ?.filterIsInstance<JsonObject>()
+                ?.mapNotNull(::asset)
+                .orEmpty(),
+            prerelease = raw.boolean("prerelease") ?: false,
+        )
+    }
+
+    private fun asset(raw: JsonObject): Asset? {
+        if (raw.string("state")?.let { it != "uploaded" } == true) return null
+        val apiUrl = raw.string("url")
+        val browserUrl = raw.string("browser_download_url")
+        val downloadUrl = browserUrl ?: apiUrl ?: return null
+        return Asset(
+            name = raw.string("name") ?: downloadUrl.substringAfterLast('/'),
+            downloadUrl = downloadUrl,
+            sha256 = raw.string("digest")?.trim()?.takeIf(DIGEST_PATTERN::matches),
+        )
+    }
+
+    private fun String.matchesAlias(alias: String): Boolean = Regex(
+        """(^|[ _.\-/])${Regex.escape(alias)}($|[ _.\-/])""",
+        RegexOption.IGNORE_CASE,
+    ).containsMatchIn(this)
+
+    private fun buildApiUrl(repository: String): String =
+        "https://api.github.com/repos/$repository/releases"
+
+    /** 429 与 403 都按限流归类：不带 token 的匿名额度被这两者覆盖 */
+    private fun apiFailureReason(statusCode: Int): UpdateCheckFailure =
+        if (statusCode == TOO_MANY_REQUESTS || statusCode == FORBIDDEN) {
+            UpdateCheckFailure.RATE_LIMITED
+        } else {
+            UpdateCheckFailure.HTTP
+        }
+
+    private fun Int.isSuccess(): Boolean = this in 200..299
+
+    private companion object {
+        const val PAGE_SIZE = 100
+        const val MAX_PAGES = 3
+        const val TOO_MANY_REQUESTS = 429
+        const val FORBIDDEN = 403
+        val API_HEADERS = mapOf(
+            "Accept" to "application/vnd.github+json",
+            "X-GitHub-Api-Version" to "2022-11-28",
+            "User-Agent" to MiscConstants.BROWSER_UA,
+        )
+        val REPOSITORY_PATTERN = Regex("""^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$""")
+        val DIGEST_PATTERN = Regex("""^sha256:[0-9a-fA-F]{64}$""")
+
+        /** Release 正文里用这对标记包住的下载区块只给 GitHub 页面看，更新说明里不带 */
+        val DOWNLOAD_SECTION_PATTERN = Regex(
+            """<!-- downloads:start -->.*?<!-- downloads:end -->\s*""",
+            RegexOption.DOT_MATCHES_ALL,
+        )
+
+        /** 各 ABI 的候选标记，序即优先级（arm64-v8a 优先于裸 arm64）；UNIVERSAL 没有标记 */
+        val ABI_MARKERS: Map<AndroidAbi, List<String>> = mapOf(
+            AndroidAbi.ARM64 to listOf("arm64-v8a", "arm64", "aarch64"),
+            AndroidAbi.X86_64 to listOf("x86_64", "x64", "amd64"),
+            AndroidAbi.ARM to listOf("armeabi-v7a", "arm"),
+            AndroidAbi.X86 to listOf("x86"),
+        )
+
+        /** 任一 ABI 的标记：命中即视为拆分变体，不进 universal 回退 */
+        val ALL_ABI_MARKERS = ABI_MARKERS.values.flatten().distinct()
+    }
+}
+
+/**
+ * 项目接了 Mirror酱 就以它的版本号为准，GitHub 只管下载：Mirror酱 检查不用 CDK，
+ * 也躲开了国内连不上 GitHub API 与匿名限流；没接入或没问到才自己挑最新版
+ */
+internal class GitHubUpdateClient(
+    private val api: GitHubReleasesApi,
+    private val mirrorRelease: suspend (
+        rid: String?,
+        channel: UpdateChannel,
+        abi: AndroidAbi,
+        currentVersion: String,
+    ) -> MirrorChyanLatestApi.Latest? = { _, _, _, _ -> null },
+) : UpdateSourceClient {
+
+    override val source: UpdateSource = UpdateSource.GITHUB
+
+    override suspend fun check(request: UpdateCheckRequest): UpdateCheckResult = try {
+        val currentVersion = UpdateVersion.parse(request.currentVersion)
+            ?: return UpdateCheckResult.SourceFailed(
+                source,
+                UpdateCheckFailure.VERSION_INVALID,
+                detail = uiTextFromFramework(request.currentVersion),
+            )
+        val repository = api.parseRepository(request.githubRepository)
+            ?: return UpdateCheckResult.SourceFailed(source, UpdateCheckFailure.MISSING_CONFIGURATION)
+        mirrorPinned(request.mirrorchyanRid, request.channel, request.abi, request.currentVersion)?.let { (latest, version) ->
+            return if (version <= currentVersion) {
+                UpdateCheckResult.UpToDate(source, latest.version)
+            } else {
+                UpdateCheckResult.UpdateAvailable(
+                    source,
+                    UpdateInfo(
+                        version = latest.version,
+                        releaseNotesUrl = api.releasesPageUrl(repository),
+                        releaseNotes = latest.releaseNote,
+                    ),
+                )
+            }
+        }
+        val releases = when (val outcome = api.releases(repository)) {
+            is UpdateSourceOutcome.Failed -> return UpdateCheckResult.SourceFailed(
+                source,
+                outcome.reason,
+                detail = outcome.detail
+            )
+
+            is UpdateSourceOutcome.Ok -> outcome.value
+        }
+        val (release, version) = api.latestEligible(releases, request.channel, request.abi)
+            ?: return UpdateCheckResult.SourceFailed(source, UpdateCheckFailure.NO_MATCHING_ASSET)
+        if (version <= currentVersion) {
+            UpdateCheckResult.UpToDate(source, release.tag)
+        } else {
+            UpdateCheckResult.UpdateAvailable(
+                source,
+                UpdateInfo(version = release.tag, releaseNotesUrl = release.htmlUrl, releaseNotes = release.body),
+            )
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        // 非业务异常一律按网络错误给用户，真实原因只进日志
+        Timber.tag("UpdateCheck").w(e, "%s check failed", source)
+        UpdateCheckResult.SourceFailed(source, UpdateCheckFailure.NETWORK)
+    }
+
+    override suspend fun resolve(request: UpdateResolveRequest): UpdateResolveResult = try {
+        val repository = api.parseRepository(request.githubRepository)
+            ?: return UpdateResolveResult.Failed(source, UpdateCheckFailure.MISSING_CONFIGURATION)
+        val pinned = mirrorPinned(request.mirrorchyanRid, request.channel, request.abi, request.currentVersion)?.second
+        val releases = when (val outcome = api.releases(repository)) {
+            is UpdateSourceOutcome.Failed -> return UpdateResolveResult.Failed(
+                source,
+                outcome.reason,
+                outcome.detail
+            )
+
+            is UpdateSourceOutcome.Ok -> outcome.value
+        }
+        // Mirror酱 定的版本 GitHub 上没有或挑不出包，就报找不到，不退回别的版本
+        val eligible = if (pinned != null) {
+            api.releaseFor(releases, pinned, request.abi)
+        } else {
+            api.latestEligible(releases, request.channel, request.abi)
+        }
+        val (release, _, asset) = eligible
+            ?: return UpdateResolveResult.Failed(source, UpdateCheckFailure.NO_MATCHING_ASSET)
+        UpdateResolveResult.Resolved(
+            ResolvedUpdate(
+                source = source,
+                version = release.tag,
+                downloadUrl = asset.downloadUrl,
+                sha256 = asset.sha256,
+            ),
+        )
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        // 非业务异常一律按网络错误给用户，真实原因只进日志
+        Timber.tag("UpdateResolve").w(e, "%s resolve failed", source)
+        UpdateResolveResult.Failed(source, UpdateCheckFailure.NETWORK)
+    }
+
+    /** Mirror酱 给的版本号解析不了也当没问到 */
+    private suspend fun mirrorPinned(
+        rid: String?,
+        channel: UpdateChannel,
+        abi: AndroidAbi,
+        currentVersion: String,
+    ): Pair<MirrorChyanLatestApi.Latest, Version>? {
+        val latest = mirrorRelease(rid, channel, abi, currentVersion) ?: return null
+        val version = UpdateVersion.parse(latest.version) ?: return null
+        Timber.tag("UpdateCheck").i("%s pinned to MirrorChyan version %s", source, latest.version)
+        return latest to version
+    }
+}

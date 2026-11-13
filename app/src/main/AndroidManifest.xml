@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <!-- Status-only candidate. Dependency manifests must not restore capabilities. -->
+    <uses-permission tools:node="removeAll" />
+    <uses-permission-sdk-23 tools:node="removeAll" />
+    <permission tools:node="removeAll" />
+    <queries tools:node="removeAll" />
+    <application
+        android:name="android.app.Application"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:icon="${appIcon}"
+        android:label="${appLabel}"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.MaaFwApp">
+        <provider tools:node="removeAll" />
+        <service tools:node="removeAll" />
+        <service android:name=".once.SyntheticDemoService" android:exported="false" android:process=":readonly_ocr" android:stopWithTask="true" />
+        <receiver tools:node="removeAll" />
+        <activity-alias tools:node="removeAll" />
+        <activity android:name="androidx.compose.ui.tooling.PreviewActivity" tools:node="remove" />
+        <activity android:name="androidx.activity.ComponentActivity" tools:node="remove" />
+        <meta-data android:name="io.sentry.auto-init" android:value="false" />
+        <activity android:name=".readonly.ReadOnlyStatusActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+

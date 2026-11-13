@@ -1,0 +1,199 @@
+package com.aliothmoon.maafw.di
+
+import android.app.KeyguardManager
+import com.aliothmoon.maafw.MaaDispatchers
+import com.aliothmoon.maafw.config.UserConfigurationStore
+import com.aliothmoon.maafw.config.passwordPlaintexts
+import com.aliothmoon.maafw.i18n.LocalizedTextRenderer
+import com.aliothmoon.maafw.overlay.OverlayController
+import com.aliothmoon.maafw.overlay.screensaver.ScreenSaverOverlayManager
+import com.aliothmoon.maafw.runner.AutoSleepHook
+import com.aliothmoon.maafw.runner.BackgroundModePrecheck
+import com.aliothmoon.maafw.runner.CloseTargetAppHook
+import com.aliothmoon.maafw.runner.CountdownHook
+import com.aliothmoon.maafw.runner.DisplayHazardNoticeHook
+import com.aliothmoon.maafw.runner.DisplayHazardPrecheck
+import com.aliothmoon.maafw.runner.DisplayHazardProbe
+import com.aliothmoon.maafw.runner.FocusContentResolver
+import com.aliothmoon.maafw.runner.FocusDispatcher
+import com.aliothmoon.maafw.runner.GameFpsHook
+import com.aliothmoon.maafw.runner.GameFpsWatcher
+import com.aliothmoon.maafw.runner.RemoteGameFpsReader
+import com.aliothmoon.maafw.telemetry.TelemetryController
+import com.aliothmoon.maafw.telemetry.TelemetryHook
+import com.aliothmoon.maafw.runner.ForegroundModePrecheck
+import com.aliothmoon.maafw.runner.PrivilegedAccessPrecheck
+import com.aliothmoon.maafw.runner.PrivilegedConnectHook
+import com.aliothmoon.maafw.runner.OverlayClearHook
+import com.aliothmoon.maafw.runner.KeepAliveHook
+import com.aliothmoon.maafw.runner.MaaFrameworkRunnerPort
+import com.aliothmoon.maafw.runner.NotificationHook
+import com.aliothmoon.maafw.runner.PreviewPort
+import com.aliothmoon.maafw.runner.PrivilegedFocusContentResolver
+import com.aliothmoon.maafw.runner.RemotePreviewPort
+import com.aliothmoon.maafw.runner.RunDurationLimitHook
+import com.aliothmoon.maafw.runner.RunKeepAlive
+import com.aliothmoon.maafw.runner.RunLauncher
+import com.aliothmoon.maafw.runner.RunJournal
+import com.aliothmoon.maafw.runner.RunLogRecorder
+import com.aliothmoon.maafw.runner.RunnerPort
+import com.aliothmoon.maafw.runner.RunScreenSaver
+import com.aliothmoon.maafw.runner.RunSessionLogStore
+import com.aliothmoon.maafw.runner.ScreenSaverHook
+import com.aliothmoon.maafw.runner.SessionLogHook
+import com.aliothmoon.maafw.runner.SystemDisplayHazardProbe
+import com.aliothmoon.maafw.schedule.UnlockGestureStore
+import com.aliothmoon.maafw.privileged.PermissionGateway
+import com.aliothmoon.maafw.runner.WakeUnlockHook
+import com.aliothmoon.maafw.runner.WatchdogNoticeHook
+import com.aliothmoon.maafw.service.AccessibilityTextInputSink
+import com.aliothmoon.maafw.service.ForegroundRunKeepAlive
+import com.aliothmoon.maafw.settings.AppSettingsManager
+import kotlinx.coroutines.flow.first
+import org.koin.android.ext.koin.androidContext
+import org.koin.core.qualifier.named
+import org.koin.dsl.module
+
+val runnerModule = module {
+    // StubRunnerPort 保留给测试与 Preview，不再进 DI
+    single<RunnerPort> {
+        val context = androidContext()
+        MaaFrameworkRunnerPort(
+            context = context,
+            installer = get(),
+            apkPath = context.applicationInfo.sourceDir,
+            nativeLibraryDir = context.applicationInfo.nativeLibraryDir,
+            runMode = get<AppSettingsManager>().runMode::value,
+            resolutionPreset = get<AppSettingsManager>().resolutionPreset::value,
+            debugMode = get<AppSettingsManager>().debugMode::value,
+            saveOnError = get<AppSettingsManager>().saveOnError::value,
+            scope = get(named<AppCoroutineScope>()),
+            servicePort = get(),
+            textInputSink = { get<AccessibilityTextInputSink>() },
+        )
+    }
+
+    single {
+        AccessibilityTextInputSink(
+            journal = get(),
+            activeExecutionId = { get<RunnerPort>().state.value.activeExecution?.executionId },
+        )
+    }
+
+    single<FocusContentResolver> {
+        PrivilegedFocusContentResolver(
+            source = get(),
+            servicePort = get(),
+        )
+    }
+
+    // notification 那一档要在 Activity 销毁后仍然响
+    single {
+        FocusDispatcher(
+            projectRepository = get(),
+            resolver = get(),
+            runnerPort = get(),
+            scope = get(named<AppCoroutineScope>()),
+        )
+    }
+
+    single {
+        val configurationStore = get<UserConfigurationStore>()
+        TelemetryController(
+            context = androidContext(),
+            projectRepository = get(),
+            settings = get(),
+            runnerPort = get(),
+            scope = get(named<AppCoroutineScope>()),
+            secrets = { configurationStore.data.first().passwordPlaintexts() },
+        )
+    }
+
+    single { RunSessionLogStore() }
+
+    single {
+        RunLogRecorder(
+            focusDispatcher = get(),
+            store = get(),
+            renderText = get<LocalizedTextRenderer>()::render,
+            includeDetails = get<AppSettingsManager>().debugMode::value,
+            scope = get(named<AppCoroutineScope>()),
+        )
+    }
+    single<RunJournal> { get<RunLogRecorder>() }
+
+    single {
+        GameFpsWatcher(
+            reader = RemoteGameFpsReader(get()),
+            journal = get(),
+            scope = get(named<AppCoroutineScope>()),
+        )
+    }
+
+    single<PreviewPort> {
+        RemotePreviewPort(
+            scope = get(named<AppCoroutineScope>()),
+            servicePort = get(),
+            touchPreviewEnabled = get<AppSettingsManager>().touchPreviewEnabled,
+        )
+    }
+
+    single<RunKeepAlive> { ForegroundRunKeepAlive(androidContext()) }
+
+    single<RunScreenSaver> {
+        val manager = get<ScreenSaverOverlayManager>()
+        object : RunScreenSaver {
+            override suspend fun show(): Boolean = manager.show()
+            override suspend fun hide() = manager.hide()
+        }
+    }
+
+    single<DisplayHazardProbe> { SystemDisplayHazardProbe(androidContext(), get()) }
+
+    single {
+        RunLauncher(
+            projectRepository = get(),
+            configurationStore = get(),
+            runnerPort = get(),
+            prechecks = listOf(
+                PrivilegedAccessPrecheck(get(), get()),
+                ForegroundModePrecheck,
+                BackgroundModePrecheck(),
+                DisplayHazardPrecheck(get()),
+            ),
+            hooks = listOf(
+                SessionLogHook(get()),
+                TelemetryHook(get()),
+                NotificationHook(get()),
+                PrivilegedConnectHook(get()),
+                AutoSleepHook(get()),
+                WakeUnlockHook(get(), get<AppSettingsManager>(), get<UnlockGestureStore>()) {
+                    androidContext().getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == true
+                },
+                ScreenSaverHook(get<AppSettingsManager>(), get()),
+                CloseTargetAppHook(get(), get<AppSettingsManager>()),
+                CountdownHook,
+                // 调用时才取：OverlayController 经 SessionViewModel 依赖 RunLauncher，构造期取会成环
+                OverlayClearHook { get<OverlayController>().awaitPanelCleared() },
+                KeepAliveHook(get()),
+                GameFpsHook(get()),
+                DisplayHazardNoticeHook(get(), get()),
+                WatchdogNoticeHook(
+                    watchdogState = get<PermissionGateway>().watchdogState,
+                    servicePort = get(),
+                    journal = get(),
+                    scope = get(named<AppCoroutineScope>()),
+                ),
+                RunDurationLimitHook(
+                    settings = get<AppSettingsManager>(),
+                    runnerPort = get(),
+                    scope = get(named<AppCoroutineScope>()),
+                ),
+            ),
+            runMode = get<AppSettingsManager>().runMode::value,
+            scope = get(named<AppCoroutineScope>()),
+            journal = get(),
+            renderText = get<LocalizedTextRenderer>()::render,
+        )
+    }
+}

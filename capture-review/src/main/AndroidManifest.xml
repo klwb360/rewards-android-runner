@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <!-- Review-only v21 exact trivia item: two owned frames, one approved root-Shizuku task tap and at most one fixed Back. Old task scopes and check-in input remain disabled. -->
+    <uses-permission tools:node="removeAll" />
+    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission-sdk-23 tools:node="removeAll" />
+    <permission tools:node="removeAll" />
+    <queries tools:node="replace"><package android:name="com.microsoft.bing" /><package android:name="com.android.systemui" /></queries>
+    <application
+        android:name=".once.ReviewVisibilityApplication"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:icon="${appIcon}"
+        android:label="${appLabel}"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.MaaFwApp">
+        <provider tools:node="removeAll" />
+        <provider android:name="rikka.shizuku.ShizukuProvider" android:authorities="${applicationId}.shizuku"
+            android:exported="true" android:multiprocess="false" android:permission="android.permission.INTERACT_ACROSS_USERS_FULL"
+            android:process=":capture_once" />
+        <provider android:name=".once.ReviewVisibilityProvider" android:authorities="${applicationId}.visibility" android:exported="false" android:process=":capture_once" />
+        <service tools:node="removeAll" />
+        <service android:name=".once.SyntheticDemoService" android:exported="false" android:process=":readonly_ocr" android:stopWithTask="true" />
+        <activity android:name=".once.DormantCaptureConfirmationActivity" android:enabled="true" android:exported="false" android:process=":capture_once" />
+        <service android:name=".once.DormantProjectionForegroundService" android:enabled="true" android:exported="false" android:process=":capture_once" android:foregroundServiceType="mediaProjection" android:stopWithTask="true" />
+        <service android:name=".once.DormantProjectionForegroundService$After" android:enabled="true" android:exported="false" android:process=":capture_once" android:foregroundServiceType="mediaProjection" android:stopWithTask="true" />
+        <receiver tools:node="removeAll" />
+        <activity-alias tools:node="removeAll" />
+        <activity android:name="androidx.compose.ui.tooling.PreviewActivity" tools:node="remove" />
+        <activity android:name="androidx.activity.ComponentActivity" tools:node="remove" />
+        <meta-data android:name="io.sentry.auto-init" android:value="false" />
+        <activity android:name=".readonly.ReadOnlyStatusActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+

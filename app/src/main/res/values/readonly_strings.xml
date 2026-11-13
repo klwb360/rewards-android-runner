@@ -1,0 +1,43 @@
+<resources>
+    <string name="ro_title">Rewards · 只读准备状态</string>
+    <string name="ro_subtitle">原生产品预览 · 仅查看状态\n当前构建不截图、不识别页面、不执行积分任务。</string>
+    <string name="ro_current">本构建状态</string>
+    <string name="ro_idle">未开始</string>
+    <string name="ro_running">识别运行中</string>
+    <string name="ro_stopping">等待清理证据</string>
+    <string name="ro_cleanup_unconfirmed">清理未确认，禁止再次开始</string>
+    <string name="ro_completed">已完成，清理已确认</string>
+    <string name="ro_failed">失败，清理已确认</string>
+    <string name="ro_cancelled">已取消，清理已确认</string>
+    <string name="ro_no_execution">此页面只有状态说明和接入要求。原有任务、设置授权、定时和远端服务入口未接入。</string>
+    <string name="ro_authorization">新的识别授权</string>
+    <string name="ro_not_authorized">未授权</string>
+    <string name="ro_approved_once">单次批准，尚需持久化占用记录</string>
+    <string name="ro_new_approval">历史诊断的批准不能用于本构建。本页面不能授予、重置或重复使用截图授权。</string>
+    <string name="ro_backend">运行后端</string>
+    <string name="ro_backend_unbound">未绑定 · 执行关闭</string>
+    <string name="ro_backend_boundary">已集成可替换的一次识别接口与协调器，但没有绑定截图或 OCR 适配器。保留的 Maa 原生流式后端仍有未解决的停止与资源所有权问题，未作为安全后端接入。</string>
+    <string name="ro_device">设备属性提示</string>
+    <string name="ro_device_hint_match">属性符合旧诊断白名单，仍未就绪</string>
+    <string name="ro_device_blocked">不满足旧诊断条件 · 已阻止</string>
+    <string name="ro_device_detail">旧限制仍为 Android 15 / API 35、ranchu、sdk_gphone。仅比较本应用可读的 Build 属性；不是设备认证，也未验证远端 shell UID 2000。Android 14 不因此获准运行。</string>
+    <string name="ro_resources">资源与远端身份</string>
+    <string name="ro_not_verified">尚未验证</string>
+    <string name="ro_resource_detail">只读资源哈希与任务限制保留在原代码中。本状态页面未解包资源、启动特权进程或执行运行前验证。</string>
+    <string name="ro_history">已结束的独立 Bing 诊断 · 历史记录</string>
+    <string name="ro_consumed">该次授权已消费</string>
+    <string name="ro_history_detail">2026-11-10 18:35 UTC 的一次独立诊断仅报告检测到文字，未验证页面内容、数值或积分。随后 worker Binder 死亡，重启后单次记录仍为已消费。此处是构建时记录，不是设备实时查询，也不能单独证明外部 shell 已退出。</string>
+    <string name="ro_execution_disabled">识别功能尚未开放</string>
+    <string name="ro_show_requirements">查看接入要求</string>
+    <string name="ro_hide_requirements">收起接入要求</string>
+    <string name="ro_future">未来接入条件</string>
+    <string name="ro_future_title">技术条件就绪仍需新的批准</string>
+    <string name="ro_future_detail">需独立审查只读后端、检查设备和资源、重新确认具体范围，并在执行前持久化单次占用记录。技术上可供批准不等于已获授权。当前构建没有批准或开始路径。</string>
+    <string name="ro_stop">取消与清理</string>
+    <string name="ro_stop_title">请求停止不等于已经停止</string>
+    <string name="ro_stop_detail">超时、取消返回、结果已出或 Binder 死亡都不能替代完整清理证据。未来后端需逐项确认生产者静止、消费者释放和外部子进程退出；证据不全时保持清理未确认，禁止再次开始。</string>
+    <string name="ro_privacy">识别与隐私边界</string>
+    <string name="ro_privacy_title">不承诺系统层零留存</string>
+    <string name="ro_privacy_detail">历史诊断使用全屏截屏，前后窗口检查不能保证原子性或单应用隔离。只读不代表没有风险，不能承诺 Android、ART、驱动、崩溃转储或 native 库绝无留存。</string>
+</resources>
+

@@ -1,0 +1,12 @@
+package com.aliothmoon.maafw.once;
+import org.junit.Test;import static org.junit.Assert.*;
+public class UiLocatedFieldPriorityTest {
+ private void node(NativeUiFieldDiagnostics.Accumulator a,int i,int parent,int depth,String resource,String text){a.node(i,parent,depth,0,0,100,100,true,true,false,"android.widget.TextView",resource,text,"");}
+ private NativeUiFieldDiagnostics.Result tree(boolean prefer,boolean duplicate,boolean wrong){var a=new NativeUiFieldDiagnostics.Accumulator(prefer);node(a,0,-1,0,"","");for(int i=1;i<=26;i++)node(a,i,0,1,"","Search");node(a,27,0,1,"homePageWrapper","");node(a,28,27,2,"dailyTaskPanel","");node(a,29,wrong?0:28,wrong?1:3,"dailyActivities","");node(a,30,29,wrong?2:4,"search","");node(a,31,30,wrong?3:5,"","0/60");node(a,32,29,wrong?2:4,"read","");node(a,33,32,wrong?3:5,"","0/30");if(duplicate)node(a,34,0,1,"search","");return a.result();}
+ private boolean includes(NativeUiFieldDiagnostics.Result r,int index){return r.nodes().stream().anyMatch(n->n.index()==index);}
+ @Test public void locatedPrioritizesRealTaskDescendantsBeforeToolbar(){var old=tree(false,false,false);var now=tree(true,false,false);assertFalse(includes(old,31));assertTrue(includes(now,31));assertTrue(includes(now,33));assertEquals(old.totalCandidates(),now.totalCandidates());assertEquals(old.fractionCandidates(),now.fractionCandidates());assertTrue(now.nodes().size()<=24);assertTrue(now.summary().contains("counterAuthority=false actionAuthority=false"));assertEquals(now,NativeUiFieldDiagnostics.parse(NativeUiFieldDiagnostics.encode(now)));}
+ @Test public void duplicateExactResourceFallsBackWithoutInventingPriority(){assertEquals(tree(false,true,false),tree(true,true,false));}
+ @Test public void brokenActualAncestorChainFallsBack(){assertEquals(tree(false,false,true),tree(true,false,true));}
+ @Test public void defaultAccumulatorRetainsOriginalSelection(){var a=new NativeUiFieldDiagnostics.Accumulator();var b=new NativeUiFieldDiagnostics.Accumulator(false);node(a,0,-1,0,"","Search");node(b,0,-1,0,"","Search");assertEquals(a.result(),b.result());}
+ @Test public void helperAcceptsOnlyExactLocatedMode(){assertTrue(NativeUiStructureHelper.validReadyArguments(new String[]{"n","1","DIAGNOSTIC_LOCATED_V52"}));assertFalse(NativeUiStructureHelper.validReadyArguments(new String[]{"n","1","DIAGNOSTIC_LOCATED_V53"}));assertTrue(NativeUiStructureHelper.validReadyArguments(new String[]{"n","1","DIAGNOSTIC_V51"}));}
+}

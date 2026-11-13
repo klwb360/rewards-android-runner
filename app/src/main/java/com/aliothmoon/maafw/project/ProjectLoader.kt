@@ -1,0 +1,573 @@
+package com.aliothmoon.maafw.project
+
+import com.aliothmoon.maafw.domain.ConfigurationTemplate
+import com.aliothmoon.maafw.domain.ControllerDefinition
+import com.aliothmoon.maafw.domain.Diagnostic
+import com.aliothmoon.maafw.domain.Diagnostic.Companion.error
+import com.aliothmoon.maafw.domain.Diagnostic.Companion.warning
+import com.aliothmoon.maafw.domain.DiagnosticMessages
+import com.aliothmoon.maafw.domain.OptionDefinition
+import com.aliothmoon.maafw.domain.OptionValue
+import com.aliothmoon.maafw.domain.ProjectDefinition
+import com.aliothmoon.maafw.domain.ProjectMetadata
+import com.aliothmoon.maafw.domain.ResourceDefinition
+import com.aliothmoon.maafw.domain.SettingSectionDefinition
+import com.aliothmoon.maafw.domain.TaskDefinition
+import com.aliothmoon.maafw.domain.TaskGroupDefinition
+import com.aliothmoon.maafw.domain.casesOrEmpty
+import com.aliothmoon.maafw.i18n.AppLocales
+
+sealed interface ProjectLoadResult {
+    data class Ready(val definition: ProjectDefinition, val diagnostics: List<Diagnostic>) :
+        ProjectLoadResult
+
+    data class Failure(val diagnostics: List<Diagnostic>) : ProjectLoadResult
+}
+
+/**
+ * 按 PI V2 语义加载项目：根 interface.json 声明 + import[] 分片按序合并
+ * （行为与桌面端 MXU 一致处见 docs/pi-compatibility.md），
+ * 并做跨文件校验：重名 task/option、悬空 option 引用、option cycle、preset 引用缺失
+ *
+ * 文本物化：$i18n 按 languages 声明查表（查无回落 key），
+ * description 级字段的文件路径形态在加载期读入；URL 形态原样保留给 UI 懒加载
+ *
+ */
+class ProjectLoader(
+    private val source: ProjectSource,
+) {
+
+    private class MergeState {
+        val tasks = mutableListOf<TaskDefinition>()
+
+        /** 与 [tasks] 同步维护，只为把重名判定从逐条线性扫降下来；PI 上千任务时才有感 */
+        val taskNames = mutableSetOf<String>()
+        val options = linkedMapOf<String, OptionDefinition>()
+        val templates = mutableListOf<ConfigurationTemplate>()
+        val declaredGroups = mutableListOf<TaskGroupDefinition>()
+        val globalOptionNames = mutableListOf<String>()
+        val settingSections = mutableListOf<SettingSectionDefinition>()
+        val skippedOptionNames = mutableSetOf<String>()
+    }
+
+    fun load(): ProjectLoadResult {
+        val diagnostics = mutableListOf<Diagnostic>()
+
+        val interfaceContent = try {
+            source.read(INTERFACE_JSON)
+        } catch (e: Exception) {
+            diagnostics += error(
+                INTERFACE_JSON,
+                DiagnosticMessages.interfaceReadFailed(e.message.orEmpty()),
+            )
+            return ProjectLoadResult.Failure(diagnostics)
+        }
+        val pi = PiParser.parseInterface(INTERFACE_JSON, interfaceContent)
+        diagnostics += pi.diagnostics
+
+        // PI V2：interface_version 必须为 2，否则拒绝加载
+        if (pi.interfaceVersion != 2L) {
+            diagnostics += error(
+                INTERFACE_JSON,
+                when (val v = pi.interfaceVersion) {
+                    null -> DiagnosticMessages.missingInterfaceVersion()
+                    else -> DiagnosticMessages.unsupportedInterfaceVersion(v)
+                },
+            )
+            return ProjectLoadResult.Failure(diagnostics)
+        }
+
+        val translations = loadTranslations(pi, diagnostics)
+        val text = buildTextResolver(translations, diagnostics)
+
+        // 根文件自身作为首个分片（task/option/preset/group），import 分片按声明顺序追加；
+        // 重名一律先定义优先；缺失分片降级为 warning 跳过
+        // 根 JSON 复用 parseInterface 的解析结果（version 校验通过则 root 必非 null）
+        val state = MergeState()
+        pi.root?.let {
+            mergeContent(
+                state,
+                PiParser.parseFile(INTERFACE_JSON, it, text),
+                INTERFACE_JSON,
+                diagnostics
+            )
+        }
+        for (path in pi.imports) {
+            val content = try {
+                source.read(path)
+            } catch (e: Exception) {
+                diagnostics += warning(
+                    path,
+                    DiagnosticMessages.importReadFailed(e.message.orEmpty())
+                )
+                continue
+            }
+            mergeContent(state, PiParser.parseFile(path, content, text), path, diagnostics)
+        }
+        if (state.tasks.isEmpty()) {
+            diagnostics += warning(INTERFACE_JSON, DiagnosticMessages.projectHasNoTasks())
+        }
+
+        validateOptionReferences(
+            state.tasks,
+            state.globalOptionNames,
+            pi.resources,
+            pi.controllers.filter(::isAdb),
+            state.options,
+            state.skippedOptionNames,
+            diagnostics,
+        )
+        detectOptionCycles(state.options, diagnostics)
+        validateTemplates(state.templates, state.tasks, diagnostics)
+
+        val (normalizedTasks, groups) = resolveGroups(
+            state.declaredGroups,
+            state.tasks,
+            diagnostics
+        )
+
+        // 模板任务展示名在此物化：preset 只声明 taskName，label 在任务定义上
+        val taskLabels = normalizedTasks.associate { it.name to it.label }
+        val templates = state.templates.map { template ->
+            template.copy(
+                tasks = template.tasks.map {
+                    it.copy(
+                        label = taskLabels[it.taskName] ?: it.taskName,
+                        optionValues = withoutPresetPasswords(template.name, it.optionValues, state.options, diagnostics),
+                    )
+                },
+            )
+        }
+
+        val definition = ProjectDefinition(
+            name = pi.name ?: source.projectName,
+            version = pi.version,
+            controllers = resolveControllers(pi, text, state.options, diagnostics),
+            resources = pi.resources
+                .map {
+                    ResourceDefinition(
+                        it.name,
+                        it.paths,
+                        text.label(it.label) ?: it.name,
+                        it.raw,
+                        it.icon,
+                        it.optionNames.filter { name -> name in state.options },
+                    )
+                }
+                .takeIf { it.isNotEmpty() }
+                ?: deriveResources(diagnostics),
+            tasks = normalizedTasks,
+            groups = groups,
+            options = state.options,
+            // 引用不存在的项已在上面报 Error；这里过滤掉，免得 builder 再报一遍同一件事
+            globalOptionNames = state.globalOptionNames.filter { it in state.options },
+            settingSections = resolveSettingSections(state, diagnostics),
+            skippedOptionNames = state.skippedOptionNames.toSet(),
+            templates = templates,
+            agents = pi.agents,
+            metadata = pi.root?.let { PiParser.parseMetadata(it, text) } ?: ProjectMetadata(),
+            telemetry = pi.root?.let(PiParser::parseTelemetry),
+            translations = translations,
+        )
+        return ProjectLoadResult.Ready(definition, diagnostics)
+    }
+
+    /**
+     * 协议要求 preset 不写 password 字段：interface.json 随资源分发，写进去的就是人人可见的明文。
+     * 放在合并之后做，是因为 preset 与它引用的 option 可以分在不同的 import 分片里
+     */
+    private fun withoutPresetPasswords(
+        preset: String,
+        values: Map<String, OptionValue>,
+        options: Map<String, OptionDefinition>,
+        diagnostics: MutableList<Diagnostic>,
+    ): Map<String, OptionValue> = values.mapValues { (optionName, value) ->
+        val inputs = value as? OptionValue.Inputs ?: return@mapValues value
+        val passwords = (options[optionName] as? OptionDefinition.Input)?.fields
+            ?.filter { it.password && it.name in inputs.values }
+            .orEmpty()
+        passwords.forEach {
+            diagnostics += warning(INTERFACE_JSON, DiagnosticMessages.presetPasswordIgnored(preset, optionName, it.name))
+        }
+        if (passwords.isEmpty()) value else inputs.copy(values = inputs.values - passwords.map { it.name }.toSet())
+    }
+
+    /**
+     * Android 外壳只驱动 Adb controller；PI 可以声明好几个（本地客户端、云游戏各一个），全留下由用户选
+     * task 的 controller[] 引用的是 controller 名，写死名字会让换一个 PI 后全部任务被判不适用
+     * 未声明 Adb 说明该 PI 不面向 Android：记 warning 并回落默认，不阻断加载
+     */
+    private fun resolveControllers(
+        pi: PiInterfaceContent,
+        text: PiTextResolver,
+        options: Map<String, OptionDefinition>,
+        diagnostics: MutableList<Diagnostic>,
+    ): List<ControllerDefinition> {
+        val adb = pi.controllers.filter(::isAdb)
+        if (adb.isEmpty()) {
+            diagnostics += warning(INTERFACE_JSON, DiagnosticMessages.noAdbController())
+            return listOf(ControllerDefinition())
+        }
+        return adb.map {
+            ControllerDefinition(
+                name = it.name,
+                type = it.type,
+                label = text.label(it.label) ?: it.name,
+                displayShortSide = it.displayShortSide,
+                displayLongSide = it.displayLongSide,
+                displayRaw = it.displayRaw,
+                attachResourcePaths = it.attachResourcePaths,
+                // 引用不存在的项已在 validateOptionReferences 报 Error
+                optionNames = it.optionNames.filter { name -> name in options },
+                raw = it.raw,
+            )
+        }
+    }
+
+    private fun isAdb(controller: PiControllerContent): Boolean =
+        controller.type.equals(ADB_CONTROLLER_TYPE, ignoreCase = true)
+
+    /** 分片内容合并进累计状态：task/option 重名 → error，preset/group 重名 → warning，一律先定义优先 */
+    private fun mergeContent(
+        state: MergeState,
+        parsed: PiFileContent,
+        file: String,
+        diagnostics: MutableList<Diagnostic>,
+    ) {
+        diagnostics += parsed.diagnostics
+        state.skippedOptionNames += parsed.skippedOptionNames
+        for (task in parsed.tasks) {
+            if (!state.taskNames.add(task.name)) {
+                diagnostics += error(
+                    file,
+                    DiagnosticMessages.duplicateDeclaration("task", task.name)
+                )
+            } else {
+                state.tasks += task
+            }
+        }
+        for ((name, option) in parsed.options) {
+            if (state.options.containsKey(name)) {
+                diagnostics += error(file, DiagnosticMessages.duplicateDeclaration("option", name))
+            } else {
+                state.options[name] = option
+            }
+        }
+        for (template in parsed.templates) {
+            if (state.templates.any { it.name == template.name }) {
+                diagnostics += warning(
+                    file,
+                    DiagnosticMessages.duplicateDeclaration("preset", template.name),
+                )
+            } else {
+                state.templates += template
+            }
+        }
+        // global_option 与 task/option 不同，重名不是冲突而是同一项被多个分片重复声明：
+        // 按声明顺序追加、去重即可（对齐 MXU 的 import 合并）
+        for (name in parsed.globalOptionNames) {
+            if (name !in state.globalOptionNames) state.globalOptionNames += name
+        }
+        for (section in parsed.settingSections) {
+            if (state.settingSections.any { it.name == section.name }) {
+                diagnostics += warning(file, DiagnosticMessages.duplicateDeclaration("setting", section.name))
+            } else {
+                state.settingSections += section
+            }
+        }
+        for (group in parsed.groups) {
+            if (state.declaredGroups.any { it.name == group.name }) {
+                diagnostics += warning(
+                    file,
+                    DiagnosticMessages.duplicateDeclaration("group", group.name),
+                )
+            } else {
+                state.declaredGroups += group
+            }
+        }
+    }
+
+    /**
+     * 按 languages 声明加载当前语言的翻译表：精确 tag -> 语言前缀 -> 首个声明
+     * tag 比较前统一小写并把 '_' 归一为 '-'，兼容 zh_cn 这类下划线风格键
+     */
+    private fun loadTranslations(
+        projectInterface: PiInterfaceContent,
+        diagnostics: MutableList<Diagnostic>,
+    ): Map<String, String> {
+        val languages = projectInterface.languages
+        if (languages.isEmpty()) return emptyMap()
+
+        fun norm(tag: String) = tag.lowercase().replace('_', '-')
+        val tag = AppLocales.currentProjectTag()
+        val desired = norm(tag)
+        val lang = languages.keys.firstOrNull { norm(it) == desired }
+            ?: languages.keys.firstOrNull {
+                norm(it).substringBefore('-') == desired.substringBefore('-')
+            }
+            ?: languages.keys.first()
+
+        val path = normalizeProjectPath(languages.getValue(lang))
+        val content = try {
+            source.read(path)
+        } catch (e: Exception) {
+            diagnostics += warning(
+                path,
+                DiagnosticMessages.translationReadFailed(e.message.orEmpty())
+            )
+            return emptyMap()
+        }
+        return PiParser.parseTranslations(path, content) { diagnostics += it }
+    }
+
+    /** $i18n 查表（查无回落 key）；description 追加文件形态物化 */
+    private fun buildTextResolver(
+        translations: Map<String, String>,
+        diagnostics: MutableList<Diagnostic>,
+    ): PiTextResolver = object : PiTextResolver {
+
+        private fun i18n(raw: String): String {
+            if (!raw.startsWith("$")) return raw
+            val key = raw.substring(1)
+            return translations[key] ?: key
+        }
+
+        override fun label(raw: String?): String? = raw?.let(::i18n)
+
+        override fun description(raw: String?): String? {
+            val resolved = raw?.let(::i18n) ?: return null
+            if (!isProjectFileCandidate(resolved)) return resolved
+            val path = normalizeProjectPath(resolved.replace('\\', '/'))
+            val result = source.tryReadText(path)
+            val body = result.getOrNull()
+            if (body != null) return body
+
+            val error = result.exceptionOrNull()
+            // 未命中的候选可能只是正文；显式路径未命中或实际读取失败才提醒作者
+            if (isExplicitProjectPath(resolved) || error != null) {
+                diagnostics += warning(
+                    path,
+                    DiagnosticMessages.descriptionReadFailed(
+                        error?.message ?: "Not a project file: $path"
+                    )
+                )
+            }
+            return resolved
+        }
+    }
+
+    /**
+     * 以顶层 group[] 声明为准归一化任务分组（PI v2.4.0）：
+     * - 无任何声明即无分组：任务级引用被忽略，全部归入「未分组」；
+     * - 有声明时任务只保留命中声明的引用，未命中引用丢弃并记 warning；
+     * - 有效引用为空的任务落「未分组」，该组仅在需要时追加为最后一组
+     */
+    private fun resolveGroups(
+        declared: List<TaskGroupDefinition>,
+        tasks: List<TaskDefinition>,
+        diagnostics: MutableList<Diagnostic>,
+    ): Pair<List<TaskDefinition>, List<TaskGroupDefinition>> {
+        if (declared.isEmpty()) {
+            val flattened =
+                tasks.map { if (it.groups.isEmpty()) it else it.copy(groups = emptyList()) }
+            val groups = if (flattened.isEmpty()) emptyList() else listOf(ungroupedGroup())
+            return flattened to groups
+        }
+        val declaredNames = declared.mapTo(mutableSetOf()) { it.name }
+        var hasUngrouped = false
+        val normalized = tasks.map { task ->
+            val kept = task.groups.filter { it in declaredNames }
+            task.groups.filterNot { it in declaredNames }.forEach { ref ->
+                diagnostics += warning(
+                    "task:${task.name}",
+                    DiagnosticMessages.missingReference("group", ref),
+                )
+            }
+            if (kept.isEmpty()) hasUngrouped = true
+            if (kept.size == task.groups.size) task else task.copy(groups = kept)
+        }
+        val groups = if (hasUngrouped) declared + ungroupedGroup() else declared
+        return normalized to groups
+    }
+
+    /**
+     * setting 分区只给 global_option 分组：不存在的键记 Error，存在但不在 global_option 里的记 warning，都剔除。
+     * 后者 MXU 照样渲染，但编译只认 global_option，控件改了不起作用，这边宁可不显示
+     */
+    private fun resolveSettingSections(
+        state: MergeState,
+        diagnostics: MutableList<Diagnostic>,
+    ): List<SettingSectionDefinition> {
+        val globalNames = state.globalOptionNames.toSet()
+        return state.settingSections.map { section ->
+            section.copy(
+                optionNames = section.optionNames.filter { ref ->
+                    when {
+                        // 跳过时已记 warning，这里只剔除
+                        ref in state.skippedOptionNames -> false
+
+                        ref !in state.options -> {
+                            diagnostics += error("setting", DiagnosticMessages.missingReference("option", ref))
+                            false
+                        }
+
+                        ref !in globalNames -> {
+                            diagnostics += warning(
+                                "setting",
+                                DiagnosticMessages.settingOptionNotGlobal(section.name, ref),
+                            )
+                            false
+                        }
+
+                        else -> true
+                    }
+                },
+            )
+        }
+    }
+
+    /** 合成「未分组」兜底组：消费方按 isUngrouped 标记判定，不依赖显示名 */
+    private fun ungroupedGroup() = TaskGroupDefinition(UNGROUPED, isUngrouped = true)
+
+    private fun validateOptionReferences(
+        tasks: List<TaskDefinition>,
+        globalOptionNames: List<String>,
+        resources: List<PiResourceContent>,
+        controllers: List<PiControllerContent>,
+        options: Map<String, OptionDefinition>,
+        skipped: Set<String>,
+        diagnostics: MutableList<Diagnostic>,
+    ) {
+        // 有意跳过的 option 已在解析时记过 warning，引用它们不再重复报悬空
+        fun missing(ref: String) = ref !in options && ref !in skipped
+        for (ref in globalOptionNames) {
+            if (missing(ref)) {
+                diagnostics += error(
+                    "global_option",
+                    DiagnosticMessages.missingReference("option", ref)
+                )
+            }
+        }
+        for (resource in resources) {
+            for (ref in resource.optionNames) {
+                if (missing(ref)) {
+                    diagnostics += error(
+                        "resource:${resource.name}",
+                        DiagnosticMessages.missingReference("option", ref),
+                    )
+                }
+            }
+        }
+        for (controller in controllers) {
+            for (ref in controller.optionNames) {
+                if (missing(ref)) {
+                    diagnostics += error(
+                        "controller:${controller.name}",
+                        DiagnosticMessages.missingReference("option", ref),
+                    )
+                }
+            }
+        }
+        for (task in tasks) {
+            for (ref in task.optionNames) {
+                if (missing(ref)) {
+                    diagnostics += error(
+                        "task:${task.name}",
+                        DiagnosticMessages.missingReference("option", ref),
+                    )
+                }
+            }
+        }
+        for (option in options.values) {
+            for (case in option.casesOrEmpty()) {
+                for (child in case.childOptionNames) {
+                    if (missing(child)) {
+                        diagnostics += error(
+                            "option:${option.name}/case:${case.name}",
+                            DiagnosticMessages.missingReference("option", child),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun detectOptionCycles(
+        options: Map<String, OptionDefinition>,
+        diagnostics: MutableList<Diagnostic>,
+    ) {
+        val visiting = linkedSetOf<String>()
+        val done = mutableSetOf<String>()
+
+        fun visit(name: String) {
+            if (name in done || name !in options) return
+            if (!visiting.add(name)) {
+                diagnostics += error(
+                    "option:$name",
+                    DiagnosticMessages.optionCycle("${visiting.joinToString(" -> ")} -> $name"),
+                )
+                return
+            }
+            options[name]?.casesOrEmpty()?.forEach { case ->
+                case.childOptionNames.forEach { visit(it) }
+            }
+            visiting.remove(name)
+            done += name
+        }
+        options.keys.forEach { visit(it) }
+    }
+
+    private fun validateTemplates(
+        templates: List<ConfigurationTemplate>,
+        tasks: List<TaskDefinition>,
+        diagnostics: MutableList<Diagnostic>,
+    ) {
+        val taskNames = tasks.mapTo(mutableSetOf()) { it.name }
+        for (template in templates) {
+            template.tasks.filter { it.taskName !in taskNames }.forEach {
+                diagnostics += warning(
+                    "preset:${template.name}",
+                    DiagnosticMessages.missingReference("task", it.taskName),
+                )
+            }
+        }
+    }
+
+    /** interface.json 未提供可用声明时，从 resource/ 目录派生兜底资源 */
+    private fun deriveResources(diagnostics: MutableList<Diagnostic>): List<ResourceDefinition> {
+        val dirs = try {
+            source.list("resource").filter { source.list("resource/$it").isNotEmpty() }
+        } catch (e: Exception) {
+            diagnostics += warning(
+                "resource",
+                DiagnosticMessages.directoryEnumerationFailed("resource", e.message.orEmpty()),
+            )
+            emptyList()
+        }
+        if (dirs.isEmpty()) {
+            diagnostics += warning("resource", DiagnosticMessages.noAvailableResource())
+            return emptyList()
+        }
+        val hasBase = "base" in dirs
+        val variants = dirs.filter { it != "base" }.sorted()
+        val result = mutableListOf<ResourceDefinition>()
+        if (hasBase) {
+            result += ResourceDefinition("base", listOf("resource/base"))
+        }
+        for (dir in variants) {
+            val paths =
+                if (hasBase) listOf("resource/base", "resource/$dir") else listOf("resource/$dir")
+            result += ResourceDefinition(dir, paths)
+        }
+        return result
+    }
+
+    companion object {
+        /** 合成「未分组」的内部组名；身份判定走 isUngrouped，显示名由 UI 层用资源本地化 */
+        const val UNGROUPED = "未分组"
+
+        /** PI 协议里 Adb controller 的 type 字面量 */
+        private const val ADB_CONTROLLER_TYPE = "Adb"
+        private const val INTERFACE_JSON = "interface.json"
+    }
+}

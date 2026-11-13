@@ -1,0 +1,294 @@
+package com.aliothmoon.maafw.runner
+
+import com.aliothmoon.maafw.R
+import com.aliothmoon.maafw.i18n.UiText
+import com.aliothmoon.maafw.i18n.uiTextFromFramework
+import com.aliothmoon.maafw.i18n.uiTextFromProject
+import com.aliothmoon.maafw.i18n.uiTextOf
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+
+/**
+ * 把 MaaFramework 的原始回调合成为人能读的一行
+ *
+ * 分工照搬桌面端 MXU 的 `useMaaCallbackLogger`：Runner 只把回调原样投出来，
+ * 认得出「哪个任务」「哪个资源」的是读得到 PI 与用户配置的这一层。放这儿而不是 Runner 里，
+ * 是因为 Runner 按分层不解析 ProjectInterface
+ *
+ * 有状态：资源多路径加载与 agent 洪泛都要靠前后文去重，所以按轮持有，
+ * 每轮开始前调 [reset]
+ */
+class RunLogComposer {
+
+    private var lastKind: RunLogKind? = null
+    private var lastText: UiText? = null
+
+    /** agent 输出的时间戳滑窗；超阈值就闭嘴，与 MXU 的 2s/15 条同参数 */
+    private val agentTimestamps = ArrayDeque<Long>()
+    private var agentFlooded = false
+
+    /** 本轮已开始 / 已成功加载的资源路径数，见 [RunLogContext.resourceBundleCount] */
+    private var resourceStarted = 0
+    private var resourceSucceeded = 0
+
+    /** 当前任务开始的时刻；串行投递，同时只有一个任务在跑，不必按 task_id 建表 */
+    private var taskStartedAt: Long? = null
+
+    fun reset() {
+        lastKind = null
+        lastText = null
+        agentTimestamps.clear()
+        agentFlooded = false
+        resourceStarted = 0
+        resourceSucceeded = 0
+        taskStartedAt = null
+    }
+
+    /** 返回 null 表示这条不展示（认不出的回调、被去重掉的，或洪泛期的 agent 输出） */
+    fun compose(event: RunnerEvent, id: Long, atMillis: Long, context: RunLogContext): RunLogEntry? {
+        val composed = when (event) {
+            is RunnerEvent.Marker -> return null
+
+            is RunnerEvent.Log -> Composed(RunLogKind.Info, uiTextFromFramework(event.message))
+
+            // 任务名用信封里冻结的展示名（PI 的 label，已按 $i18n 物化），不用内部 name；
+            // 「名字 n/m」不随语言变，展示名本身就是 PI 本地化过的
+            is RunnerEvent.Progress -> Composed(
+                RunLogKind.Info,
+                uiTextFromProject(
+                    "${context.currentTaskName?.takeIf(String::isNotBlank) ?: event.taskName} " +
+                        "${event.completed}/${event.total}",
+                ),
+            )
+
+            // 正文已由调用方补完（$i18n 查表、{image}、文件路径），这里只负责装进条目：
+            // 那几步有先后依赖也要 IO，塞进合成器会让它既不纯也不同步
+            is RunnerEvent.Focus -> Composed(RunLogKind.Focus, uiTextFromProject(event.focus.content))
+
+            is RunnerEvent.AgentOutput -> agentEntry(event, atMillis) ?: return null
+
+            is RunnerEvent.AgentConnected -> Composed(
+                RunLogKind.Success,
+                uiTextOf(R.string.run_log_agent_connected, event.label),
+            )
+
+            is RunnerEvent.AgentExited -> Composed(RunLogKind.Error, agentExitedText(event))
+
+            is RunnerEvent.MalformedCallback -> Composed(
+                RunLogKind.Error,
+                uiTextFromFramework(MALFORMED_LABEL),
+                detail = event.raw,
+            )
+
+            is RunnerEvent.Callback -> callbackEntry(event, atMillis, context) ?: return null
+        }
+
+        // 资源多路径逐条发同样的通知，合成后文案一模一样；连着重复只留第一条
+        // （MXU 靠 res_id 的 isFirst/isLast 做同一件事）
+        if (composed.kind == lastKind && composed.text == lastText) return null
+        lastKind = composed.kind
+        lastText = composed.text
+
+        return RunLogEntry(id, atMillis, composed.kind, composed.text, composed.detail)
+    }
+
+    /**
+     * 洪泛滑窗按**行**计，不按事件计
+     *
+     * 特权进程会把同一瞬间涌出来的若干行攒成一次回调，按事件计的话一批 64 行只算 1，
+     * 阈值永远踩不到，抑制器等于关掉了。两条流合起来算：刷屏就是刷屏，不分从哪条管道出来
+     */
+    private fun agentEntry(event: RunnerEvent.AgentOutput, atMillis: Long): Composed? {
+        // 写给用户看的按 focus 渲染、进进度档；不进洪泛滑窗：它往往正是这一轮停下来的原因，刷屏期也不能吞
+        if (event.isUserFacing) return Composed(RunLogKind.Focus, uiTextFromProject(event.line))
+        while (agentTimestamps.isNotEmpty() && atMillis - agentTimestamps.first() >= AGENT_FLOOD_WINDOW_MS) {
+            agentTimestamps.removeFirst()
+        }
+        if (agentFlooded) {
+            // 速率降下来才恢复，并且明说恢复了——静悄悄地少显示一段比显示不全更糟
+            if (agentTimestamps.size >= AGENT_FLOOD_THRESHOLD) return null
+            agentFlooded = false
+            return Composed(RunLogKind.Warning, uiTextOf(R.string.run_log_agent_flood_recovered))
+        }
+        repeat(event.lineCount) { agentTimestamps.addLast(atMillis) }
+        if (agentTimestamps.size >= AGENT_FLOOD_THRESHOLD) {
+            agentFlooded = true
+            return Composed(RunLogKind.Warning, uiTextOf(R.string.run_log_agent_flood))
+        }
+        val kind = if (event.fromStderr) RunLogKind.AgentError else RunLogKind.Agent
+        return Composed(kind, uiTextFromProject(event.line))
+    }
+
+    /** 不过洪泛滑窗：这句紧跟在 traceback 那一大段后面，正是滑窗闭嘴的时候 */
+    private fun agentExitedText(event: RunnerEvent.AgentExited): UiText {
+        val signal = event.signal
+        val exited = if (signal != null) {
+            uiTextOf(R.string.run_log_agent_exited_signal, event.label, AgentExitCode.signalName(signal))
+        } else {
+            uiTextOf(R.string.run_log_agent_exited_code, event.label, event.exitCode)
+        }
+        val report = event.crashReport?.takeIf(String::isNotBlank) ?: return exited
+        return uiTextOf(R.string.run_log_agent_crash_report, exited, report)
+    }
+
+    /**
+     * 认得出的合成人话，认不出的丢掉（与 MXU 一致）
+     *
+     * `Node.*` 与点击、截图一秒几十条，只有事件名谁也看不懂；排障要的原文与 details
+     * MaaFramework 自己的 maa.log 里都有全份，这里再抄一遍只会把人要看的行埋掉
+     */
+    private fun callbackEntry(event: RunnerEvent.Callback, atMillis: Long, context: RunLogContext): Composed? {
+        // 落到 else 的 Node.* 是识别期最密的一档，它不看 details；compose 单协程，不必上锁
+        val details by lazy(LazyThreadSafetyMode.NONE) { parseDetails(event.details) }
+
+        // 停止时框架投递的空任务（Tasker::post_stop），不是用户的任务；
+        // 它的开始 / 完成会套上当前任务名，在末尾多出一对「开始 / 完成」
+        if (event.message in TASK_MESSAGES && details.string("entry") == STOP_MARK_ENTRY) return null
+
+        return when (event.message) {
+            CONTROLLER_STARTING, CONTROLLER_SUCCEEDED, CONTROLLER_FAILED -> {
+                // 只讲连接；点击与截图是每帧都来的动作，讲出来就是刷屏
+                if (!details.isConnectAction()) return null
+                when (event.message) {
+                    CONTROLLER_STARTING -> Composed(RunLogKind.Info, uiTextOf(R.string.run_log_connecting))
+                    CONTROLLER_SUCCEEDED -> Composed(RunLogKind.Success, uiTextOf(R.string.run_log_connected))
+                    else -> Composed(RunLogKind.Error, uiTextOf(R.string.run_log_connect_failed), event.details)
+                }
+            }
+
+            // 每个路径各发一对「开始 / 成功」，交替着来，连续去重拦不住；
+            // 知道本轮几个路径就只讲第一个的开始、最后一个的成功（MXU 按 res_id 的 isFirst/isLast）
+            RESOURCE_STARTING -> {
+                resourceStarted++
+                if (context.resourceBundleCount != null && resourceStarted > 1) return null
+                Composed(
+                    RunLogKind.Info,
+                    uiTextOf(R.string.run_log_resource_loading, context.resourceLabel(details)),
+                )
+            }
+
+            RESOURCE_SUCCEEDED -> {
+                resourceSucceeded++
+                val total = context.resourceBundleCount
+                if (total != null && resourceSucceeded < total) return null
+                Composed(
+                    RunLogKind.Success,
+                    uiTextOf(R.string.run_log_resource_loaded, context.resourceLabel(details)),
+                )
+            }
+
+            RESOURCE_FAILED -> Composed(
+                RunLogKind.Error,
+                uiTextOf(R.string.run_log_resource_failed, context.resourceLabel(details)),
+                event.details,
+            )
+
+            TASK_STARTING -> {
+                taskStartedAt = atMillis
+                Composed(
+                    RunLogKind.Info,
+                    uiTextOf(R.string.run_log_task_starting, context.taskLabel(details)),
+                )
+            }
+
+            TASK_SUCCEEDED -> Composed(
+                RunLogKind.Success,
+                withElapsed(uiTextOf(R.string.run_log_task_succeeded, context.taskLabel(details)), atMillis),
+            )
+
+            TASK_FAILED -> Composed(
+                RunLogKind.Error,
+                withElapsed(uiTextOf(R.string.run_log_task_failed, context.taskLabel(details)), atMillis),
+                event.details,
+            )
+
+            else -> null
+        }
+    }
+
+    /** 对齐 MAA 的完成日志带用时；没见到开始（中途接上的日志）就不带 */
+    private fun withElapsed(line: UiText, atMillis: Long): UiText {
+        val startedAt = taskStartedAt ?: return line
+        taskStartedAt = null
+        return uiTextOf(R.string.run_log_task_elapsed, line, elapsedText(atMillis - startedAt))
+    }
+
+    private fun parseDetails(raw: String): JsonObject? =
+        runCatching { LOG_JSON.parseToJsonElement(raw) }.getOrNull() as? JsonObject
+
+    private data class Composed(
+        val kind: RunLogKind,
+        val text: UiText,
+        val detail: String? = null,
+    )
+
+    private companion object {
+        const val CONTROLLER_STARTING = "Controller.Action.Starting"
+        const val CONTROLLER_SUCCEEDED = "Controller.Action.Succeeded"
+        const val CONTROLLER_FAILED = "Controller.Action.Failed"
+        const val RESOURCE_STARTING = "Resource.Loading.Starting"
+        const val RESOURCE_SUCCEEDED = "Resource.Loading.Succeeded"
+        const val RESOURCE_FAILED = "Resource.Loading.Failed"
+        const val TASK_STARTING = "Tasker.Task.Starting"
+        const val TASK_SUCCEEDED = "Tasker.Task.Succeeded"
+        const val TASK_FAILED = "Tasker.Task.Failed"
+
+        /** MaaFramework `Tasker.cpp` 里 post_stop 的 kStopEntry */
+        const val STOP_MARK_ENTRY = "MaaTaskerPostStop"
+        val TASK_MESSAGES = setOf(TASK_STARTING, TASK_SUCCEEDED, TASK_FAILED)
+
+        const val AGENT_FLOOD_WINDOW_MS = 2_000L
+        const val AGENT_FLOOD_THRESHOLD = 15
+
+        val LOG_JSON = Json { ignoreUnknownKeys = true; isLenient = true }
+    }
+}
+
+/**
+ * 合成一行人话需要的、Runner 给不出的那些东西
+ *
+ * [currentTaskName] 取自 `ActiveExecution.currentTaskLabel`：给人看的展示名，
+ * 不是内部 `taskName`。MXU 靠 `task_id → selectedTaskId` 的映射表回认；
+ * 我们串行投递、同时只有一个任务在跑，当前任务本身就是权威，不必再建一张表
+ */
+data class RunLogContext(
+    val currentTaskName: String? = null,
+    val resourceLabel: String? = null,
+    /** 本轮交给 MaaResourcePostBundle 的路径数（resource.path 加 controller 的 attach）；null = 不知道，退回连续去重 */
+    val resourceBundleCount: Int? = null,
+) {
+    /** 拿不到当前任务名就退回 PI 的 entry：宁可显示内部名，也不显示空 */
+    fun taskLabel(details: JsonObject?): String =
+        currentTaskName?.takeIf { it.isNotBlank() }
+            ?: details.string("entry")
+            ?: UNKNOWN_SUBJECT
+
+    /** 一轮只加载一个 resource 的若干路径，用它的展示名比逐条报绝对路径有用 */
+    fun resourceLabel(details: JsonObject?): String =
+        resourceLabel?.takeIf { it.isNotBlank() }
+            ?: details.string("path")?.substringAfterLast('/')
+            ?: UNKNOWN_SUBJECT
+}
+
+internal fun elapsedText(millis: Long): UiText {
+    val total = (millis / 1000).coerceAtLeast(0)
+    val hours = total / 3600
+    val minutes = total % 3600 / 60
+    val seconds = total % 60
+    return when {
+        hours > 0 -> uiTextOf(R.string.run_log_elapsed_hms, hours, minutes, seconds)
+        minutes > 0 -> uiTextOf(R.string.run_log_elapsed_ms, minutes, seconds)
+        else -> uiTextOf(R.string.run_log_elapsed_s, seconds)
+    }
+}
+
+internal fun JsonObject?.string(key: String): String? =
+    (this?.get(key) as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+
+/** `action` 的取值官方是 `Connect`，宽容收一个小写写法 */
+private fun JsonObject?.isConnectAction(): Boolean =
+    this.string("action")?.equals("Connect", ignoreCase = true) == true
+
+private const val UNKNOWN_SUBJECT = "?"

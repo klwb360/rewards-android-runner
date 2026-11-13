@@ -1,0 +1,10 @@
+package com.aliothmoon.maafw.once;
+import org.junit.Test;import static org.junit.Assert.*;import java.nio.file.*;
+public class NativeEntryDiagnosticHelperWiringTest {
+ String source()throws Exception{return Files.readString(Path.of(System.getProperty("staging.root",".."),"app/src/main/java/com/aliothmoon/maafw/once/NativeEntryDiagnosticHelper.java"));}
+ @Test public void noInputOrCounterApi()throws Exception{String s=source();for(String bad:new String[]{"performAction","ACTION_CLICK","COMMIT","System.in","NativeUiStructureParser","getWindows(","setHiddenApiExemptions","setAccessible(","takeScreenshot","Log.","printStackTrace","writeString"})assertFalse(bad,s.contains(bad));}
+ @Test public void exactTemporaryFlagsAndReadback()throws Exception{String s=source();for(String x:new String[]{"FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES","FLAG_REPORT_VIEW_IDS","FLAG_RETRIEVE_INTERACTIVE_WINDOWS","confirmed.flags!=flags"})assertTrue(s.contains(x));}
+ @Test public void traversalAndSourceCheckAreBounded()throws Exception{String s=source();for(String x:new String[]{"scheduled+count>512","item.depth()>=32","chars+length>32768","text.length()>2048","description.length()>2048","Stage.HELPER_PREPARE","Kind.MAIN","now-tree.started()>5000"})assertTrue(x,s.contains(x));assertEquals(s.indexOf("tree=walk(ui,b,clean)"),s.lastIndexOf("tree=walk(ui,b,clean)"));}
+ @Test public void lifecycleAndOutputOrdering()throws Exception{String s=source();int cleanup=s.indexOf("getMethod(\"disconnect\")");int output=s.indexOf("System.out.println");assertTrue(cleanup>=0&&output>cleanup);assertTrue(s.contains("if(thread.isAlive())clean.clean=false"));assertTrue(s.contains("catch(Throwable ignored){clean.clean=false;}"));assertTrue(s.contains("reason==NativeEntryDiagnosticProtocol.Reason.OK?tree.projection():null"));}
+ @Test public void realParentIndexAndNoSyntheticRows()throws Exception{String s=source();assertTrue(s.contains("new Pending(child,scheduled++,item.index(),item.depth()+1)"));assertTrue(s.contains("accumulator.add(item.index(),item.parent(),item.depth()"));assertFalse(s.contains("toString()"));}
+}
