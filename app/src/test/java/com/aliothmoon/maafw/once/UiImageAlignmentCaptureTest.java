@@ -195,6 +195,60 @@ public class UiImageAlignmentCaptureTest {
         assertFalse(capture.sourceMatchesAfter(null, 2600, 2800));
     }
 
+    @Test public void diagnosticSnapshotDoesNotCallRevocationOrSpendCaptureAuthority() {
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        var geometry = new UiImageGeometryBindingTest.Fixture().geometry();
+        var capture = geometry.beginFrame(ready(2350), 2400, 7000, () -> { calls.incrementAndGet(); return false; });
+        assertNotNull(capture);assertTrue(capture.captureCurrent(2500));
+        int checked = calls.get();String before = capture.diagnostics();
+        for (int i = 0; i < 20; i++) assertEquals(before, capture.diagnostics());
+        assertEquals(checked, calls.get());assertTrue(capture.claimTransport());assertFalse(capture.claimTransport());
+        assertTrue(before.contains("candidateFormed=false"));assertTrue(before.contains("uiAfterAgeMs=300"));
+    }
+
+    @Test public void diagnosticSeparatesOldUiAgeFromFreshAfterMetadataWithoutExtendingEither() {
+        var capture = new UiImageGeometryBindingTest.Fixture().geometry()
+                .beginFrame(ready(2350), 2400, Long.MAX_VALUE, () -> false);
+        assertTrue(capture.sourceMatchesAfter(ready(7199), 2600, 7200));
+        assertFalse(capture.sourceMatchesAfter(ready(7199), 2600, 7201));
+        String diagnostic = capture.diagnostics();
+        assertTrue(diagnostic.contains("afterGate=CURRENT_REJECTED"));
+        assertTrue(diagnostic.contains("currentGate=UI_GEOMETRY_REJECTED"));
+        assertTrue(diagnostic.contains("firstRejectedUiAfterAgeMs=5001"));
+        assertTrue(diagnostic.contains("imageAfterAgeMs=2"));
+        // A later independent rejection must not erase the first observed freshness failure.
+        assertFalse(capture.captureCurrent(Long.MAX_VALUE));
+        assertTrue(capture.diagnostics().contains("firstCurrentReject=UI_GEOMETRY_REJECTED"));
+        assertTrue(capture.diagnostics().contains("firstRejectedUiAfterAgeMs=5001"));
+    }
+
+    @Test public void sealDiagnosticsUseExistingEnvelopeAndDoNotConsumePublication() {
+        try (var f = new Fixture()) {
+            var candidate = f.prepare();assertNotNull(candidate);assertTrue(f.seal(candidate));
+            String before = f.capture.diagnostics();
+            assertTrue(before.contains("prepareGate=ACCEPTED candidateFormed=true"));
+            assertTrue(before.contains("sealGate=ACCEPTED"));assertTrue(before.contains("sourceMs=50"));
+            assertTrue(before.contains("sourceToCandidateMs=100"));assertTrue(before.contains("candidateToSealMs=200"));
+            assertEquals(before, f.capture.diagnostics());
+            assertTrue(f.capture.publicationCurrent(2900));
+            assertTrue(f.capture.diagnostics().contains("sealToPublicationMs=100"));
+            assertFalse(f.seal(candidate));assertFalse(f.capture.claimTransport());
+        }
+    }
+
+    @Test public void diagnosticDistinguishesSourceTimingAndAbsentAfterWithoutExceptionText() {
+        try (var f = new Fixture()) {
+            assertFalse(f.capture.sealSource(f.prepare(), f.recognizer, f.owner, 2450, 2601, ready(2700), 2800));
+            assertTrue(f.capture.diagnostics().contains("sealGate=SOURCE_TIMING"));
+            assertTrue(f.capture.diagnostics().contains("afterGate=NOT_CHECKED"));
+        }
+        try (var f = new Fixture()) {
+            assertFalse(f.capture.sealSource(f.prepare(), f.recognizer, f.owner, 2450, 2500, null, 2800));
+            assertTrue(f.capture.diagnostics().contains("sealGate=AFTER_REJECTED"));
+            assertTrue(f.capture.diagnostics().contains("afterGate=MISSING"));
+        }
+    }
+
     @Test public void candidateHasNoRawImageOrOcrGetterAndOnlyPrivateConstruction() {
         for (var constructor : UiImageAlignmentCapture.Candidate.class.getDeclaredConstructors())
             assertTrue(java.lang.reflect.Modifier.isPrivate(constructor.getModifiers()));
