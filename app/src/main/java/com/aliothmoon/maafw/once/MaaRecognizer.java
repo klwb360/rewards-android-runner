@@ -538,8 +538,11 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
         byte[] gray=new byte[frameWidth*frameHeight];
         try{
             for(int i=0;i<gray.length;i+=4096){checkStop(stop);materialFrame.copyGrayRange(i,gray,i,Math.min(4096,gray.length-i));}
+            imageAudit.observeGeometry(gray,frameWidth,frameHeight,stop);
+            checkStop(stop);
             overviewCandidate=overviewCapture.prepare(this,owner,materialFrame,gray,materialRows,
                     stop::requested,android.os.SystemClock.elapsedRealtime());
+            checkStop(stop);
         }finally{Arrays.fill(gray,(byte)0);materialRows=null;}
     }
     private void refineUiImageAlignment(BackendPorts.StopSignal stop)throws Exception{
