@@ -15,6 +15,61 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  private volatile ReadOnlyTwoStageRun readOnlyRun;
  private volatile NativeAutonomousCardRun autonomousRun;
  private volatile RootReturnReadIntent returnReadIntent;
+ private volatile UiImageAlignmentRuntime alignmentRuntime;
+ private Object alignmentOwner;
+ private boolean alignmentSelected,alignmentSpent,alignmentFinished;
+ private String alignmentHistory;
+ boolean alignmentApprovalMatches(Object owner,LiveClick incoming){
+  return alignmentSelected&&alignmentSpent&&!alignmentFinished&&owner!=null&&owner==alignmentOwner
+   &&incoming!=null&&incoming==click&&isResumedForApproval();
+ }
+ private void openAlignmentChoice(){
+  if(consumed||alignmentSpent||!isResumedForApproval())return;
+  alignmentSelected=true;showAlignmentChoice();
+ }
+ private void showAlignmentChoice(){
+  if(destroyed||isFinishing()||isDestroyed())return;
+  boolean ready=NativeCheckInSession.permissionReady();
+  OwnStateSummaryUi.alignmentChoice(this,ready?"现有服务与权限可用；确认后再检查当前页面。":"现有服务或权限不可用；本次不申请权限，也不采集。",
+   ready&&!consumed&&!alignmentSpent&&isResumedForApproval(),this::confirmAlignment,this::cancelAndFinish);
+ }
+ private void confirmAlignment(){
+  if(consumed||alignmentSpent||!alignmentSelected||!isResumedForApproval())return;
+  alignmentSpent=true;consumed=true;terminalShown=false;alignmentOwner=new Object();click=new LiveClick(this);
+  terminalSnapshot=new TerminalSnapshot(false,false,"CURRENT_STATUS",false);
+  try{
+   if(!NativeCheckInSession.permissionReady())throw new SecurityException("Existing permission unavailable");
+   OwnStateSummaryUi.alignmentRunning(this,this::cancelAndFinish);
+   alignmentRuntime=UiImageAlignmentRuntime.start(this,click,alignmentOwner);
+  }catch(RuntimeException rejected){
+   if(alignmentRuntime!=null)alignmentRuntime.cancel();if(click!=null)click.invalidate();
+   alignmentFinished=true;terminalShown=true;terminalSnapshot=new TerminalSnapshot(true,false,"CURRENT_STATUS",false);
+   alignmentHistory="alignmentEvidence=UNQUALIFIED stage=START_REJECTED cleanup="
+    +(alignmentRuntime!=null&&alignmentRuntime.finishedAndReleased()?"CONFIRMED":"NOT_CONFIRMED")
+    +" actionAuthority=false counterAuthority=false";
+   OwnStateSummaryUi.alignmentStatus(this,alignmentHistory,this::cancelAndFinish);
+  }
+ }
+ void alignmentFinished(UiImageAlignmentRuntime exact,String fixedDetails){
+  if(exact==null)return;
+  // Always queue: a synchronous startup failure must not beat assignment of alignmentRuntime.
+  if(!stageDeadlines.post(()->{
+   if(destroyed||isFinishing()||isDestroyed()||alignmentRuntime!=exact||alignmentFinished){exact.cancel();return;}
+   boolean appended=false;
+   try{
+    if(rootHiddenScalar()&&hiddenWithSoleTask())appended=ReviewVisibilityProvider.FENCE.publish(visibilityLease,()->{
+     String summary=exact.finalizePublication();
+     if(summary==null)throw new IllegalStateException("Alignment publication unavailable");
+     alignmentHistory=CaptureSessionRuntime.boundedRootScalars((fixedDetails==null?"":fixedDetails+"\n")+summary,8000);
+    });
+   }catch(RuntimeException rejected){appended=false;}
+   if(!appended)alignmentHistory="alignmentEvidence=UNQUALIFIED stage=APPEND_REJECTED cleanup="
+    +(exact.finishedAndReleased()?"CONFIRMED":"NOT_CONFIRMED")+" actionAuthority=false counterAuthority=false";
+   exact.cancel();alignmentFinished=true;terminalShown=true;
+   terminalSnapshot=new TerminalSnapshot(true,false,"CURRENT_STATUS",false);
+   OwnStateSummaryUi.alignmentStatus(this,alignmentHistory,this::cancelAndFinish);
+  }))exact.cancel();
+ }
  private boolean returnReadSpent,returnReadFinished;
  private final java.util.List<String> returnReadReports=new java.util.ArrayList<>();
  boolean returnReadApprovalMatches(Object owner,LiveClick incoming){return !RootCurrentCardScope.ACTIVE&&RootReturnReadScope.ACTIVE&&owner!=null&&owner==rootOwner&&incoming==click&&isResumedForApproval();}
@@ -454,7 +509,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  @Override protected void onCreate(Bundle state){
   super.onCreate(state);
   if(state!=null || android.os.Process.myUid()<10000 || !Application.getProcessName().equals(getPackageName()+":capture_once")) {finish();return;}
-  if(OwnStateSummaryUi.ACTIVE){OwnStateSummaryUi.choice(this,this::inspectOwnState,this::cancelAndFinish);return;}
+  if(OwnStateSummaryUi.ACTIVE){OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish);return;}
   installed=BingPackageMetadata.read(getPackageManager());
   if(!CaptureReleaseGate.configured()){showNavigation();return;}
   rikka.shizuku.Shizuku.addRequestPermissionResultListener(permissionListener);
@@ -481,7 +536,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  }
  private void summaryRejected(){terminalShown=true;terminalSnapshot=new TerminalSnapshot(true,false,"OWN_STATE",false);OwnStateSummaryUi.rejected(this,this::cancelAndFinish);}
  private void showCaptureChoices(){
-  if(OwnStateSummaryUi.ACTIVE){if(!consumed)OwnStateSummaryUi.choice(this,this::inspectOwnState,this::cancelAndFinish);return;}
+  if(OwnStateSummaryUi.ACTIVE){if(!consumed){if(alignmentSelected)showAlignmentChoice();else OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish);}return;}
   boolean ready=false;
   try{
    ready=rikka.shizuku.Shizuku.pingBinder()&&!rikka.shizuku.Shizuku.isPreV11()
@@ -675,7 +730,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
   showStatus("等待 Android 系统同意。授权窗口从本次明确确认起最长 90 秒；超时只请求取消，不证明清理完成。",false);
   try {runtime=CaptureSessionRuntime.start(this,click,purpose);}catch(RuntimeException denied){click.invalidate();showStatus("无法开始本次识别（系统版本、进程或显示尺寸不受支持）。未获得可用结果；不能重试或恢复本次授权。",true);}
  }
- private void cancelAndFinish(){if(returnReadIntent!=null)returnReadIntent.cancel();if(boundedIntent!=null)boundedIntent.cancel();if(seriesIntent!=null)seriesIntent.cancel();if(rootIntent!=null)rootIntent.cancel();if(autonomousRoute!=null)autonomousRoute.cancel();if(autonomousRun!=null)autonomousRun.cancel();stageDeadlines.removeCallbacksAndMessages(null);if(readOnlyRun!=null)readOnlyRun.cancel();if(cardRun!=null)cardRun.cancel();if(nativeSession!=null)nativeSession.cancel();if(click!=null)click.invalidate();if(runtime!=null)runtime.cancel();finish();}
+ private void cancelAndFinish(){if(alignmentRuntime!=null)alignmentRuntime.cancel();if(returnReadIntent!=null)returnReadIntent.cancel();if(boundedIntent!=null)boundedIntent.cancel();if(seriesIntent!=null)seriesIntent.cancel();if(rootIntent!=null)rootIntent.cancel();if(autonomousRoute!=null)autonomousRoute.cancel();if(autonomousRun!=null)autonomousRun.cancel();stageDeadlines.removeCallbacksAndMessages(null);if(readOnlyRun!=null)readOnlyRun.cancel();if(cardRun!=null)cardRun.cancel();if(nativeSession!=null)nativeSession.cancel();if(click!=null)click.invalidate();if(runtime!=null)runtime.cancel();finish();}
  /** Only ordinary superclass UI state may be saved. This route registers no
   * ActivityResultRegistry launcher: legacy request codes stay below 65536.
   * Never save the click, request, grant, pending consent Intent or runtime. */
@@ -688,10 +743,15 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  void clearPendingHandoff(){pendingHandoff.set(null);} // Scalar only, safe on deadline thread.
  private void tryHandoff(){if(isResumedForApproval()){
   Runnable action=pendingHandoff.getAndSet(null);if(action==null)return;
-  try{action.run();}catch(RuntimeException failure){if(runtime!=null)runtime.cancel();}
+  try{action.run();}catch(RuntimeException failure){if(alignmentRuntime!=null)alignmentRuntime.cancel();if(runtime!=null)runtime.cancel();}
  }}
  boolean hiddenWithSoleTask(){return handoff.hiddenWithSoleTask() && ReviewVisibilityProvider.FENCE.valid(visibilityLease);}
  @Override protected void onStart(){super.onStart();handoff.onStart();
+  if(alignmentSpent){
+   if(alignmentRuntime!=null&&!alignmentFinished)alignmentRuntime.cancel();
+   if(alignmentFinished)OwnStateSummaryUi.alignmentStatus(this,alignmentHistory,this::cancelAndFinish);
+   return;
+  }
   if(returnReadIntent!=null){if(!returnReadFinished)returnReadVisibilityRevoked(returnReadIntent);
    if(returnReadFinished){terminalShown=true;RootCaptureUi.returnReadStatus(this,returnReadReports,returnReadIntent.currentOnly()?"独立当前页只读历史回执；0Back，不是新授权。":"独立返回与当前状态历史回执；不是新授权。",this::cancelAndFinish);}return;}
 
@@ -744,5 +804,5 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  @Override protected void onResume(){super.onResume();resumed=true;handoff.onResume();tryHandoff();tryAutomaticAfter();if(!CaptureReleaseGate.configured())showNavigation();else if(!consumed)showCaptureChoices();}
  @Override protected void onPause(){ownStateCancelled=true;resumed=false;handoff.onPause();super.onPause();}
  @Override protected void onActivityResult(int code,int result,Intent data){super.onActivityResult(code,result,data);if(runtime!=null)runtime.onActivityResult(code,result,data);}
- @Override protected void onDestroy(){if(returnReadIntent!=null)returnReadIntent.cancel();if(seriesIntent!=null)seriesIntent.cancel();if(rootIntent!=null)rootIntent.cancel();rikka.shizuku.Shizuku.removeRequestPermissionResultListener(permissionListener);if(autonomousRoute!=null)autonomousRoute.cancel();if(autonomousRun!=null)autonomousRun.cancel();stageDeadlines.removeCallbacksAndMessages(null);if(readOnlyRun!=null)readOnlyRun.cancel();if(cardRun!=null)cardRun.cancel();if(nativeSession!=null)nativeSession.cancel();destroyed=true;if(boundedIntent!=null)boundedIntent.cancel();resumed=false;clearPendingHandoff();handoff.onDestroy();if(click!=null)click.invalidate();if(runtime!=null)runtime.cancel();super.onDestroy();}
+ @Override protected void onDestroy(){if(alignmentRuntime!=null)alignmentRuntime.cancel();if(returnReadIntent!=null)returnReadIntent.cancel();if(seriesIntent!=null)seriesIntent.cancel();if(rootIntent!=null)rootIntent.cancel();rikka.shizuku.Shizuku.removeRequestPermissionResultListener(permissionListener);if(autonomousRoute!=null)autonomousRoute.cancel();if(autonomousRun!=null)autonomousRun.cancel();stageDeadlines.removeCallbacksAndMessages(null);if(readOnlyRun!=null)readOnlyRun.cancel();if(cardRun!=null)cardRun.cancel();if(nativeSession!=null)nativeSession.cancel();destroyed=true;if(boundedIntent!=null)boundedIntent.cancel();resumed=false;clearPendingHandoff();handoff.onDestroy();if(click!=null)click.invalidate();if(runtime!=null)runtime.cancel();super.onDestroy();}
 }

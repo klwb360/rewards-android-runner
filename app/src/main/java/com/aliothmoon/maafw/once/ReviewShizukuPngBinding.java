@@ -7,8 +7,8 @@ import java.util.Arrays;
 import java.util.concurrent.Executor;
 import java.util.function.LongSupplier;
 
-/** Staged wiring seam, not an admission route. No current runtime references it.
- * A reviewed future caller supplies its existing consumed-once claim boundary,
+/** Native wiring seam, not an admission route.
+ * The independent alignment entry supplies its consumed-once claim boundary,
  * current target-handoff/visibility/expiry gate, fence, Maa recognizer and owner executor.
  * Do not manufacture MediaProjection Tickets or use a synthetic claim for live work. */
 final class ReviewShizukuPngBinding {
@@ -120,7 +120,7 @@ final class ReviewShizukuPngBinding {
         }
     }
     private ReviewShizukuPngBinding() { }
-    /** Dormant native seam only: a caller must already possess its own capture authority. */
+    /** A caller must already possess its own capture authority before using this native seam. */
     static AlignmentBinding bindReadOnlyAlignment(Context context,BackendPorts.ClaimBoundary existingClaim,
             PngCaptureSession.Gate existingGate,BackendPorts.RevocationFence existingFence,
             Executor existingOwnerExecutor,UiImageAlignmentCapture capture){
