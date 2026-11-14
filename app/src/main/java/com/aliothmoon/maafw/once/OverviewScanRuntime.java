@@ -16,6 +16,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
+import static com.aliothmoon.maafw.once.OverviewFailureDiagnostic.Checkpoint;
 
 /** Independently approved homepage review. Only bounded vertical scrolling is executable. */
 final class OverviewScanRuntime {
@@ -45,6 +46,7 @@ final class OverviewScanRuntime {
     private RealCaptureClaim.Grant grant;
     private BingNavigationSnapshot.Ready baseline;
     private volatile Stage stage=Stage.NEW;
+    private final OverviewFailureDiagnostic diagnostic=new OverviewFailureDiagnostic();
     private volatile boolean workerReturned,closed,released,constructionUnknown,claimUncertain,bindingConstruction;
     private boolean notified;
     private int qualifiedFrames,regions,points,seenRoles,scrollDispatchAttempts,scrollExitedZero;
@@ -81,18 +83,19 @@ final class OverviewScanRuntime {
         run.root=CaptureSessionRuntime.retainAlignment(run,intent.deadline(),run::latchCancel,run::closeOnOwner,()->run.closed,run::postOwner);
         try{
             run.loop.start();run.owner=new Handler(run.loop.getLooper());run.root.arm();run.stage=Stage.HANDOFF;
+            run.diagnostic.at(Checkpoint.HANDOFF);
             if(!run.main.post(run::handoff))run.cancel();
-        }catch(RuntimeException unknown){run.constructionUnknown=true;run.stage=Stage.CLEANUP_UNKNOWN;run.cancel();}
+        }catch(RuntimeException unknown){run.diagnostic.failed();run.constructionUnknown=true;run.stage=Stage.CLEANUP_UNKNOWN;run.cancel();}
         return run;
     }
     private boolean postOwner(Runnable job){
         try{if(owner!=null&&owner.post(job))return true;}catch(RuntimeException unknown){/* Retain the graph. */}
-        constructionUnknown=true;latchCancel();return false;
+        diagnostic.failed();constructionUnknown=true;latchCancel();return false;
     }
     private void handoff(){
         try{requireSession();activity.requestHandoff(this::requireSession,()->{
-            try{requireSession();if(!postOwner(this::scan))cancel();}catch(RuntimeException rejected){cancel();}
-        },this::cancel);}catch(RuntimeException rejected){cancel();}
+            try{requireSession();if(!postOwner(this::scan))cancel();}catch(RuntimeException rejected){diagnostic.failed();cancel();}
+        },this::cancel);}catch(RuntimeException rejected){diagnostic.failed();cancel();}
     }
     private boolean sessionCurrent(){long now=SystemClock.elapsedRealtime();return !canceled.get()&&root!=null&&root.current()&&intent.current(now);}
     private void requireSession(){if(!sessionCurrent())throw new SecurityException("Overview expired or revoked");}
@@ -126,8 +129,10 @@ final class OverviewScanRuntime {
         if(!workerStarted.compareAndSet(false,true)||closed)return;
         try{
             requireSession();if(!hiddenCurrent())throw new SecurityException("Hidden overview required");
+            diagnostic.at(Checkpoint.RUN_RECORD);
             OverviewScanScope.burnRun(activity.getNoBackupFilesDir().toPath());artifacts=createArtifactDirectory();
             while(sessionCurrent()){
+                diagnostic.beginFrame(intent.frames()+1);
                 resetReleasedFrame();
                 Object frameOwner=new Object();framePermit=intent.claimFrame(frameOwner,SystemClock.elapsedRealtime());
                 var exact=framePermit;
@@ -135,12 +140,14 @@ final class OverviewScanRuntime {
                         Math.max(0,exact.deadline-SystemClock.elapsedRealtime())))throw new SecurityException("Frame deadline unavailable");
                 grant=RealCaptureClaim.visible(VisibleCaptureAuthority.issueOverviewFrame(exact,SystemClock.elapsedRealtime()),epoch,frameOwner,SystemClock.elapsedRealtime());
                 fence=new BackendPorts.RevocationFence();stage=Stage.MODEL_PREPARATION;
+                diagnostic.at(Checkpoint.MODEL_PREPARATION);
                 models=PreparedAlignmentModels.create(frameOwner,MaaOnceModelStore::open);
                 if(!models.prepare(frameOwner,activity.getNoBackupFilesDir().toPath(),
                         index->activity.getAssets().open("bundle/model/ocr/"+MaaOnceModelPolicy.name(index)),()->!frameCurrent(exact)))
                     throw new SecurityException("Overview models unavailable");
                 newMetadata(()->frameCurrent(exact));String nonce=UUID.randomUUID().toString().replace("-","");
                 BingNavigationSnapshot.Ready[] before=new BingNavigationSnapshot.Ready[1];long[] beforeAt={-1};stage=Stage.UI_READ;
+                diagnostic.at(Checkpoint.UI_READ);
                 uiRead=AndroidOverviewUiReader.read(activity.getApplicationContext(),nonce,
                         Math.min(exact.deadline,SystemClock.elapsedRealtime()+9000),()->frameCurrent(exact),()->{
                             before[0]=readSource(UiImageAlignmentRuntime.MetadataStage.UI_BEFORE);if(before[0]==null)return false;
@@ -149,23 +156,34 @@ final class OverviewScanRuntime {
                         },exact);
                 if(uiRead==null||!uiRead.knownClean()||uiRead.protocolReport()==null||!uiRead.protocolReport().qualified())
                     throw new SecurityException("Overview UI observation unqualified");
+                diagnostic.at(Checkpoint.SOURCE_UI_AFTER);
                 var afterUi=readSource(UiImageAlignmentRuntime.MetadataStage.UI_AFTER);
+                if(afterUi==null)diagnostic.failed(Checkpoint.SOURCE_UI_AFTER);
+                diagnostic.at(Checkpoint.SOURCE_IMAGE_BEFORE);
                 var imageBefore=readSource(UiImageAlignmentRuntime.MetadataStage.IMAGE_BEFORE);long lower=SystemClock.elapsedRealtime();
+                if(imageBefore==null)diagnostic.failed(Checkpoint.SOURCE_IMAGE_BEFORE);
+                diagnostic.at(Checkpoint.FRAME_BINDING);
                 preview=new OverviewFramePreview(shape.width(),shape.height());
                 capture=OverviewFrameCapture.begin(exact.index,frameOwner,approvalOwner,epoch,nonce,uiRead.protocolReport(),
                         before[0],beforeAt[0],afterUi,imageBefore,lower,exact.deadline,
                         ()->!frameCurrent(exact),preview);
                 if(capture==null)throw new SecurityException("Overview source bracket rejected");
                 stage=Stage.IMAGE_READ;sourceGate();bindingConstruction=true;
+                diagnostic.at(Checkpoint.IMAGE_BINDING);
                 binding=OverviewPngBinding.bind(activity.getApplicationContext(),this::consumeFrame,this::sourceGate,fence,Runnable::run,capture,models);
-                bindingConstruction=false;backend=binding.backend();var result=backend.start();
+                bindingConstruction=false;backend=binding.backend();diagnostic.at(Checkpoint.IMAGE_BACKEND);var result=backend.start();
+                diagnostic.nativeOutcome(result);binding.recordAuditDiagnostic(diagnostic,result.owner());
                 if(result.phase()!=OnceBackend.Phase.COMPLETED||result.failure()!=OnceBackend.Failure.NONE
                         ||result.cancellation()!=OnceBackend.Cancellation.NOT_REQUESTED||!nativeResourcesClosed())
                     throw new SecurityException("Overview native outcome unconfirmed");
+                diagnostic.at(Checkpoint.SOURCE_AFTER);
                 var after=readSource(UiImageAlignmentRuntime.MetadataStage.IMAGE_AFTER);
+                if(after==null)diagnostic.failed(Checkpoint.SOURCE_AFTER);
+                diagnostic.at(Checkpoint.SEAL);
                 var completion=binding.takeCompletion(after,SystemClock.elapsedRealtime());
                 if(completion==null)throw new SecurityException("Overview same-frame proof unavailable");
-                stage=Stage.PUBLICATION;publishFrame(completion,exact);
+                stage=Stage.PUBLICATION;diagnostic.at(Checkpoint.PUBLICATION);publishFrame(completion,exact);
+                diagnostic.at(Checkpoint.FRAME_FINISH);
                 preview.close();if(!preview.knownReleased())throw new SecurityException("Overview preview retained");
                 intent.frameFinished(exact,nativeResourcesClosed(),true,SystemClock.elapsedRealtime());
                 var structure=uiRead.protocolReport().overview();var hint=uiRead.protocolReport().scrollHint();
@@ -184,13 +202,14 @@ final class OverviewScanRuntime {
                 scroll(exact);
             }
             if(stage==Stage.SCROLL||stage==Stage.PUBLICATION)stage=canceled.get()?Stage.CANCELED:Stage.BUDGET_STOP;
-        }catch(Exception failed){if(failed instanceof InterruptedException)Thread.currentThread().interrupt();stage=canceled.get()?Stage.CANCELED:Stage.HOLD;}
-        catch(Error unknown){constructionUnknown=true;stage=Stage.CLEANUP_UNKNOWN;}
+        }catch(Exception failed){diagnostic.failed();if(failed instanceof InterruptedException)Thread.currentThread().interrupt();stage=canceled.get()?Stage.CANCELED:Stage.HOLD;}
+        catch(Error unknown){diagnostic.failed();constructionUnknown=true;stage=Stage.CLEANUP_UNKNOWN;}
         finally{
             workerReturned=true;
-            try{if(models!=null&&framePermit!=null)models.closeBeforeAdoption(framePermit.owner);}catch(RuntimeException|Error unknown){constructionUnknown=true;}
-            try{if(preview!=null&&!appendActive.get())preview.close();}catch(RuntimeException|Error unknown){constructionUnknown=true;}
-            if(!allResourcesClosed())stage=Stage.CLEANUP_UNKNOWN;
+            diagnostic.at(Checkpoint.CLEANUP);
+            try{if(models!=null&&framePermit!=null)models.closeBeforeAdoption(framePermit.owner);}catch(RuntimeException|Error unknown){diagnostic.failed();constructionUnknown=true;}
+            try{if(preview!=null&&!appendActive.get())preview.close();}catch(RuntimeException|Error unknown){diagnostic.failed();constructionUnknown=true;}
+            if(!allResourcesClosed()){diagnostic.failed();stage=Stage.CLEANUP_UNKNOWN;}
             closeOnOwner();
         }
     }
@@ -211,11 +230,14 @@ final class OverviewScanRuntime {
                 var result=completion.publish(exact.owner,approvalOwner,epoch,SystemClock.elapsedRealtime(),
                         nativeResourcesClosed()&&frameCurrent(exact),activity.rootHiddenScalar()&&activity.hiddenWithSoleTask(),
                         metadata!=null&&metadata.alignmentPublicationAuthorityMatches(shape));
-                if(result==null)return;
+                if(result==null){diagnostic.failed(Checkpoint.PUBLICATION);return;}
+                diagnostic.at(Checkpoint.PUBLICATION_WRITE);
                 try{savedArtifact[0]=OverviewReviewArtifacts.write(artifacts,exact.index,result,preview);
                     savedResult[0]=result;
-                }catch(Exception failed){/* Fixed HOLD, no partial artifact grants a point or further scroll. */}
+                }catch(Exception failed){diagnostic.failed();/* Fixed HOLD, no partial artifact grants a point or further scroll. */}
                 });
+                if(!outer)diagnostic.failed(Checkpoint.PUBLICATION);
+                diagnostic.at(Checkpoint.PUBLICATION_COMMIT);
                 // A rejected outer fence leaves partial files local and unqualified. They are not
                 // counted or delivered: only the contiguous qualified frame prefix is reviewable.
                 published.set(OverviewPublicationCommit.commit(savedResult[0]!=null&&savedArtifact[0]!=null,outer,
@@ -228,6 +250,7 @@ final class OverviewScanRuntime {
                                 if(item.status()==OverviewFrameResult.Status.HOLD)roleHold[role]++;else roleAccepted[role]++;
                             }
                         }));
+                if(!published.get())diagnostic.failed(Checkpoint.PUBLICATION_COMMIT);
             }finally{appendActive.set(false);done.countDown();}
         })){appendActive.set(false);throw new SecurityException("Overview publication queue unavailable");}
         long left=Math.min(10000,exact.deadline-SystemClock.elapsedRealtime());
@@ -235,11 +258,13 @@ final class OverviewScanRuntime {
         if(!published.get())throw new SecurityException("Overview publication rejected");
     }
     private void scroll(OverviewScanIntent.FramePermit exact)throws Exception{
+        diagnostic.at(Checkpoint.SCROLL_SOURCE);
         stage=Stage.SCROLL;newMetadata(this::hiddenCurrent);var before=readSource(UiImageAlignmentRuntime.MetadataStage.UI_BEFORE);
         if(before==null)throw new SecurityException("Fresh overview scroll source required");
         var permit=intent.claimScroll(exact,SystemClock.elapsedRealtime());
         var actor=ReviewShizukuSwipeActor.forOverview(activity.getApplicationContext(),permit);
         var target=new ReviewShizukuSwipeActor.SwipeTarget(shape.width(),shape.height(),shape.rotation(),permit.direction);
+        diagnostic.at(Checkpoint.SCROLL_DISPATCH);
         var result=actor.swipe(target,new ReviewShizukuSwipeActor.DispatchGate(){
             @Override public boolean consume(ReviewShizukuSwipeActor.SwipeTarget t)throws Exception{
                 if(!target.equals(t)||!hiddenCurrent()||!nativeResourcesClosed()||!preview.knownReleased()||!permit.consume(SystemClock.elapsedRealtime()))return false;
@@ -253,6 +278,7 @@ final class OverviewScanRuntime {
         if(result.invocationAttempted())scrollDispatchAttempts++;
         if(result.commandExitZero())scrollExitedZero++;
         if(!actor.knownClean())constructionUnknown=true;
+        diagnostic.at(Checkpoint.SCROLL_RESULT);
         intent.scrollFinished(permit,result,SystemClock.elapsedRealtime());
     }
     private void resetReleasedFrame(){
@@ -267,7 +293,7 @@ final class OverviewScanRuntime {
     }
     private boolean allResourcesClosed(){return nativeResourcesClosed()&&!appendActive.get()&&(preview==null||preview.knownReleased());}
     private Path createArtifactDirectory()throws Exception{
-        Path cache=activity.getCacheDir().toPath();Path parent=cache.resolve("rewards-overview-v5");
+        Path cache=activity.getCacheDir().toPath();Path parent=cache.resolve("rewards-overview-v6");
         try{Files.createDirectory(parent);}catch(FileAlreadyExistsException exists){/* Verify exact directory. */}
         for(Path p:new Path[]{cache,parent}){var a=Files.readAttributes(p,BasicFileAttributes.class,LinkOption.NOFOLLOW_LINKS);
             if(!a.isDirectory()||a.isSymbolicLink()||a.fileKey()==null)throw new SecurityException("Local review directory unavailable");}
@@ -279,7 +305,7 @@ final class OverviewScanRuntime {
     private void closeOnOwner(){
         if(!workerStarted.get()&&canceled.get()){workerReturned=true;stage=Stage.CANCELED;}
         if(closed||!workerReturned)return;
-        if(!allResourcesClosed()){stage=Stage.CLEANUP_UNKNOWN;notifyFinished();return;}
+        if(!allResourcesClosed()){diagnostic.failed();stage=Stage.CLEANUP_UNKNOWN;notifyFinished();return;}
         closed=true;if(root!=null)root.releaseIfClosed();released=true;loop.quitSafely();notifyFinished();
     }
     private void notifyFinished(){
@@ -287,12 +313,13 @@ final class OverviewScanRuntime {
         activity.runOnUiThread(()->activity.overviewFinished(this,details));
     }
     boolean finishedAndReleased(){return workerReturned&&closed&&released;}
-    String fixedSummary(){return "profile=OVERVIEW_V5 stage="+stage+" stopReason="+stage+" terminal="+workerReturned+" released="+released
+    String fixedSummary(){return "profile=OVERVIEW_V6 stage="+stage+" stopReason="+stage+" terminal="+workerReturned+" released="+released
             +" cleanup="+(allResourcesClosed()?"CONFIRMED":"UNKNOWN")+" frames="+intent.frames()+" qualifiedFrames="+qualifiedFrames
             +" scrollSlotsSpent="+intent.swipes()+" scrollDispatchAttempts="+scrollDispatchAttempts+" swipes="+scrollExitedZero
             +" maxFrames=12 maxSwipes=11 taskTaps=0 back=0 textEntry=0"
             +" regions="+regions+" mockPoints="+points+" rolesObserved="+Integer.bitCount(seenRoles)
             +" countUnit=FRAME_ITEM_OBSERVATIONS_NOT_UNIQUE_TASKS"+roleSummary()
+            +" "+diagnostic.summary()
             +" coverageIncomplete=true actionAuthority=false counterAuthority=false taskCompletion=NOT_EVALUATED"
             +" rawDataUploaded=false artifacts="+(artifacts==null?"NONE":artifacts.getFileName().toString());}
     private String roleSummary(){

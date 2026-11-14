@@ -9,7 +9,8 @@ import java.nio.file.attribute.BasicFileAttributes;
 
 /** Independent bounded overview attempt. Existing once records are never reused or reset. */
 final class OverviewScanScope {
-    static final String DIRECTORY = "rewards-overview-review-v5";
+    static final String PREVIOUS_DIRECTORY = "rewards-overview-review-v5";
+    static final String DIRECTORY = "rewards-overview-review-v6";
     static final int MAX_FRAMES = 12, MAX_SWIPES = 11;
     static final long SESSION_TTL = 180_000L, CAPTURE_TTL = 90_000L;
     static long sessionDeadline(long now) {
@@ -62,7 +63,7 @@ final class OverviewScanScope {
         Object child = directory(dir); same(files, parent, dir, child);
         try (FileChannel c = FileChannel.open(dir.resolve(slot + ".burned"), StandardOpenOption.CREATE_NEW,
                 StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
-            ByteBuffer bytes = StandardCharsets.US_ASCII.encode("overview-v5 slot=" + slot
+            ByteBuffer bytes = StandardCharsets.US_ASCII.encode("overview-v6 slot=" + slot
                     + " maxFrames=12 maxSwipes=11 maxTaskTaps=0 maxBack=0 maxText=0 maxOcrPerFrame=1\n");
             while (bytes.hasRemaining()) if (c.write(bytes) <= 0) throw new IOException("Overview marker incomplete");
             c.force(true);

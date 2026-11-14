@@ -54,6 +54,9 @@ public class OverviewScanIntentTest {
         denied(()->s.claimScroll(f,f.deadline));
     }
     @Test public void originalDirectoriesAreNotOverviewNamespace(){
+        assertEquals("rewards-overview-review-v5",OverviewScanScope.PREVIOUS_DIRECTORY);
+        assertEquals("rewards-overview-review-v6",OverviewScanScope.DIRECTORY);
+        assertNotEquals(OverviewScanScope.PREVIOUS_DIRECTORY,OverviewScanScope.DIRECTORY);
         assertNotEquals(UiImageAlignmentScope.DIRECTORY,OverviewScanScope.DIRECTORY);
         assertNotEquals(UiImageAlignmentScope.TITLE_TIMING_DIRECTORY,OverviewScanScope.DIRECTORY);
         assertEquals(12,OverviewScanScope.MAX_FRAMES);assertEquals(11,OverviewScanScope.MAX_SWIPES);

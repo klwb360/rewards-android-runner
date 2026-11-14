@@ -48,6 +48,16 @@ final class OverviewPngBinding {
     }
     OnceBackend backend(){return backend;}
     boolean resourcesClosed(){return source.cleanFor(backend.snapshot());}
+    /** Reads already-held audit scalars; never takes a candidate or invokes native work. */
+    void recordAuditDiagnostic(OverviewFailureDiagnostic diagnostic,OnceBackend.Owner owner){
+        if(diagnostic==null)return;
+        PngImageAudit.Status pngStatus=null;
+        try{
+            var png=source.imageAudit();pngStatus=png==null?null:png.status();
+            var maa=recognizer.overviewAudit(owner);
+            diagnostic.imageAudits(pngStatus,maa==null?null:maa.status(),maa!=null&&maa.fingerprint()!=null,true);
+        }catch(RuntimeException unavailable){diagnostic.imageAudits(pngStatus,null,false,false);}
+    }
     synchronized Completion takeCompletion(BingNavigationSnapshot.Ready after,long now){
         if(taken)return null;taken=true;
         OverviewFrameCapture.Candidate candidate=null;OnceBackend.Owner owner=null;
