@@ -13,8 +13,12 @@ public class NativeProgressReadWiringTest {
  @Test public void noObservationCannotClaimKnown(){String s=CaptureSessionRuntime.qualifiedProgressReadSummary(null,true);assertTrue(s.contains("SEARCH=UNKNOWN READING=UNKNOWN"));assertTrue(s.contains("UNQUALIFIED"));}
  @Test public void noInputAuthorityEscapesCounterProjection()throws Exception{String s=source("NativeProgressScalars.java");for(String token:new String[]{"TapTarget","BackActor","NativeRewardCardSession","RewardsCore.prepare","RewardsCore.verify","System.out","writeText","writeString"})assertFalse(token,s.contains(token));}
  @Test public void allLegacyLiveIssuersIncludingUniqueAreProgressBlocked()throws Exception{
-  var m=java.util.regex.Pattern.compile("static [\\w.<>]+ (issue\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(source("VisibleCaptureAuthority.java"));int count=0;boolean unique=false;
-  while(m.find()){String name=m.group(1);if(name.equals("issueProgressReadIntent")||name.equals("issueProgressReadFrame")||name.equals("issueProgressScanIntent")||name.equals("issueProgressScanFrame")||name.equals("issueCheckpointIntent")||name.equals("issueCheckpointFrame")||name.equals("issueProgressLocateIntent")||name.equals("issueProgressLocateFrame"))continue;assertTrue(name,m.group(2).contains("if(RootProgressReadScope.ACTIVE)throw"));if(name.equals("issueUniquePendingIntent"))unique=true;count++;}assertTrue(unique);assertTrue(count>=17);
+  var m=java.util.regex.Pattern.compile("static [\\w.<>]+ (issue\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(source("VisibleCaptureAuthority.java"));int count=0,alignment=0;boolean unique=false;
+  while(m.find()){String name=m.group(1);
+   if(name.equals("issueAlignment")){alignment++;continue;} // Independently checked by UiImageAlignmentEntryTest.
+   if(name.equals("issueProgressReadIntent")||name.equals("issueProgressReadFrame")||name.equals("issueProgressScanIntent")||name.equals("issueProgressScanFrame")||name.equals("issueCheckpointIntent")||name.equals("issueCheckpointFrame")||name.equals("issueProgressLocateIntent")||name.equals("issueProgressLocateFrame"))continue;
+   assertTrue(name,m.group(2).contains("if(RootProgressReadScope.ACTIVE)throw"));if(name.equals("issueUniquePendingIntent"))unique=true;count++;
+  }assertTrue(unique);assertTrue(count>=17);assertEquals(1,alignment);
  }
  @Test public void allLegacyLiveStartsIncludingUniqueAreProgressBlocked()throws Exception{
   var m=java.util.regex.Pattern.compile("(?m)^    static CaptureSessionRuntime (start\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(source("CaptureSessionRuntime.java"));int count=0;boolean unique=false;

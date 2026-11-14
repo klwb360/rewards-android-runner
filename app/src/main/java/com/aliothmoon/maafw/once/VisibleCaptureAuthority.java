@@ -161,6 +161,19 @@ final class VisibleCaptureAuthority {
             throw new SecurityException("Original two-stage intent and fresh visible approval required");
         return new Proof(epoch,owner,activity.requestIdentity(),now,deadline);
     }
+    /** Independent read-only alignment approval. It never reopens a legacy checkpoint or slot. */
+    static Proof issueAlignment(DormantCaptureConfirmationActivity activity,
+            DormantCaptureConfirmationActivity.LiveClick click,RealCaptureClaim.ProcessEpoch epoch,
+            Object owner,long now){
+        CaptureReleaseGate.requireConfigured();
+        long deadline=UiImageAlignmentScope.sessionDeadline(now);
+        if(activity==null||click==null||epoch==null||owner==null
+                ||epoch!=CaptureSessionRuntime.alignmentEpoch()||!NativeCheckInSession.permissionReady()
+                ||!activity.alignmentApprovalMatches(owner,click)
+                ||!click.consume(activity,activity.requestIdentity(),owner,epoch))
+            throw new SecurityException("Fresh independent alignment confirmation required");
+        return new Proof(epoch,owner,activity.requestIdentity(),now,deadline);
+    }
     static final class ReturnReadApproval {
         final RealCaptureClaim.ProcessEpoch epoch;final Object root,visible,request;final long issued,end;final boolean live,currentOnly,statusRecovery;boolean progressRead,progressScan,progressLocate;ReadOnlyCheckpoint checkpoint;final java.util.function.LongSupplier utc;private boolean spent;
         private ReturnReadApproval(RealCaptureClaim.ProcessEpoch e,Object r,Object v,Object q,long n,long d,boolean l,java.util.function.LongSupplier c){this(e,r,v,q,n,d,l,c,false);}

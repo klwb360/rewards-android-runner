@@ -28,6 +28,7 @@ final class ReviewBingNavigation {
     private final CaptureSessionRuntime.RootSourceReadPermit rootSourcePermit;
     private final CaptureSessionRuntime.RootRecoveryReadPermit rootRecoveryPermit;
     private final CaptureSessionRuntime.RootCurrentReadPermit rootCurrentPermit;
+    private UiImageAlignmentRuntime.MetadataPermit alignmentPermit;
     enum FixedStatus { NOT_INVOKED, AUTHORITY_REJECTED, PROCESS_NULL, STREAM_MISSING, BUFFER_LIMIT, READ_TIMEOUT, EXIT_NONZERO, IO_UNKNOWN, READ_COMPLETE, CLEANUP_UNKNOWN }
     enum PairGate { NOT_INVOKED, PERMIT_REJECTED, AUTHORITY_REJECTED, BUDGET_REJECTED, WINDOWS_READ, ACTIVITIES_READ, POST_AUTHORITY, PARSED }
     record FixedRead(FixedStatus status,int bytes,boolean invoked,boolean exitObserved,int exitCode,boolean quiet,boolean knownClean) {
@@ -116,6 +117,15 @@ final class ReviewBingNavigation {
         var guard=permit.claimReader();if(guard==null)throw new SecurityException("Exact current-read guard required");
         return new ReviewBingNavigation(context,installed,bingUid,systemUiUid,false,guard,null,null,permit);
     }
+    /** Four ordered metadata pairs owned by the independent alignment entry; no legacy budget is borrowed. */
+    static ReviewBingNavigation forUiImageAlignment(Context context,BingIdentityEvidence.Installed installed,
+            int bingUid,int systemUiUid,UiImageAlignmentRuntime.MetadataPermit permit){
+        if(permit==null)throw new SecurityException("Exact alignment metadata permit required");
+        var guard=permit.claimReader();
+        if(guard==null||!guard.valid())throw new SecurityException("Exact alignment own-window guard required");
+        var reader=new ReviewBingNavigation(context,installed,bingUid,systemUiUid,false,guard,null,null,null);
+        reader.alignmentPermit=permit;return reader;
+    }
     private ReviewBingNavigation(Context context,BingIdentityEvidence.Installed installed,int bingUid,int systemUiUid,
             boolean rootPreflight,BingNavigationSnapshot.ReadOnlyGuard readOnlyGuard,CaptureSessionRuntime.RootSourceReadPermit permit,
             CaptureSessionRuntime.RootRecoveryReadPermit recoveryPermit){
@@ -153,6 +163,17 @@ final class ReviewBingNavigation {
             return installed.equals(BingPackageMetadata.read(context.getPackageManager()))
                 &&Shizuku.pingBinder()&&!Shizuku.isPreV11()&&Shizuku.getUid()==0
                 &&Shizuku.checkSelfPermission()==PackageManager.PERMISSION_GRANTED&&shape!=null&&shape.equals(display());
+        }catch(RuntimeException unknown){return false;}
+    }
+    /** Main-thread scalar check only. No fifth metadata pair and no capture/input operation. */
+    boolean alignmentPublicationAuthorityMatches(BingNavigationSnapshot.Shape shape){
+        if(Looper.myLooper()!=Looper.getMainLooper()||alignmentPermit==null||quarantine!=null
+                ||android.os.Process.myUid()<10000||!"com.aliothmoon.maafw.productrewardsworking.capturereview".equals(context.getPackageName())
+                ||!(context.getPackageName()+":capture_once").equals(Application.getProcessName()))return false;
+        try{
+            return installed.equals(BingPackageMetadata.read(context.getPackageManager()))
+                    &&Shizuku.pingBinder()&&!Shizuku.isPreV11()&&Shizuku.getUid()==0
+                    &&Shizuku.checkSelfPermission()==PackageManager.PERMISSION_GRANTED&&shape!=null&&shape.equals(display());
         }catch(RuntimeException unknown){return false;}
     }
     boolean authorityMatches(BingNavigationSnapshot.Shape shape){
@@ -217,6 +238,36 @@ final class ReviewBingNavigation {
         lastCurrentTemplate=null;var r=readPair(shape,false,false,true);var current=lastCurrentTemplate;
         return current!=null?current:new BingNavigationSnapshot.CurrentTemplateResult(r.status(),null,r.firstGate(),r.readOnlyGate());
     }
+    /** Strict sequence and a private permit, rather than a reset or increment of old counters. */
+    BingNavigationSnapshot.Result readAlignment(BingNavigationSnapshot.Shape shape,UiImageAlignmentRuntime.MetadataStage stage){
+        int pair=++diagnosticPairs;PairGate gate=PairGate.PERMIT_REJECTED;
+        FixedRead wd=FixedRead.notRun(),ad=FixedRead.notRun();
+        BingNavigationSnapshot.Result result=BingNavigationSnapshot.Result.unknown();
+        byte[] windows=null,activities=null;
+        try{
+            if(alignmentPermit==null||!alignmentPermit.read(stage))return result;
+            gate=PairGate.AUTHORITY_REJECTED;
+            if(!alignmentPermit.current()||!authorityMatches(shape))return result;
+            long lower=SystemClock.elapsedRealtime();
+            gate=PairGate.WINDOWS_READ;windows=readFixed(true);wd=lastFixed;
+            if(windows==null||!alignmentPermit.current()||!authorityMatches(shape))return result;
+            gate=PairGate.ACTIVITIES_READ;activities=readFixed(false);ad=lastFixed;
+            if(activities==null)return result;
+            gate=PairGate.POST_AUTHORITY;
+            if(!alignmentPermit.current()||!authorityMatches(shape)||!knownClean())return result;
+            var parsed=BingNavigationSnapshot.parseCurrentTemplate(
+                    new String(windows,java.nio.charset.StandardCharsets.UTF_8),
+                    new String(activities,java.nio.charset.StandardCharsets.UTF_8),
+                    new BingNavigationSnapshot.Profile(bingUid,systemUiUid,shape),readOnlyGuard,
+                    lower,SystemClock.elapsedRealtime());
+            result=new BingNavigationSnapshot.Result(parsed.status(),parsed.source()==null?null:parsed.source().ready(),
+                    parsed.readOnlyGate(),parsed.firstGate());
+            lastReadOnlyGate=result.readOnlyGate();gate=PairGate.PARSED;return result;
+        }finally{
+            if(windows!=null)Arrays.fill(windows,(byte)0);if(activities!=null)Arrays.fill(activities,(byte)0);
+            lastDiagnostic=new ReadDiagnostic(pair,gate,wd,ad,result.firstGate(),result.readOnlyGate(),knownClean(),BingNavigationSnapshot.TopDiagnostic.notObserved());
+        }
+    }
     private BingNavigationSnapshot.Result readPair(BingNavigationSnapshot.Shape shape,boolean sourceAuthorized,boolean recovery){return readPair(shape,sourceAuthorized,recovery,false);}
     private BingNavigationSnapshot.Result readPair(BingNavigationSnapshot.Shape shape,boolean sourceAuthorized,boolean recovery,boolean currentTemplate){return readPair(shape,sourceAuthorized,recovery,currentTemplate,null);}
     private BingNavigationSnapshot.Result readPair(BingNavigationSnapshot.Shape shape,boolean sourceAuthorized,boolean recovery,boolean currentTemplate,BingNavigationSnapshot.Ready selectedOriginal){
@@ -230,6 +281,7 @@ final class ReviewBingNavigation {
         FixedRead wd=FixedRead.notRun(),ad=FixedRead.notRun();BingNavigationSnapshot.Result result=BingNavigationSnapshot.Result.unknown();
         byte[] windows=null,activities=null;BingNavigationSnapshot.TopDiagnostic top=BingNavigationSnapshot.TopDiagnostic.notObserved();
         try{
+            if(alignmentPermit!=null)return result; // Alignment readers cannot enter an old budget or navigation path.
             if(readOnlyGuard!=null)lastReadOnlyGate=BingNavigationSnapshot.ReadOnlyGate.LEGACY_METADATA;
             if(rootSourcePermit!=null&&(!sourceAuthorized||!rootSourcePermit.current()))return result;
             if(rootRecoveryPermit!=null&&(!rootRecoveryPermit.current()||!rootRecoveryPermit.read()))return result;
@@ -304,21 +356,26 @@ final class ReviewBingNavigation {
         ParcelFileDescriptor stdout=null,stdin=null,stderr=null;boolean invoked=false,quiet=false,clean=false,exitObserved=false;
         int count=0,exit=-1;FixedStatus status=FixedStatus.AUTHORITY_REJECTED;
         try{
+            if(alignmentPermit!=null&&!alignmentPermit.current())return null;
             var binder=Shizuku.getBinder();if(binder==null||!binder.isBinderAlive()||!Shizuku.pingBinder()||Shizuku.isPreV11()
                 ||Shizuku.getUid()!=0||Shizuku.checkSelfPermission()!=PackageManager.PERMISSION_GRANTED)return null;
             var service=IShizukuService.Stub.asInterface(binder);if(service==null)return null;
+            if(alignmentPermit!=null&&!alignmentPermit.current())return null;
             invoked=true;status=FixedStatus.PROCESS_NULL;process=service.newProcess(command,null,null);
             if(process==null)throw new IllegalStateException();
             status=FixedStatus.STREAM_MISSING;stdout=process.getInputStream();stdin=process.getOutputStream();stderr=process.getErrorStream();
             if(stdout==null)throw new IllegalStateException();input=new ParcelFileDescriptor.AutoCloseInputStream(stdout);stdout=null;status=FixedStatus.IO_UNKNOWN;
             long end=SystemClock.elapsedRealtime()+2000;
-            for(;;){int available=input.available();
+            for(;;){
+                if(alignmentPermit!=null&&!alignmentPermit.current()){status=FixedStatus.READ_TIMEOUT;throw new IllegalStateException();}
+                int available=input.available();
                 if(available>0){if(count==bytes.length){status=FixedStatus.BUFFER_LIMIT;throw new IllegalStateException();}
                     int n=input.read(bytes,count,Math.min(available,bytes.length-count));if(n<0){status=FixedStatus.IO_UNKNOWN;throw new IllegalStateException();}count+=n;}
                 quiet=process.waitForTimeout(0,"MILLISECONDS");if(quiet&&input.available()==0)break;
                 if(SystemClock.elapsedRealtime()>=end){status=FixedStatus.READ_TIMEOUT;throw new IllegalStateException();}if(available==0)Thread.sleep(5);
             }
             exit=process.exitValue();exitObserved=true;if(exit!=0){status=FixedStatus.EXIT_NONZERO;return null;}
+            if(alignmentPermit!=null&&!alignmentPermit.current()){status=FixedStatus.READ_TIMEOUT;throw new IllegalStateException();}
             input.close();input=null;if(stdin!=null){stdin.close();stdin=null;}if(stderr!=null){stderr.close();stderr=null;}clean=true;
             status=FixedStatus.READ_COMPLETE;return Arrays.copyOf(bytes,count);
         }catch(Exception failure){if(failure instanceof InterruptedException)Thread.currentThread().interrupt();

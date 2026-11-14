@@ -20,6 +20,39 @@ final class CaptureSessionRuntime {
     private static final ScheduledExecutorService DEADLINES=Executors.newSingleThreadScheduledExecutor(r->{
         Thread t=new Thread(r,"capture-deadline-scalar");t.setDaemon(true);return t;
     });
+    // The independent alignment entry shares the existing process quarantine. These
+    // methods reserve resources only; its fresh visible proof still admits capture.
+    static RealCaptureClaim.ProcessEpoch alignmentEpoch(){return EPOCH;}
+    static AlignmentRoot retainAlignment(Object graph,long deadline,Runnable cancel,Runnable cleanup,
+            java.util.function.BooleanSupplier closed,CaptureSessionRegistry.Dispatcher owner){
+        if(graph==null||deadline<=SystemClock.elapsedRealtime())throw new SecurityException("Fresh alignment owner required");
+        if(!EPOCH.retain(graph))throw new SecurityException("Previous epoch retained");
+        try{return new AlignmentRoot(graph,ROOT.retain(graph,EPOCH,deadline,cancel,cleanup,closed,owner),closed);}
+        catch(RuntimeException denied){EPOCH.release(graph);throw denied;}
+    }
+    static final class AlignmentRoot {
+        private final Object graph;
+        private final CaptureSessionRegistry.Entry entry;
+        private final java.util.function.BooleanSupplier closed;
+        private volatile boolean held=true;
+        private AlignmentRoot(Object graph,CaptureSessionRegistry.Entry entry,java.util.function.BooleanSupplier closed){
+            this.graph=graph;this.entry=entry;this.closed=closed;
+        }
+        boolean current(){return held&&!entry.requested.get();}
+        void arm(){ROOT.arm(entry,(end,task)->DEADLINES.schedule(task,Math.max(0,end-SystemClock.elapsedRealtime()),TimeUnit.MILLISECONDS),SystemClock::elapsedRealtime);}
+        void boundDeadline(long deadline){
+            if(!held||deadline<0||deadline>entry.deadline)throw new SecurityException("Alignment deadline cannot extend the session");
+            try{DEADLINES.schedule(()->ROOT.request(entry),Math.max(0,deadline-SystemClock.elapsedRealtime()),TimeUnit.MILLISECONDS);}
+            catch(RuntimeException unavailable){ROOT.request(entry);}
+        }
+        void request(){ROOT.request(entry);}
+        // Called only on the original owner after actual cleanup is known.
+        void releaseIfClosed(){
+            if(!held||!closed.getAsBoolean())return;
+            ROOT.releaseIfClosed(entry);
+            EPOCH.release(graph);held=false;
+        }
+    }
     private final Object requestOwner=new Object();
     private final AtomicBoolean cancelled=new AtomicBoolean();
     private final DormantCaptureConfirmationActivity activity;

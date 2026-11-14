@@ -36,18 +36,23 @@ final class AndroidUiStructureReader {
 
     static Result read(Context context, String nonce, long absoluteDeadline,
                        BooleanSupplier current, DispatchGate finalGate) {
-        return readInternal(context,nonce,absoluteDeadline,current,finalGate,false);
+        return readInternal(context,nonce,absoluteDeadline,current,finalGate,false,false);
     }
     /** Same bounded tree read and admission gates, with typed read-only card geometry. */
     static Result readRegions(Context context, String nonce, long absoluteDeadline,
                               BooleanSupplier current, DispatchGate finalGate) {
-        return readInternal(context,nonce,absoluteDeadline,current,finalGate,true);
+        return readInternal(context,nonce,absoluteDeadline,current,finalGate,true,false);
+    }
+    /** Independent alignment entry: fixed region protocol, with all existing transport gates. */
+    static Result readAlignmentRegions(Context context,String nonce,long absoluteDeadline,
+                                       BooleanSupplier current,DispatchGate finalGate){
+        return readInternal(context,nonce,absoluteDeadline,current,finalGate,true,true);
     }
     private static Result readInternal(Context context, String nonce, long absoluteDeadline,
-                                      BooleanSupplier current, DispatchGate finalGate, boolean regionMode) {
-        boolean boundMode = ReadOnlyCheckpoint.CURRENT == ReadOnlyCheckpoint.UI_BOUND_POINTS_V53;
-        boolean locatedMode = ReadOnlyCheckpoint.CURRENT == ReadOnlyCheckpoint.UI_LOCATE_V52;
-        boolean fieldMode = ReadOnlyCheckpoint.CURRENT == ReadOnlyCheckpoint.UI_FIELD_V51 || locatedMode;
+                                      BooleanSupplier current, DispatchGate finalGate, boolean regionMode,boolean alignmentMode) {
+        boolean boundMode = alignmentMode || ReadOnlyCheckpoint.CURRENT == ReadOnlyCheckpoint.UI_BOUND_POINTS_V53;
+        boolean locatedMode = !alignmentMode && ReadOnlyCheckpoint.CURRENT == ReadOnlyCheckpoint.UI_LOCATE_V52;
+        boolean fieldMode = !alignmentMode && (ReadOnlyCheckpoint.CURRENT == ReadOnlyCheckpoint.UI_FIELD_V51 || locatedMode);
         byte[] bytes = new byte[fieldMode ? NativeUiStructureProtocol.MAX_LINE_FIELD : NativeUiStructureProtocol.MAX_LINE];
         IRemoteProcess process = null;
         InputStream input = null;
@@ -69,8 +74,8 @@ final class AndroidUiStructureReader {
             if (binder == null || !binder.isBinderAlive()) throw new Stop(status);
             var service = IShizukuService.Stub.asInterface(binder);
             if (service == null) throw new Stop(status);
-            boolean readyMode = ReadOnlyCheckpoint.CURRENT == ReadOnlyCheckpoint.UI_READY_V49;
-            boolean formatMode = ReadOnlyCheckpoint.CURRENT == ReadOnlyCheckpoint.UI_FORMAT_V50;
+            boolean readyMode = !alignmentMode && ReadOnlyCheckpoint.CURRENT == ReadOnlyCheckpoint.UI_READY_V49;
+            boolean formatMode = !alignmentMode && ReadOnlyCheckpoint.CURRENT == ReadOnlyCheckpoint.UI_FORMAT_V50;
             String[] command = {"/system/bin/app_process", "-cp", apk, "/system/bin", HELPER, nonce, Long.toString(deadline)};
             if (readyMode) {
                 command = Arrays.copyOf(command, command.length + 1);
