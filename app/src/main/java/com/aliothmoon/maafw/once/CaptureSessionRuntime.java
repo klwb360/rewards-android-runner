@@ -511,8 +511,19 @@ final class CaptureSessionRuntime {
             if(returnReadIntent.uiLocate()&&!entryAnchor.sameEntrySource(template))throw new SecurityException("Original Template continuity lost after SHOW");
             returnReadIntent.anchorEntryTemplate(template,SystemClock.elapsedRealtime());entryTemplateConfirmed=true;entryProof=template;
             uiStage="ENTRY_COUNTER_READ";entryBudget.burn(RewardsEntryBudget.Slot.UI_READ_1);
-            uiRead=AndroidUiStructureReader.read(activity.getApplicationContext(),nonce,Math.min(returnReadIntent.readDeadline(),SystemClock.elapsedRealtime()+10000),this::entryLocalCurrent,
-                ()->entryCounterSource(V46EntryMetadataReader.Stage.COUNTER_BEFORE));
+            AndroidUiStructureReader.DispatchGate counterGate=()->{
+                if(!entryCounterSource(V46EntryMetadataReader.Stage.COUNTER_BEFORE))return false;
+                if(returnReadIntent.uiBoundPoints()){
+                    if(!rootEpochHeld)return false;
+                    uiRegionPending=UiRegionSourceEvidence.begin(this,returnReadIntent,EPOCH,nonce,entryProof,SystemClock.elapsedRealtime());
+                    return uiRegionPending!=null;
+                }
+                return true;
+            };
+            long uiDeadline=Math.min(returnReadIntent.readDeadline(),SystemClock.elapsedRealtime()+10000);
+            uiRead=returnReadIntent.uiBoundPoints()
+                ?AndroidUiStructureReader.readRegions(activity.getApplicationContext(),nonce,uiDeadline,this::entryLocalCurrent,counterGate)
+                :AndroidUiStructureReader.read(activity.getApplicationContext(),nonce,uiDeadline,this::entryLocalCurrent,counterGate);
             if(uiRead!=null&&uiRead.invoked())entryUiReads++;
             if(uiRead!=null&&uiRead.knownClean())uiSourceAfter=entryCounterSource(V46EntryMetadataReader.Stage.COUNTER_AFTER);
             uiStage="ENTRY_FINISHED";
@@ -526,6 +537,7 @@ final class CaptureSessionRuntime {
         +" commitAttempted="+(entryNavigation!=null&&entryNavigation.commitAttempted())+" commitFlushed="+(entryNavigation!=null&&entryNavigation.commitFlushed())+" actionAttempted="+(entryNavigation!=null&&entryNavigation.commitAttempted()&&entryNavigation.receipt()==null?"UNKNOWN":Boolean.toString(entryNavigation!=null&&entryNavigation.actionAttempted()))+" actionReturnedTrue="+(entryNavigation!=null&&entryNavigation.commitAttempted()&&entryNavigation.receipt()==null?"UNKNOWN":Boolean.toString(entryNavigation!=null&&entryNavigation.actionReturnedTrue()))
         +" actionType="+(returnReadIntent.uiBoundPoints()?"NONE":returnReadIntent.uiLocate()?"ACTION_SHOW_ON_SCREEN":"HOME_ENTRY_CLICK")+" actorStatus="+(entryNavigation==null?"NOT_INVOKED":entryNavigation.status())+" actionReceiptReason="+(entryNavigation==null||entryNavigation.receipt()==null?"NOT_OBSERVED":entryNavigation.receipt().reason())+" actionOutcome="+entryActionOutcome()+" navigationCleanup="+(entryNavigation==null?"NOT_INVOKED":entryNavigation.knownClean()?"CONFIRMED":"UNKNOWN")+" waitFiveSeconds="+entryWaitConfirmed+" templateConfirmed="+entryTemplateConfirmed+" uiReadsInvoked="+entryUiReads+" stage="+uiStage;}
     private AndroidUiStructureReader.Result uiRead;private UiStructurePublication pendingUiPublication;
+    private UiRegionSourceEvidence.Pending uiRegionPending;
     private BingNavigationSnapshot.CurrentTemplateSource uiSourceProof;
     private boolean uiSourceAfter;private String uiStage="NOT_INVOKED";
     private boolean freshUiSource(){
@@ -559,11 +571,14 @@ final class CaptureSessionRuntime {
         boolean geometry=report!=null&&report.displayId()==0&&report.left()>=0&&report.top()>=0&&report.right()<=width&&report.bottom()<=height
             &&(report.rotationBefore()==-1||report.rotationBefore()==rootRotation)&&(report.rotationAfter()==-1||report.rotationAfter()==rootRotation);
         boolean qualified=released&&uiSourceAfter&&geometry&&!cancelled.get()&&returnReadIntent.current(SystemClock.elapsedRealtime());
-        pendingUiPublication=new UiStructurePublication(report,qualified,Math.min(returnReadIntent.readDeadline(),returnReadIntent.sessionEnd()));
+        var regionSource=uiRegionPending==null?null:uiRegionPending.complete(report,entryProof,SystemClock.elapsedRealtime(),qualified&&rootEpochHeld);
+        uiRegionPending=null;
+        pendingUiPublication=new UiStructurePublication(report,qualified,Math.min(returnReadIntent.readDeadline(),returnReadIntent.sessionEnd()),regionSource,this,returnReadIntent,EPOCH);
+        boolean sourceContinuity=report!=null&&report.regions()!=null?regionSource!=null:uiSourceAfter;
         reportFinal=true;if(released){if(rootEpochHeld){EPOCH.release(this);rootEpochHeld=false;}ROOT.releaseIfClosed(entry);}
         String details="profile=UI_STRUCTURE_V45 read=1 screenshots=0 ocr=0 imageAudit=NOT_REQUESTED taskTaps=0 swipes=0 back=0 textEntry=0 oldBusinessContinued=false actionAuthority=false ledgerChanged=false stage="+uiStage
-            +" sourceBeforeAfterSame="+uiSourceAfter+" displayRotationUnchanged="+geometry+" cleanup="+(released?"CONFIRMED":"UNKNOWN")+" readPhaseDeadline="+returnReadIntent.readDeadline()+" parentDeadline="+returnReadIntent.sessionEnd();
-        if(returnReadIntent.entryRecovery())details=entrySummary()+" sourceBeforeAfterSame="+uiSourceAfter+" displayRotationUnchanged="+geometry+" cleanup="+(released?"CONFIRMED":"UNKNOWN");
+            +" sourceBeforeAfterSame="+sourceContinuity+" sourceGeometryWithinDisplay="+geometry+" cleanup="+(released?"CONFIRMED":"UNKNOWN")+" readPhaseDeadline="+returnReadIntent.readDeadline()+" parentDeadline="+returnReadIntent.sessionEnd();
+        if(returnReadIntent.entryRecovery())details=entrySummary()+" sourceBeforeAfterSame="+sourceContinuity+" sourceGeometryWithinDisplay="+geometry+" cleanup="+(released?"CONFIRMED":"UNKNOWN");
         if(uiRead!=null)details+=" readerStatus="+uiRead.fixedStatus()+" helperInvoked="+uiRead.invoked()+" stdoutBytes="+uiRead.acquiredBytes()+" processQuiet="+uiRead.processQuiet()+" exitObserved="+uiRead.exitObserved()+" exitCode="+uiRead.exitCode();
         if(report!=null)details+=" helperReason="+report.reason()+" helperCleanup="+report.cleanup();
         activity.returnReadFrameFinished(this,null,details);
@@ -576,6 +591,7 @@ final class CaptureSessionRuntime {
                 &&(returnReadIntent.entryRecovery()?entryClean()&&entryAuthority():returnMetadata!=null&&returnMetadata.currentPublicationAuthorityMatches(new BingNavigationSnapshot.Shape(width,height,rootRotation)));
             hidden=activity.rootHiddenScalar()&&activity.hiddenWithSoleTask();long now=SystemClock.elapsedRealtime();
             current=!cancelled.get()&&returnReadIntent.live()&&returnReadIntent.current(now)&&now<returnReadIntent.readDeadline()&&(returnReadIntent.entryRecovery()?entryProof!=null&&entryProof.fresh(now):uiSourceProof!=null&&uiSourceProof.fresh(now));
+            if(returnReadIntent.uiBoundPoints())current=current&&!EPOCH.retaining();
         }catch(RuntimeException unknown){source=false;}
         return details+"\n"+token.publish(SystemClock.elapsedRealtime(),current,hidden,source);
     }

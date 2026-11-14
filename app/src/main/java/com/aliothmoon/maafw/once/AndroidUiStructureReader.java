@@ -36,6 +36,15 @@ final class AndroidUiStructureReader {
 
     static Result read(Context context, String nonce, long absoluteDeadline,
                        BooleanSupplier current, DispatchGate finalGate) {
+        return readInternal(context,nonce,absoluteDeadline,current,finalGate,false);
+    }
+    /** Same bounded tree read and admission gates, with typed read-only card geometry. */
+    static Result readRegions(Context context, String nonce, long absoluteDeadline,
+                              BooleanSupplier current, DispatchGate finalGate) {
+        return readInternal(context,nonce,absoluteDeadline,current,finalGate,true);
+    }
+    private static Result readInternal(Context context, String nonce, long absoluteDeadline,
+                                      BooleanSupplier current, DispatchGate finalGate, boolean regionMode) {
         boolean boundMode = ReadOnlyCheckpoint.CURRENT == ReadOnlyCheckpoint.UI_BOUND_POINTS_V53;
         boolean locatedMode = ReadOnlyCheckpoint.CURRENT == ReadOnlyCheckpoint.UI_LOCATE_V52;
         boolean fieldMode = ReadOnlyCheckpoint.CURRENT == ReadOnlyCheckpoint.UI_FIELD_V51 || locatedMode;
@@ -51,7 +60,7 @@ final class AndroidUiStructureReader {
         long deadline = Math.min(absoluteDeadline, started + 9000);
         try {
             if (context == null || current == null || finalGate == null
-                    || !NativeUiStructureProtocol.validNonce(nonce) || deadline <= started)
+                    || !NativeUiStructureProtocol.validNonce(nonce) || deadline <= started || regionMode && !boundMode)
                 throw new Stop(FixedStatus.INVALID_REQUEST);
             if (!authority(context) || !live(current, deadline)) throw new Stop(status);
             String apk = verifiedApk(context);
@@ -77,7 +86,7 @@ final class AndroidUiStructureReader {
             }
             if (boundMode) {
                 command = Arrays.copyOf(command, command.length + 1);
-                command[command.length - 1] = "BOUND_POINTS_V53";
+                command[command.length - 1] = regionMode ? "BOUND_REGIONS" : "BOUND_POINTS_V53";
             }
             if (!authority(context) || !live(current, deadline)) throw new Stop(status);
             if (!CLAIMED.compareAndSet(false, true)) throw new Stop(FixedStatus.ALREADY_CLAIMED);
@@ -126,7 +135,9 @@ final class AndroidUiStructureReader {
             // Require one complete ASCII frame and reject diagnostics, trailing bytes and extra lines.
             if (!validFrame(bytes, count, fieldMode)) throw new Stop(FixedStatus.PROTOCOL_REJECTED);
             try {
-                report = NativeUiStructureProtocol.parse(new String(bytes, 0, count-1,
+                report = regionMode ? NativeUiStructureProtocol.parse(new String(bytes,0,count-1,
+                        StandardCharsets.US_ASCII),nonce,dispatched,deadline,SystemClock.elapsedRealtime(),true,false,true,true)
+                        : NativeUiStructureProtocol.parse(new String(bytes, 0, count-1,
                         StandardCharsets.US_ASCII), nonce, dispatched, deadline, SystemClock.elapsedRealtime(), readyMode || formatMode || fieldMode || boundMode, fieldMode, boundMode);
             } catch (RuntimeException invalid) { throw new Stop(FixedStatus.PROTOCOL_REJECTED); }
             status = FixedStatus.READ_COMPLETE;

@@ -4,15 +4,30 @@ import java.util.regex.*;
 /** Explicit points grammar bound to exact original resource/parent structure; never infers middle-text meaning. */
 final class NativeUiBoundPointsParser {
  record Node(int index,int parentIndex,boolean visible,boolean packageMatches,String resourceId,String text,String description,int left,int top,int right,int bottom){}
+ record BoundResult(NativeUiStructureParser.Result counters,NativeUiRegions.Pair regions){
+  BoundResult{Objects.requireNonNull(counters);Objects.requireNonNull(regions);}
+ }
+ private record Scan(NativeUiStructureParser.TaskResult counter,Node summary){}
  private static final String[] IDS={"homePageWrapper","dailyTaskPanel","dailyActivities","search","read"};
  private static final Pattern SEARCH=summary("搜索以赚取"),READ=summary("阅读以赚取");
  private static Pattern summary(String title){return Pattern.compile("\\A"+title+", ([\\p{L} ]{1,128}), 已赚取 (\\S+) 积分\\(需要 (\\S+) 积分\\)\\z");}
  static NativeUiStructureParser.Result parse(List<Node> nodes){
-  Map<Integer,Node> byIndex=new HashMap<>();Node[] chain=new Node[5];
-  if(!shape(nodes,byIndex)||!chain(nodes,chain))return bothInvalid();
-  if(wrongTaskSummary(nodes,byIndex,chain[3],"阅读以赚取")||wrongTaskSummary(nodes,byIndex,chain[4],"搜索以赚取"))return bothInvalid();
-  return new NativeUiStructureParser.Result(scan(nodes,byIndex,chain[3],true),scan(nodes,byIndex,chain[4],false));
+  return parseRegions(nodes).counters();
  }
+ /** Structure is retained separately from counter knowledge; neither grants action authority. */
+ static BoundResult parseRegions(List<Node> nodes){
+  Map<Integer,Node> byIndex=new HashMap<>();Node[] chain=new Node[5];
+  if(!shape(nodes,byIndex)||!chain(nodes,chain))return invalidRegions();
+  if(wrongTaskSummary(nodes,byIndex,chain[3],"阅读以赚取")||wrongTaskSummary(nodes,byIndex,chain[4],"搜索以赚取"))return invalidRegions();
+  Scan search=scan(nodes,byIndex,chain[3],true),reading=scan(nodes,byIndex,chain[4],false);
+  return new BoundResult(new NativeUiStructureParser.Result(search.counter(),reading.counter()),
+   new NativeUiRegions.Pair(region(NativeUiRegions.Role.SEARCH,chain[3],search),region(NativeUiRegions.Role.READING,chain[4],reading)));
+ }
+ private static NativeUiRegions.Region region(NativeUiRegions.Role role,Node card,Scan scan){
+  return new NativeUiRegions.Region(role,rect(card),scan.summary()==null?null:rect(scan.summary()));
+ }
+ private static NativeUiRegions.Rect rect(Node n){return new NativeUiRegions.Rect(n.left(),n.top(),n.right(),n.bottom());}
+ private static BoundResult invalidRegions(){return new BoundResult(bothInvalid(),NativeUiRegions.Pair.empty());}
  private static boolean shape(List<Node> nodes,Map<Integer,Node> map){
   if(nodes==null||nodes.isEmpty()||nodes.size()>512)return false;
   Map<Integer,Integer> depths=new HashMap<>();Node root=null;int chars=0;
@@ -45,8 +60,8 @@ final class NativeUiBoundPointsParser {
    for(String field:new String[]{n.text(),n.description()})if(field!=null){int start=leadingIgnored(field);if(field.startsWith(other,start)&&field.length()>start+other.length())return true;}
   }return false;
  }
- private static NativeUiStructureParser.TaskResult scan(List<Node> nodes,Map<Integer,Node> map,Node card,boolean search){
-  int count=0,current=0,target=0;boolean invalid=false,eligible=false;
+ private static Scan scan(List<Node> nodes,Map<Integer,Node> map,Node card,boolean search){
+  int count=0,current=0,target=0;boolean invalid=false,eligible=false;Node summary=null;
   String own=search?"搜索以赚取":"阅读以赚取",other=search?"阅读以赚取":"搜索以赚取";
   for(Node n:nodes){
    if(n.index()!=card.index()&&!descendant(n,card,map))continue;
@@ -63,13 +78,13 @@ final class NativeUiBoundPointsParser {
     count++;Integer value=number(m.group(2)),total=number(m.group(3));
     if(value==null||total==null||total==0||value>total){invalid=true;continue;}
     if(n.visible()&&(!contains(card,n)||!bounds(n))){invalid=true;continue;}
-    if(n.visible()&&n.parentIndex()==card.index()){eligible=true;current=value;target=total;}
+    if(n.visible()&&n.parentIndex()==card.index()){eligible=true;current=value;target=total;summary=n;}
    }
   }
-  if(invalid)return result(NativeUiStructureParser.Status.INVALID,0,0,count);
-  if(count>1)return result(NativeUiStructureParser.Status.AMBIGUOUS,0,0,count);
-  if(count==0||!eligible)return result(NativeUiStructureParser.Status.UNKNOWN,0,0,count);
-  return result(NativeUiStructureParser.Status.KNOWN,current,target,1);
+  if(invalid)return new Scan(result(NativeUiStructureParser.Status.INVALID,0,0,count),null);
+  if(count>1)return new Scan(result(NativeUiStructureParser.Status.AMBIGUOUS,0,0,count),null);
+  if(count==0||!eligible)return new Scan(result(NativeUiStructureParser.Status.UNKNOWN,0,0,count),null);
+  return new Scan(result(NativeUiStructureParser.Status.KNOWN,current,target,1),summary);
  }
  /** Classification only: suspicious title prefixes never become acceptable normalized evidence. */
  private static int leadingIgnored(String field){

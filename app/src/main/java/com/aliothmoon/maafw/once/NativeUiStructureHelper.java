@@ -29,7 +29,8 @@ public final class NativeUiStructureHelper {
         long start = SystemClock.elapsedRealtime(), deadline;
         if (args == null || !validReadyArguments(args) || !NativeUiStructureProtocol.validNonce(args[0])) return;
         boolean readyMode=args.length==3;
-        boolean boundMode=readyMode&&"BOUND_POINTS_V53".equals(args[2]);
+        boolean regionMode=readyMode&&"BOUND_REGIONS".equals(args[2]);
+        boolean boundMode=regionMode||readyMode&&"BOUND_POINTS_V53".equals(args[2]);
         boolean formatMode=readyMode&&"FORMAT_V50".equals(args[2]);
         boolean locatedMode=readyMode&&"DIAGNOSTIC_LOCATED_V52".equals(args[2]);
         boolean fieldMode=readyMode&&"DIAGNOSTIC_V51".equals(args[2]);
@@ -46,6 +47,7 @@ public final class NativeUiStructureHelper {
         NativeUiStructureProtocol.Cleanup cleanup = NativeUiStructureProtocol.Cleanup.NOT_STARTED;
         NativeUiStructureProtocol.Task search = NativeUiStructureProtocol.Task.unknown();
         NativeUiStructureProtocol.Task reading = NativeUiStructureProtocol.Task.unknown();
+        NativeUiRegions.Pair regions = regionMode ? NativeUiRegions.Pair.empty() : null;
         HandlerThread thread = null;
         UiAutomation automation = null;
         boolean attemptedConnect = false, clean = true;
@@ -156,7 +158,11 @@ public final class NativeUiStructureHelper {
             }
             checkTime(readEnd);
             if(!fieldMode){if(!readyMode||!diagnostics.blocked()){
-                NativeUiStructureParser.Result result = boundMode?NativeUiBoundPointsParser.parse(boundRecords):formatMode?NativeUiStructureV50Parser.parse(records):NativeUiStructureParser.parse(records);
+                NativeUiStructureParser.Result result;
+                if(regionMode){
+                    var bound=NativeUiBoundPointsParser.parseRegions(boundRecords);
+                    result=bound.counters();regions=bound.regions();
+                }else result = boundMode?NativeUiBoundPointsParser.parse(boundRecords):formatMode?NativeUiStructureV50Parser.parse(records):NativeUiStructureParser.parse(records);
                 search = task(result.search()); reading = task(result.reading());
             }} // A valid tree with a fixed sign-in/error label retains UNKNOWN tasks; not page-ready proof.
             acquired = SystemClock.elapsedRealtime();
@@ -200,6 +206,7 @@ public final class NativeUiStructureHelper {
         if (cleanup == NativeUiStructureProtocol.Cleanup.UNKNOWN) reason = NativeUiStructureProtocol.Reason.CLEANUP_UNKNOWN;
         if (reason != NativeUiStructureProtocol.Reason.OK) {
             search = NativeUiStructureProtocol.Task.unknown(); reading = NativeUiStructureProtocol.Task.unknown();
+            if(regionMode)regions=NativeUiRegions.Pair.empty();
             acquired = Math.min(finished, Math.max(start, acquired));
             // Invalid geometry must not prevent a bounded failure receipt.
             windowId = -1; displayId = -1; bounds.setEmpty();
@@ -207,12 +214,12 @@ public final class NativeUiStructureHelper {
         try {
             NativeUiStructureProtocol.Report report = new NativeUiStructureProtocol.Report(args[0], start,
                     acquired, finished, reason, cleanup, nodeCount, chars, windowId, displayId,
-                    bounds.left, bounds.top, bounds.right, bounds.bottom, -1, -1, search, reading,readyMode?diagnostics.result(idle):null,fieldMode?fieldDiagnostics.result():null,boundMode);
+                    bounds.left, bounds.top, bounds.right, bounds.bottom, -1, -1, search, reading,readyMode?diagnostics.result(idle):null,fieldMode?fieldDiagnostics.result():null,boundMode,regions);
             System.out.println(NativeUiStructureProtocol.encode(report));
             System.out.flush();
         } catch (Throwable ignored) { /* No raw exception or partial report is published. */ }
     }
-    static boolean validReadyArguments(String[] args){return args!=null&&(args.length==2||args.length==3&&("READY_V49".equals(args[2])||"FORMAT_V50".equals(args[2])||"DIAGNOSTIC_V51".equals(args[2])||"DIAGNOSTIC_LOCATED_V52".equals(args[2])||"BOUND_POINTS_V53".equals(args[2])));}
+    static boolean validReadyArguments(String[] args){return args!=null&&(args.length==2||args.length==3&&("READY_V49".equals(args[2])||"FORMAT_V50".equals(args[2])||"DIAGNOSTIC_V51".equals(args[2])||"DIAGNOSTIC_LOCATED_V52".equals(args[2])||"BOUND_POINTS_V53".equals(args[2])||"BOUND_REGIONS".equals(args[2])));}
     private static boolean packageMatches(CharSequence value) {
         return value != null && value.length() == BING.length() && BING.contentEquals(value);
     }
