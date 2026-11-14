@@ -78,7 +78,7 @@ final class OwnStateReadOnlyFiles {
     }
     private static Path target(Path trustedRoot,String fixedRelative)throws Stop {
         if(trustedRoot==null||!trustedRoot.isAbsolute()||!trustedRoot.equals(trustedRoot.normalize())||fixedRelative==null||fixedRelative.isEmpty())throw new Stop(Status.UNSAFE_PATH);
-        Path relative=Path.of(fixedRelative);
+        Path relative=Paths.get(fixedRelative);
         if(relative.isAbsolute()||relative.getRoot()!=null||relative.getNameCount()==0)throw new Stop(Status.UNSAFE_PATH);
         for(Path part:relative)if(part.toString().equals("..")||part.toString().equals(".")||part.toString().isEmpty())throw new Stop(Status.UNSAFE_PATH);
         Path target=trustedRoot.resolve(relative).normalize();
