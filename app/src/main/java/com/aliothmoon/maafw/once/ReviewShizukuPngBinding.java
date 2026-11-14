@@ -153,8 +153,14 @@ final class ReviewShizukuPngBinding {
     static AlignmentBinding bindReadOnlyAlignment(Context context,BackendPorts.ClaimBoundary existingClaim,
             PngCaptureSession.Gate existingGate,BackendPorts.RevocationFence existingFence,
             Executor existingOwnerExecutor,UiImageAlignmentCapture capture){
+        return bindReadOnlyAlignment(context,existingClaim,existingGate,existingFence,existingOwnerExecutor,capture,null);
+    }
+    static AlignmentBinding bindReadOnlyAlignment(Context context,BackendPorts.ClaimBoundary existingClaim,
+            PngCaptureSession.Gate existingGate,BackendPorts.RevocationFence existingFence,
+            Executor existingOwnerExecutor,UiImageAlignmentCapture capture,PreparedAlignmentModels prepared){
         if(capture==null||existingGate==null)throw new IllegalArgumentException("Alignment capture and gate required");
-        var recognizer=MaaRecognizer.rootUiRegionAlignmentAudit(context,capture);
+        var recognizer=prepared==null?MaaRecognizer.rootUiRegionAlignmentAudit(context,capture)
+                :MaaRecognizer.rootUiRegionAlignmentAudit(context,capture,prepared);
         var geometry=new BoundedPngGray.Geometry(capture.width(),capture.height());
         PngCaptureSession.Gate gate=()->{
             existingGate.requireCurrent();

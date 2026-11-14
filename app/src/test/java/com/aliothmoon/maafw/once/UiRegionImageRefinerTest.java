@@ -51,6 +51,36 @@ public class UiRegionImageRefinerTest {
         return pixels;
     }
 
+    private static void roundedCard(byte[] pixels, NativeUiRegions.Rect box, int radius,
+                                    int background, int surface) {
+        // Subpixel coverage of actual circular corners, not rectangular corner cutouts.
+        // These synthetic pixels and supplied OCR rows do not represent a real OCR run.
+        for (int y = box.top(); y < box.bottom(); y++) {
+            for (int x = box.left(); x < box.right(); x++) {
+                int covered = 0;
+                for (int sy = 0; sy < 4; sy++) for (int sx = 0; sx < 4; sx++) {
+                    double px = x + (sx + .5) / 4, py = y + (sy + .5) / 4;
+                    double cx = Math.max(box.left() + radius, Math.min(px, box.right() - radius));
+                    double cy = Math.max(box.top() + radius, Math.min(py, box.bottom() - radius));
+                    double dx = px - cx, dy = py - cy;
+                    if (dx * dx + dy * dy <= radius * radius) covered++;
+                }
+                pixels[y * W + x] = (byte) (background + Math.round((surface - background) * covered / 16.0));
+            }
+        }
+    }
+
+    private static byte[] roundedLowContrastImage() {
+        byte[] pixels = blank(240);
+        roundedCard(pixels, SEARCH_PIXEL, 5, 240, 247);
+        roundedCard(pixels, READING_PIXEL, 6, 240, 247);
+        // Interior ink must not require a perfectly uniform card surface.
+        fill(pixels, rect(30, 45, 45, 48), 100);
+        fill(pixels, rect(52, 50, 100, 52), 100);
+        fill(pixels, rect(30, 130, 80, 133), 100);
+        return pixels;
+    }
+
     private static FrameStructureEvidence.Line row(String text, int x, int y, int w, int h, double score) {
         return new FrameStructureEvidence.Line(text, x, y, w, h, score);
     }
@@ -135,9 +165,11 @@ public class UiRegionImageRefinerTest {
         for (byte[] pixels : List.of(blank(200), blank(240))) {
             held(NO_SURFACE_CONTRAST, observe(searchOnly(SEARCH_COARSE), pixels, List.of(searchTitle())).search());
         }
-        byte[] weak = blank(234);
-        fill(weak, SEARCH_PIXEL, 240);
-        held(NO_SURFACE_CONTRAST, observe(searchOnly(SEARCH_COARSE), weak, List.of(searchTitle())).search());
+        for (int contrast = 0; contrast <= 5; contrast++) {
+            byte[] weak = blank(235);
+            fill(weak, SEARCH_PIXEL, 235 + contrast);
+            held(NO_SURFACE_CONTRAST, observe(searchOnly(SEARCH_COARSE), weak, List.of(searchTitle())).search());
+        }
     }
 
     @Test public void localThresholdAcceptsNonWhiteSurfacesWithoutMoreCardAbsoluteWhiteBias() {
@@ -146,6 +178,88 @@ public class UiRegionImageRefinerTest {
         var result = observe(searchOnly(SEARCH_COARSE), pixels, List.of(searchTitle()));
         assertEquals(VISUAL_CANDIDATE, result.search().status());
         assertEquals(SEARCH_PIXEL, result.search().cardBoundary());
+    }
+
+    @Test public void exactlySixLevelContrastAcceptsBothPixelBoundariesAtTheDiagnosticThreshold() {
+        byte[] pixels = blank(240);
+        fill(pixels, SEARCH_PIXEL, 246);
+        fill(pixels, READING_PIXEL, 246);
+        var result = observe(pair(), pixels, titles());
+        assertEquals(VISUAL_CANDIDATE, result.search().status());
+        assertEquals(VISUAL_CANDIDATE, result.reading().status());
+        assertEquals(SEARCH_PIXEL, result.search().cardBoundary());
+        assertEquals(READING_PIXEL, result.reading().cardBoundary());
+        assertEquals(rect(28, 28, 88, 38), result.search().textBounds());
+        assertEquals(rect(28, 108, 88, 118), result.reading().textBounds());
+        assertTrue(result.summary(true).contains("actionAuthority=false"));
+    }
+
+    @Test public void antialiasedRoundedSevenLevelCardsRetainBothBoundariesAndOriginalTitleBoxes() {
+        var result = observe(pair(), roundedLowContrastImage(), titles());
+        assertEquals(VISUAL_CANDIDATE, result.search().status());
+        assertEquals(VISUAL_CANDIDATE, result.reading().status());
+        assertEquals(SEARCH_PIXEL, result.search().cardBoundary());
+        assertEquals(READING_PIXEL, result.reading().cardBoundary());
+        assertEquals(rect(28, 28, 88, 38), result.search().textBounds());
+        assertEquals(rect(28, 108, 88, 118), result.reading().textBounds());
+        assertTrue(result.summary(true).contains("actionAuthority=false"));
+    }
+
+    @Test public void aFiveLevelRightEdgeCannotBorrowContrastFromTheOtherThreeSides() {
+        byte[] pixels = blank(240);
+        fill(pixels, SEARCH_PIXEL, 247);
+        // The card remains a filled single component, but its right exterior is only five levels darker.
+        fill(pixels, rect(140, 20, 141, 70), 242);
+        held(EDGE_UNSUPPORTED, observe(searchOnly(SEARCH_COARSE), pixels, List.of(searchTitle())).search());
+    }
+
+    @Test public void lowContrastCardWithMoreThanOneFifthOfItsTopEdgeMissingStaysHeld() {
+        byte[] pixels = blank(240);
+        fill(pixels, SEARCH_PIXEL, 247);
+        // Remove 25 of the 120 top-edge pixels; all other sides and almost all fill remain intact.
+        fill(pixels, rect(20, 20, 45, 23), 240);
+        held(EDGE_UNSUPPORTED, observe(searchOnly(SEARCH_COARSE), pixels, List.of(searchTitle())).search());
+    }
+
+    @Test public void smoothBackgroundGradientsDoNotBecomeCardsWithPerfectTitles() {
+        for (boolean horizontal : new boolean[] {true, false}) {
+            byte[] pixels = blank(240);
+            for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
+                pixels[y * W + x] = (byte) (220 + (horizontal ? x : y) / 8);
+            }
+            held(SURFACE_CROSSES_COARSE,
+                    observe(searchOnly(SEARCH_COARSE), pixels, List.of(searchTitle())).search());
+        }
+        byte[] glow = blank(240);
+        for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
+            double distance = Math.hypot(x - 80, y - 45);
+            glow[y * W + x] = (byte) (240 + Math.max(0, 12 - (int) (distance / 3)));
+        }
+        // A closed, filled brightness hill has no supported abrupt card edge.
+        held(EDGE_UNSUPPORTED, observe(searchOnly(SEARCH_COARSE), glow, List.of(searchTitle())).search());
+    }
+
+    @Test public void twoLowContrastCardsInOneUiRegionRemainAmbiguousBeforeTitleSelection() {
+        byte[] pixels = blank(240);
+        fill(pixels, rect(20, 20, 65, 70), 247);
+        fill(pixels, rect(90, 20, 140, 70), 247);
+        held(AMBIGUOUS_BOUNDARY, observe(searchOnly(SEARCH_COARSE), pixels,
+                List.of(row("搜索以赚取", 25, 28, 30, 10, .99))).search());
+    }
+
+    @Test public void lowContrastRoundedSurfaceCannotBeClippedToItsUiRegion() {
+        var result = observe(searchOnly(rect(30, 20, 130, 70)), roundedLowContrastImage(),
+                List.of(row("搜索以赚取", 35, 28, 60, 10, .99)));
+        held(SURFACE_CROSSES_COARSE, result.search());
+    }
+
+    @Test public void lowContrastGeometryDoesNotBypassTitleOrConfidenceChecks() {
+        byte[] pixels = roundedLowContrastImage();
+        held(TITLE_MISSING, observe(searchOnly(SEARCH_COARSE), pixels, List.of()).search());
+        held(WRONG_ROLE_TITLE, observe(searchOnly(SEARCH_COARSE), pixels,
+                List.of(row("阅读以赚取", 28, 28, 60, 10, .98))).search());
+        held(LOW_CONFIDENCE_ROW, observe(searchOnly(SEARCH_COARSE), pixels,
+                List.of(row("搜索以赚取", 28, 28, 60, 10, .79))).search());
     }
 
     @Test public void separateSurfacesOfDifferentBrightnessRemainAmbiguousBeforeOcr() {

@@ -18,9 +18,11 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  private volatile UiImageAlignmentRuntime alignmentRuntime;
  private Object alignmentOwner;
  private boolean alignmentSelected,alignmentSpent,alignmentDiagnostic;
+ private UiImageAlignmentScope.Calibration alignmentCalibration;
  private volatile boolean alignmentFinished;
  private volatile String alignmentHistory;
  boolean alignmentDiagnosticSelected(){return alignmentDiagnostic;}
+ UiImageAlignmentScope.Calibration alignmentCalibrationSelected(){return alignmentCalibration;}
  boolean alignmentApprovalMatches(Object owner,LiveClick incoming){
   return alignmentSelected&&alignmentSpent&&!alignmentFinished&&owner!=null&&owner==alignmentOwner
    &&incoming!=null&&incoming==click&&isResumedForApproval();
@@ -28,16 +30,28 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  private void openAlignmentChoice(){
   if(consumed||alignmentSpent||!isResumedForApproval())return;
   alignmentDiagnostic=false;
+  alignmentCalibration=null;
   alignmentSelected=true;showAlignmentChoice();
  }
  private void openAlignmentDiagnosticChoice(){
   if(consumed||alignmentSpent||!isResumedForApproval())return;
   alignmentDiagnostic=true;
+  alignmentCalibration=null;
+  alignmentSelected=true;showAlignmentChoice();
+ }
+ private void openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration attempt){
+  if(consumed||alignmentSpent||!isResumedForApproval()||attempt==null)return;
+  alignmentDiagnostic=false;alignmentCalibration=attempt;
   alignmentSelected=true;showAlignmentChoice();
  }
  private void showAlignmentChoice(){
   if(destroyed||isFinishing()||isDestroyed())return;
   boolean ready=NativeCheckInSession.permissionReady();
+  if(alignmentCalibration!=null){
+   OwnStateSummaryUi.calibrationChoice(this,ready?"现有服务与权限可用。":"现有服务或权限不可用；本次不申请权限，也不采集。",
+    ready&&!consumed&&!alignmentSpent&&isResumedForApproval(),this::confirmAlignment,this::cancelAndFinish,alignmentCalibration);
+   return;
+  }
   OwnStateSummaryUi.alignmentChoice(this,ready?"现有服务与权限可用；确认后再检查当前页面。":"现有服务或权限不可用；本次不申请权限，也不采集。",
    ready&&!consumed&&!alignmentSpent&&isResumedForApproval(),this::confirmAlignment,this::cancelAndFinish,alignmentDiagnostic);
  }
@@ -48,7 +62,8 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
   try{
    if(!NativeCheckInSession.permissionReady())throw new SecurityException("Existing permission unavailable");
    OwnStateSummaryUi.alignmentRunning(this,this::cancelAndFinish);
-   alignmentRuntime=alignmentDiagnostic?UiImageAlignmentRuntime.startDiagnostic(this,click,alignmentOwner)
+   alignmentRuntime=alignmentCalibration!=null?UiImageAlignmentRuntime.startCalibrated(this,click,alignmentOwner,alignmentCalibration)
+    :alignmentDiagnostic?UiImageAlignmentRuntime.startDiagnostic(this,click,alignmentOwner)
     :UiImageAlignmentRuntime.start(this,click,alignmentOwner);
   }catch(RuntimeException rejected){
    if(alignmentRuntime!=null)alignmentRuntime.cancel();if(click!=null)click.invalidate();
@@ -462,6 +477,8 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
   NativeRewardCardRun card=cardRun;
   long remaining=run!=null&&run.finishedAndReleased()?(autonomousRun!=null?autonomousRun.remainingForAfterMillis():readOnlyRun!=null?readOnlyRun.remainingForAfterMillis():card!=null?card.remainingForAfterMillis():session!=null?session.remainingForAfterMillis():0):0;
   writer.println(value.line(remaining));
+  UiImageAlignmentRuntime exact=alignmentRuntime;
+  writer.println("RewardsAlignmentRelease present="+(exact!=null)+" released="+(exact!=null&&exact.finishedAndReleased()));
   String history=alignmentHistory;
   if(alignmentFinished&&history!=null)writer.println("RewardsAlignmentDiagnostic version=2 "+CaptureSessionRuntime.boundedRootScalars(history.replace('\n',' '),8000));
  }
@@ -530,7 +547,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  @Override protected void onCreate(Bundle state){
   super.onCreate(state);
   if(state!=null || android.os.Process.myUid()<10000 || !Application.getProcessName().equals(getPackageName()+":capture_once")) {finish();return;}
-  if(OwnStateSummaryUi.ACTIVE){OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice);return;}
+  if(OwnStateSummaryUi.ACTIVE){OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION));return;}
   installed=BingPackageMetadata.read(getPackageManager());
   if(!CaptureReleaseGate.configured()){showNavigation();return;}
   rikka.shizuku.Shizuku.addRequestPermissionResultListener(permissionListener);
@@ -557,7 +574,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  }
  private void summaryRejected(){terminalShown=true;terminalSnapshot=new TerminalSnapshot(true,false,"OWN_STATE",false);OwnStateSummaryUi.rejected(this,this::cancelAndFinish);}
  private void showCaptureChoices(){
-  if(OwnStateSummaryUi.ACTIVE){if(!consumed){if(alignmentSelected)showAlignmentChoice();else OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice);}return;}
+  if(OwnStateSummaryUi.ACTIVE){if(!consumed){if(alignmentSelected)showAlignmentChoice();else OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION));}return;}
   boolean ready=false;
   try{
    ready=rikka.shizuku.Shizuku.pingBinder()&&!rikka.shizuku.Shizuku.isPreV11()

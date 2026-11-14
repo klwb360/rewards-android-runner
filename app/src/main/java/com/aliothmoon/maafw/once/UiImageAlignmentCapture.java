@@ -2,6 +2,7 @@ package com.aliothmoon.maafw.once;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
 import java.util.List;
 import java.util.function.BooleanSupplier;
 import static com.aliothmoon.maafw.once.UiImageAlignmentDiagnostics.*;
@@ -62,15 +63,21 @@ final class UiImageAlignmentCapture {
         if (gray == null || rows == null) return rejectPrepare(Prepare.INPUT_MISSING);
         if (stopped(cancel)) return rejectPrepare(Prepare.CANCELED);
         if (!current(observedAt)) return rejectPrepare(Prepare.CURRENT_REJECTED);
+        byte[] scratch = null;
         try {
             long size = (long) width() * height();
             if (actualFrame.width() != width() || actualFrame.height() != height()
                     || actualFrame.size() != size || gray.length != size) return rejectPrepare(Prepare.SHAPE_MISMATCH);
             // The digest and candidate must describe these exact bytes, not a same-sized caller image.
-            for (int i = 0; i < gray.length; i++) {
-                if ((i & 4095) == 0 && (stopped(cancel) || stopped(revoked))) return rejectPrepare(Prepare.CANCELED);
-                int actual = actualFrame.unsignedByte(i);
-                if (actual < 0 || actual > 255 || actual != (gray[i] & 255)) return rejectPrepare(Prepare.PIXEL_MISMATCH);
+            scratch = new byte[Math.min(gray.length, 4096)];
+            for (int offset = 0; offset < gray.length; offset += 4096) {
+                // Same global 4096-byte boundaries and short circuit as the original scalar loop.
+                if (stopped(cancel) || stopped(revoked)) return rejectPrepare(Prepare.CANCELED);
+                int length = Math.min(4096, gray.length - offset);
+                actualFrame.copyGrayRange(offset, scratch, 0, length);
+                for (int i = 0; i < length; i++) {
+                    if (scratch[i] != gray[offset + i]) return rejectPrepare(Prepare.PIXEL_MISMATCH);
+                }
             }
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(gray);
             var result = UiRegionImageRefiner.observe(geometry.regions(), gray, width(), height(), rows,
@@ -82,6 +89,7 @@ final class UiImageAlignmentCapture {
             diagnostics.prepare(Prepare.ACCEPTED);
             return candidate;
         } catch (RuntimeException | NoSuchAlgorithmException invalid) { return rejectPrepare(Prepare.ERROR); }
+        finally { if (scratch != null) Arrays.fill(scratch, (byte) 0); }
     }
     private Candidate rejectPrepare(Prepare gate) { diagnostics.prepare(gate); return null; }
 

@@ -33,7 +33,7 @@ public class UiImageAlignmentWiringTest {
         int end = s.indexOf("private void refinePreparedRewardCard(", start);
         assertTrue(start >= 0 && end > start);
         String method = s.substring(start, end);
-        assertTrue(method.contains("materialFrame.unsignedByte(i)"));
+        assertTrue(method.contains("for(int i=0;i<gray.length;i+=4096){checkStop(stop);materialFrame.copyGrayRange(i,gray,i,Math.min(4096,gray.length-i));}"));
         assertTrue(method.contains("Arrays.fill(gray,(byte)0)"));
         assertTrue(method.contains("materialRows=null"));
         assertFalse(method.contains("MaaTaskerPostRecognition"));

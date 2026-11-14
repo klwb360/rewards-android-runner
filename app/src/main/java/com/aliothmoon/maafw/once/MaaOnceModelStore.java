@@ -6,7 +6,7 @@ import java.nio.file.attribute.*;
 import java.security.*;
 import java.util.*;
 /** Own-UID private-root staging. Does not claim protection against malicious same-UID/root races. */
-final class MaaOnceModelStore implements AutoCloseable {
+final class MaaOnceModelStore implements PreparedAlignmentModels.Store {
  public static final int MAX_STAGING=2;public static final long RESERVE_BYTES=3*MaaOnceModelPolicy.MAX_MODEL_BYTES;
  public static final class CapacityException extends IOException {}
  private static final LinkOption[] NOFOLLOW={LinkOption.NOFOLLOW_LINKS};
