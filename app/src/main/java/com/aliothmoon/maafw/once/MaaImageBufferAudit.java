@@ -74,6 +74,11 @@ final class MaaImageBufferAudit {
         return new Comparison(Check.YES,MessageDigest.isEqual(reference.whole,current.whole)?Check.YES:Check.NO,
             MessageDigest.isEqual(reference.middle,current.middle)?Check.YES:Check.NO);
     }
+    /** Compare privately; no native frame, row, or retained digest is exposed. */
+    static boolean matchesGraySha256(Fingerprint actual,int width,int height,byte[] expected){
+        return actual!=null&&actual.width==width&&actual.height==height
+            &&expected!=null&&expected.length==32&&MessageDigest.isEqual(actual.whole,expected);
+    }
     record Result(Status status,Sample afterSetEncoded,Sample afterQueryQuiet,CvSample sameFrameCv,OcrGeometry allOcrGeometry,
                   BandStats bandStats,Fingerprint fingerprint,int queryPosts,
                   boolean exactBindings,boolean positiveTaskBound,boolean queryQuiet,

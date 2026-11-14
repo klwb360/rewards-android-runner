@@ -4,6 +4,12 @@ import java.util.function.LongSupplier;
 
 /** Staged source replacement only. Does not create/consume any grant or add an entry point. */
 final class ReviewShizukuPngFrameSource implements BackendPorts.FrameSource {
+    /** The actual produce call's monotonic envelope, not a compositor timestamp. */
+    static final class SourceWindow {
+        private final long entered, returned;
+        private SourceWindow(long entered,long returned){this.entered=entered;this.returned=returned;}
+        long entered(){return entered;} long returned(){return returned;}
+    }
     /** Opaque actual-source evidence. No caller can construct one from booleans. */
     static final class CleanupSnapshot {
         private final OnceBackend.Owner owner;
@@ -44,18 +50,33 @@ final class ReviewShizukuPngFrameSource implements BackendPorts.FrameSource {
     private final PngCaptureSession capture;
     private final BackendPorts.RevocationFence fence;
     private final PngImageAudit audit;
+    private final LongSupplier clock;
+    private final boolean captureTiming;
     private OnceBackend.Owner owner;
     private boolean returned, releaseRequested, active;
+    private long sourceEntered=-1,sourceReturned=-1;
     ReviewShizukuPngFrameSource(PngCaptureSession.Transport transport,PngCaptureSession.Gate existingGate,
             LongSupplier clock,BoundedPngGray.Geometry geometry,BackendPorts.RevocationFence existingFence) {
         this(transport,existingGate,clock,geometry,existingFence,null);
     }
     ReviewShizukuPngFrameSource(PngCaptureSession.Transport transport,PngCaptureSession.Gate existingGate,
             LongSupplier clock,BoundedPngGray.Geometry geometry,BackendPorts.RevocationFence existingFence,PngImageAudit.Decoder diagnosticDecoder) {
+        this(transport,existingGate,clock,geometry,existingFence,diagnosticDecoder,false);
+    }
+    ReviewShizukuPngFrameSource(PngCaptureSession.Transport transport,PngCaptureSession.Gate existingGate,
+            LongSupplier clock,BoundedPngGray.Geometry geometry,BackendPorts.RevocationFence existingFence,
+            PngImageAudit.Decoder diagnosticDecoder,boolean captureTiming) {
         if(existingFence==null) throw new IllegalArgumentException("existing admission fence required");
+        this.clock=clock;this.captureTiming=captureTiming;
         capture=new PngCaptureSession(transport,existingGate,clock,geometry);fence=existingFence;
         audit=diagnosticDecoder==null?null:new PngImageAudit(geometry,diagnosticDecoder,clock);
     }
+    synchronized SourceWindow sourceWindow(OnceBackend.Owner expected){
+        return captureTiming&&expected!=null&&expected==owner&&returned&&!active
+                &&sourceEntered>=0&&sourceReturned>=sourceEntered
+                ?new SourceWindow(sourceEntered,sourceReturned):null;
+    }
+    private long elapsedMillis(){long nanos=clock.getAsLong();return nanos<0?-1:nanos/1_000_000L;}
     PngImageAudit.Evidence imageAudit(){return audit==null?PngImageAudit.notInvoked():audit.evidence();}
     private boolean allQuiet(OnceBackend.Owner expected){return capture.quietAndReleased()&&(audit==null||audit.quietAndReleased(expected));}
     /** Future runtime latchCancel hook: scalar + independent async abort initiation.
@@ -75,6 +96,7 @@ final class ReviewShizukuPngFrameSource implements BackendPorts.FrameSource {
             owner=expected;active=true;
         }
         try {
+            if(captureTiming){sourceEntered=elapsedMillis();if(sourceEntered<0)throw new IllegalStateException("Source clock unavailable");}
             BackendPorts.StopSignal combined=()->stop.requested()||fence.revoked();
             BoundedPngGray.Sink rows=new BoundedPngGray.Sink(){
                 public void begin(int w,int h){sink.begin(w,h);}
@@ -98,7 +120,10 @@ final class ReviewShizukuPngFrameSource implements BackendPorts.FrameSource {
                 if(audit.evidence().status()==PngImageAudit.Status.CANCELLED)throw new BackendPorts.Cancelled();
                 if(audit.evidence().status()==PngImageAudit.Status.DEADLINE)throw new java.io.IOException("Image audit deadline");
             }}
-            finally{synchronized(this){returned=true;active=false;}}
+            finally{synchronized(this){
+                if(captureTiming){try{sourceReturned=elapsedMillis();}catch(RuntimeException unavailable){sourceReturned=-1;}}
+                returned=true;active=false;
+            }}
         }
     }
     @Override public synchronized BackendPorts.RevocationFence revocationFence(OnceBackend.Owner expected) {

@@ -71,6 +71,20 @@ final class UiRegionSourceEvidence {
         return matched;
     }
 
+    /** Transfers this read once; UI publication and image alignment cannot both consume it. */
+    synchronized UiImageGeometryBinding consumeGeometry(Object owner, Object session, Object epoch,
+            NativeUiStructureProtocol.Report report, long now) {
+        return UiImageGeometryBinding.consume(this, owner, session, epoch, report, now);
+    }
+
+    // Internal post-transfer checks retain the original source lifetime; they do not rearm consumption.
+    boolean geometryFresh(long now) { return valid(report, nonce, before, beforeAt, after, now); }
+    boolean geometrySourceMatches(BingNavigationSnapshot.Ready other) {
+        return before.sameSource(other) && after.sameSource(other);
+    }
+    BingNavigationSnapshot.Shape geometryShape() { return before.profile().shape(); }
+    long geometryObserved() { return after.observed(); }
+
     private static boolean valid(NativeUiStructureProtocol.Report report, String nonce,
             BingNavigationSnapshot.Ready before, long beforeAt,
             BingNavigationSnapshot.Ready after, long now) {
