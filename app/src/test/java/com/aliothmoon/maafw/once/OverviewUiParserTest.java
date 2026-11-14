@@ -163,4 +163,55 @@ public class OverviewUiParserTest {
         assertEquals(OverviewUiProtocol.ScrollHint.DECLARED_NONE,OverviewUiParser.scrollHint(sample(),List.of(new OverviewUiParser.ScrollNode(0,false,false))));
         assertEquals(OverviewUiProtocol.ScrollHint.UNKNOWN,OverviewUiParser.scrollHint(sample(),List.of()));
     }
+    private static List<NativeUiBoundPointsParser.Node> selfScrollingHome() {
+        // Synthetic structure only: non-scrollable wrappers, the scrolling home, and an inner carousel.
+        return new ArrayList<>(List.of(
+                node(0,-1,"","",0,0,1000,1800),
+                node(1,0,"","",0,0,1000,1800),
+                node(2,1,"homePageWrapper","",0,0,1000,1800),
+                node(3,2,"","",0,100,1000,500),
+                node(4,2,"dailyTaskPanel","",40,700,960,1800)));
+    }
+    @Test public void scrollingHomeItselfIsAcceptedAndNestedCarouselIsIgnored() {
+        var n=selfScrollingHome();
+        assertEquals(OverviewUiRegions.Status.OBSERVED,OverviewUiParser.parse(n).status());
+        assertEquals(OverviewUiProtocol.ScrollHint.DECLARED_FORWARD,OverviewUiParser.scrollHint(n,List.of(
+                new OverviewUiParser.ScrollNode(2,false,true),new OverviewUiParser.ScrollNode(3,true,true))));
+    }
+    @Test public void scrollingHomeStillRequiresExplicitDirectionDeclarations() {
+        var n=selfScrollingHome();
+        assertEquals(OverviewUiProtocol.ScrollHint.DECLARED_BACKWARD,OverviewUiParser.scrollHint(n,List.of(new OverviewUiParser.ScrollNode(2,true,false))));
+        assertEquals(OverviewUiProtocol.ScrollHint.DECLARED_BOTH,OverviewUiParser.scrollHint(n,List.of(new OverviewUiParser.ScrollNode(2,true,true))));
+        assertEquals(OverviewUiProtocol.ScrollHint.DECLARED_NONE,OverviewUiParser.scrollHint(n,List.of(new OverviewUiParser.ScrollNode(2,false,false))));
+        assertEquals(OverviewUiProtocol.ScrollHint.UNKNOWN,OverviewUiParser.scrollHint(n,List.of()));
+    }
+    @Test public void selfAndAncestorOrDuplicateSelfRemainAmbiguous() {
+        var n=selfScrollingHome();
+        assertEquals(OverviewUiProtocol.ScrollHint.UNKNOWN,OverviewUiParser.scrollHint(n,List.of(
+                new OverviewUiParser.ScrollNode(2,false,true),new OverviewUiParser.ScrollNode(1,false,true))));
+        assertEquals(OverviewUiProtocol.ScrollHint.UNKNOWN,OverviewUiParser.scrollHint(n,List.of(
+                new OverviewUiParser.ScrollNode(2,false,true),new OverviewUiParser.ScrollNode(2,false,true))));
+    }
+    @Test public void nestedAndUnrelatedScrollableNodesNeverSupplyHomeDirections() {
+        var n=selfScrollingHome();
+        // Even a nested node or sibling with the same bounds cannot become the home scroll owner.
+        replace(n,3,x->node(3,2,"","",0,0,1000,1800));
+        n.add(node(5,1,"","",0,0,1000,1800));
+        assertEquals(OverviewUiProtocol.ScrollHint.UNKNOWN,OverviewUiParser.scrollHint(n,List.of(
+                new OverviewUiParser.ScrollNode(3,true,true),new OverviewUiParser.ScrollNode(5,true,true))));
+    }
+    @Test public void selfCannotBypassForeignHiddenOrAmbiguousHomeChecks() {
+        var foreign=selfScrollingHome();
+        replace(foreign,2,x->new NativeUiBoundPointsParser.Node(2,1,true,false,"homePageWrapper","","",0,0,1000,1800));
+        assertEquals(OverviewUiProtocol.ScrollHint.UNKNOWN,OverviewUiParser.scrollHint(foreign,List.of(new OverviewUiParser.ScrollNode(2,true,true))));
+        var hidden=selfScrollingHome();
+        replace(hidden,2,x->new NativeUiBoundPointsParser.Node(2,1,false,true,"homePageWrapper","","",0,0,1000,1800));
+        assertEquals(OverviewUiProtocol.ScrollHint.UNKNOWN,OverviewUiParser.scrollHint(hidden,List.of(new OverviewUiParser.ScrollNode(2,true,true))));
+        var duplicate=selfScrollingHome();duplicate.add(node(5,1,"homePageWrapper","",0,0,1000,1800));
+        assertEquals(OverviewUiProtocol.ScrollHint.UNKNOWN,OverviewUiParser.scrollHint(duplicate,List.of(new OverviewUiParser.ScrollNode(2,true,true))));
+    }
+    @Test public void ancestorMustStillContainEntireHomeViewport() {
+        var n=selfScrollingHome();replace(n,1,x->node(1,0,"","",0,0,1000,1700));
+        assertEquals(OverviewUiProtocol.ScrollHint.UNKNOWN,OverviewUiParser.scrollHint(n,List.of(new OverviewUiParser.ScrollNode(1,true,true))));
+    }
 }

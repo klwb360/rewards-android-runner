@@ -131,8 +131,8 @@ public class OverviewEntryWiringTest {
                     "NativeRewardCardSession","RewardsCore.prepare","RewardsCore.verify",".tap(",".back(",
                     "input tap","input text","performAction(","dispatchGesture(","CLAIMED.set(false)");
         String scope=source("OverviewScanScope");
-        containsAll(scope,"PREVIOUS_DIRECTORY = \"rewards-overview-review-v5\"",
-                "DIRECTORY = \"rewards-overview-review-v6\"","\"overview-v6 slot=\"","MAX_FRAMES = 12, MAX_SWIPES = 11",
+        containsAll(scope,"PREVIOUS_DIRECTORY = \"rewards-overview-review-v6\"",
+                "DIRECTORY = \"rewards-overview-review-v7\"","\"overview-v7 slot=\"","MAX_FRAMES = 12, MAX_SWIPES = 11",
                 "StandardOpenOption.CREATE_NEW","LinkOption.NOFOLLOW_LINKS","maxTaskTaps=0 maxBack=0 maxText=0");
         excludesAll(scope,"TRUNCATE_EXISTING","delete(","deleteIfExists(","ReadOnlyCheckpoint.CURRENT.directory()");
         String runtime=source("OverviewScanRuntime");

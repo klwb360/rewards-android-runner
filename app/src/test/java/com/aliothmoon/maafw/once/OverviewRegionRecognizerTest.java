@@ -227,12 +227,48 @@ public class OverviewRegionRecognizerTest {
     @Test public void mixedAndZeroCheckInNumeralsAreNotNormalized() {
         for(String value:List.of("0","10 pts","1 0","+10","１０")) {
             byte[] gray=DailyCheckInRegionTest.pixels();int[] rgb=colors(gray,true);var rows=checkRows();rows.set(8,row(value,264,109,280,122));
-            assertEquals(Reason.NUMBER_INVALID,only(check(gray,rgb,rows,Role.CHECK_IN)).reason());
+            var result=check(gray,rgb,rows,Role.CHECK_IN);
+            assertEquals(value.equals("0")?Reason.NUMBER_INVALID:Reason.NUMBER_NON_NUMERIC,only(result).reason());
+            assertEquals(Status.HOLD,only(result).status());assertTrue(OverviewMockPlan.points(result,true).isEmpty());
         }
     }
     @Test public void circleNumeralMustBeInsideInset() {
         byte[] gray=DailyCheckInRegionTest.pixels();int[] rgb=colors(gray,true);var rows=checkRows();rows.set(8,row("10",245,109,280,122));
-        assertEquals(Reason.NUMBER_INVALID,only(check(gray,rgb,rows,Role.CHECK_IN)).reason());
+        var result=check(gray,rgb,rows,Role.CHECK_IN);
+        assertEquals(Reason.NUMBER_OUTSIDE_SAFE_RING,only(result).reason());assertTrue(OverviewMockPlan.points(result,true).isEmpty());
+    }
+    @Test public void noOriginalOcrRowOverCurrentRingIsDistinctFromAnInvalidToken() {
+        byte[] gray=DailyCheckInRegionTest.pixels();int[] rgb=colors(gray,true);var rows=checkRows();rows.remove(8);
+        var result=check(gray,rgb,rows,Role.CHECK_IN);
+        assertEquals(Reason.NUMBER_MISSING,only(result).reason());assertEquals(Status.HOLD,only(result).status());
+        assertTrue(OverviewMockPlan.points(result,true).isEmpty());
+    }
+    @Test public void multipleOriginalRingRowsRemainRejectedWithoutChoosingOrMerging() {
+        for(String extra:List.of("15","other")) {
+            byte[] gray=DailyCheckInRegionTest.pixels();int[] rgb=colors(gray,true);var rows=checkRows();rows.add(row(extra,264,123,280,127));
+            var result=check(gray,rgb,rows,Role.CHECK_IN);
+            assertEquals(Reason.NUMBER_MULTIPLE,only(result).reason());assertEquals(Status.HOLD,only(result).status());
+            assertTrue(OverviewMockPlan.points(result,true).isEmpty());
+        }
+    }
+    @Test public void mergedStreakTitleIsDiagnosedButNeverAcceptedOrSplit() {
+        byte[] gray=DailyCheckInRegionTest.pixels();int[] rgb=colors(gray,true);var rows=checkRows();
+        rows.set(0,row("连续 99day",30,42,200,65));var original=rows.get(0);
+        var result=check(gray,rgb,rows,Role.STREAK_SUMMARY);
+        assertEquals(Reason.HEADER_WITH_EXTRA_TEXT,only(result).reason());assertEquals(Status.HOLD,only(result).status());
+        assertSame(original,rows.get(0));assertTrue(OverviewMockPlan.points(result,true).isEmpty());
+        rows.set(0,row("Unrelated heading",30,42,200,65));
+        assertEquals(Reason.HEADER_MISSING,only(check(gray,rgb,rows,Role.STREAK_SUMMARY)).reason());
+        rows.remove(0);assertEquals(Reason.HEADER_MISSING,only(check(gray,rgb,rows,Role.STREAK_SUMMARY)).reason());
+    }
+    @Test public void titleDiagnosticsDoNotChangeExactTitleConfidenceOrOwnershipRules() {
+        byte[] gray=DailyCheckInRegionTest.pixels();int[] rgb=colors(gray,true);var rows=checkRows();
+        rows.set(0,row("连续",30,42,79,65));
+        assertEquals(Status.OBSERVED,only(check(gray,rgb,rows,Role.STREAK_SUMMARY)).status());
+        rows.set(0,new Row("连续",rows.get(0).box(),.84,Origin.STATIC_OCR));
+        assertEquals(Reason.LOW_CONFIDENCE,only(check(gray,rgb,rows,Role.STREAK_SUMMARY)).reason());
+        rows.set(0,row("连续 99day",200,42,350,65));
+        assertEquals(Reason.HEADER_MISSING,only(check(gray,rgb,rows,Role.STREAK_SUMMARY)).reason());
     }
     @Test public void weeklyDailyProgressDoesNotBecomeCheckIn() {
         byte[] gray=DailyCheckInRegionTest.pixels();int[] rgb=colors(gray,true);var rows=checkRows();rows.set(0,row("每日活动",30,42,79,65));
