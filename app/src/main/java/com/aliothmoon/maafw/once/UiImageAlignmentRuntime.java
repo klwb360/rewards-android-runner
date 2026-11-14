@@ -47,6 +47,7 @@ final class UiImageAlignmentRuntime {
 
     private final DormantCaptureConfirmationActivity activity;
     private final Object approvalOwner;
+    private final boolean diagnosticRun;
     private final RealCaptureClaim.ProcessEpoch epoch;
     private final RealCaptureClaim.Grant grant;
     private final long sessionEnd;
@@ -69,16 +70,30 @@ final class UiImageAlignmentRuntime {
     private volatile boolean workerReturned, reportReady, closed, released;
     private volatile boolean constructionUnknown;
     private boolean claimUncertain, bindingConstruction;
+    private final long[] metadataMillis = {-1, -1, -1, -1};
+    private long backendMillis = -1, notifyAt = -1;
+    private Stage failureAt;
+    private OnceBackend.Phase backendPhase;
+    private OnceBackend.Failure backendFailure;
 
     private UiImageAlignmentRuntime(DormantCaptureConfirmationActivity activity, Object approvalOwner,
             RealCaptureClaim.ProcessEpoch epoch, RealCaptureClaim.Grant grant,
-            BingNavigationSnapshot.Shape shape) {
+            BingNavigationSnapshot.Shape shape, boolean diagnosticRun) {
         this.activity = activity; this.approvalOwner = approvalOwner; this.epoch = epoch;
         this.grant = grant; this.sessionEnd = RealCaptureClaim.deadline(grant); this.shape = shape;
+        this.diagnosticRun = diagnosticRun;
     }
 
     static UiImageAlignmentRuntime start(DormantCaptureConfirmationActivity activity,
             DormantCaptureConfirmationActivity.LiveClick click, Object approvalOwner) {
+        return startSelected(activity, click, approvalOwner, false);
+    }
+    static UiImageAlignmentRuntime startDiagnostic(DormantCaptureConfirmationActivity activity,
+            DormantCaptureConfirmationActivity.LiveClick click, Object approvalOwner) {
+        return startSelected(activity, click, approvalOwner, true);
+    }
+    private static UiImageAlignmentRuntime startSelected(DormantCaptureConfirmationActivity activity,
+            DormantCaptureConfirmationActivity.LiveClick click, Object approvalOwner, boolean diagnosticRun) {
         CaptureReleaseGate.requireConfigured();
         if (activity == null || click == null || approvalOwner == null || Looper.myLooper() != Looper.getMainLooper()
                 || android.os.Build.VERSION.SDK_INT < 34 || android.os.Process.myUid() < 10000
@@ -86,6 +101,7 @@ final class UiImageAlignmentRuntime {
                 || !(activity.getPackageName() + ":capture_once").equals(Application.getProcessName())) {
             throw new SecurityException("Independent visible alignment confirmation required");
         }
+        if (activity.alignmentDiagnosticSelected() != diagnosticRun) throw new SecurityException("Exact selected alignment entry required");
         var epoch = CaptureSessionRuntime.alignmentEpoch();
         long now = SystemClock.elapsedRealtime();
         var proof = VisibleCaptureAuthority.issueAlignment(activity, click, epoch, approvalOwner, now);
@@ -102,7 +118,7 @@ final class UiImageAlignmentRuntime {
             throw new SecurityException("Full original frame required");
         }
         var shape = new BingNavigationSnapshot.Shape(bounds.width(), bounds.height(), display.getRotation());
-        var run = new UiImageAlignmentRuntime(activity, approvalOwner, epoch, grant, shape);
+        var run = new UiImageAlignmentRuntime(activity, approvalOwner, epoch, grant, shape, diagnosticRun);
         run.root = CaptureSessionRuntime.retainAlignment(run, run.sessionEnd, run::latchCancel,
                 run::closeOnOwner, () -> run.closed, run::postOwner);
         try {
@@ -154,12 +170,17 @@ final class UiImageAlignmentRuntime {
     }
 
     private BingNavigationSnapshot.Ready readSource(MetadataStage expected) {
+        long startedAt = SystemClock.elapsedRealtime();
+        try {
         sourceGate();
         var result = metadata.readAlignment(shape, expected);
         long now = SystemClock.elapsedRealtime();
         if (result == null || result.status() != BingNavigationSnapshot.Status.READY || result.ready() == null
                 || result.ready().kind() != BingNavigationSnapshot.Kind.TEMPLATE || !result.ready().fresh(now)) return null;
         sourceGate(); return result.ready();
+        } finally {
+            metadataMillis[expected.ordinal()] = UiImageAlignmentTiming.elapsed(startedAt, SystemClock.elapsedRealtime());
+        }
     }
 
     private void observeOnOwner() {
@@ -167,7 +188,8 @@ final class UiImageAlignmentRuntime {
         try {
             requireSessionCurrent();
             if (!hiddenCurrent() || !budget.claimRun()) throw new SecurityException("Alignment run unavailable");
-            UiImageAlignmentScope.burnRun(activity.getNoBackupFilesDir().toPath());
+            if (diagnosticRun) UiImageAlignmentScope.burnDiagnosticRun(activity.getNoBackupFilesDir().toPath());
+            else UiImageAlignmentScope.burnRun(activity.getNoBackupFilesDir().toPath());
             var installed = BingPackageMetadata.read(activity.getPackageManager());
             if (installed.state() != BingIdentityEvidence.PackageState.METADATA_OBSERVED) throw new SecurityException("Package unavailable");
             int bing = activity.getPackageManager().getApplicationInfo("com.microsoft.bing", 0).uid;
@@ -182,7 +204,8 @@ final class UiImageAlignmentRuntime {
                     Math.min(sessionEnd, SystemClock.elapsedRealtime() + 9000), this::hiddenCurrent, () -> {
                         var before = readSource(MetadataStage.UI_BEFORE);
                         if (before == null || !budget.claimUi()) return false;
-                        UiImageAlignmentScope.burnUi(activity.getNoBackupFilesDir().toPath());
+                        if (diagnosticRun) UiImageAlignmentScope.burnDiagnosticUi(activity.getNoBackupFilesDir().toPath());
+                        else UiImageAlignmentScope.burnUi(activity.getNoBackupFilesDir().toPath());
                         pending[0] = UiRegionSourceEvidence.begin(this, approvalOwner, epoch, nonce, before, SystemClock.elapsedRealtime());
                         sourceGate(); return pending[0] != null;
                     });
@@ -213,7 +236,10 @@ final class UiImageAlignmentRuntime {
             binding = ReviewShizukuPngBinding.bindReadOnlyAlignment(activity.getApplicationContext(),
                     this::consumeFrameClaim, this::sourceGate, fence, Runnable::run, capture);
             bindingConstruction = false; backend = binding.backend();
+            long backendStartedAt = SystemClock.elapsedRealtime();
             var result = backend.start();
+            backendMillis = UiImageAlignmentTiming.elapsed(backendStartedAt, SystemClock.elapsedRealtime());
+            backendPhase = result.phase(); backendFailure = result.failure();
             BingNavigationSnapshot.Ready imageAfter = null;
             if (result.phase() == OnceBackend.Phase.COMPLETED && result.failure() == OnceBackend.Failure.NONE
                     && result.cancellation() == OnceBackend.Cancellation.NOT_REQUESTED && actualResourcesClosed()) {
@@ -223,6 +249,7 @@ final class UiImageAlignmentRuntime {
                     this, approvalOwner, epoch, sessionEnd);
             stage = capture.publicationCurrent(SystemClock.elapsedRealtime()) ? Stage.SEALED : Stage.HOLD;
         } catch (Exception failed) {
+            failureAt = stage;
             if (failed instanceof InterruptedException) Thread.currentThread().interrupt();
             if (bindingConstruction) constructionUnknown = true;
             stage = canceled.get() ? Stage.CANCELED : Stage.HOLD;
@@ -245,7 +272,8 @@ final class UiImageAlignmentRuntime {
             return new BackendPorts.ClaimReceipt(backendOwner, BackendPorts.ClaimDecision.DENIED);
         }
         var outcome = RealCaptureClaim.consume(grant, epoch, approvalOwner, SystemClock.elapsedRealtime(),
-                UiImageAlignmentScope.frameStore(activity.getNoBackupFilesDir().toPath()));
+                diagnosticRun ? UiImageAlignmentScope.diagnosticFrameStore(activity.getNoBackupFilesDir().toPath())
+                        : UiImageAlignmentScope.frameStore(activity.getNoBackupFilesDir().toPath()));
         claimUncertain = outcome == RealCaptureClaim.Outcome.UNCERTAIN;
         return new BackendPorts.ClaimReceipt(backendOwner, switch (outcome) {
             case CONSUMED -> BackendPorts.ClaimDecision.CLAIMED;
@@ -274,10 +302,33 @@ final class UiImageAlignmentRuntime {
 
     private void notifyFinished() {
         if (!notified.compareAndSet(false, true)) return;
+        notifyAt = SystemClock.elapsedRealtime();
         String details = "profile=UI_IMAGE_ALIGNMENT stage=" + stage + " cleanup=" + (actualResourcesClosed() ? "CONFIRMED" : "UNKNOWN")
                 + " metadataPairsReserved=" + (metadataPermit == null ? 0 : metadataPermit.pairsReserved())
-                + " maxUiReads=1 maxFrames=1 maxOcr=1 taskTaps=0 swipes=0 back=0 textEntry=0 businessLedgerChanged=false";
+                + " maxUiReads=1 maxFrames=1 maxOcr=1 taskTaps=0 swipes=0 back=0 textEntry=0 businessLedgerChanged=false"
+                + "\n" + diagnostics();
         activity.runOnUiThread(() -> activity.alignmentFinished(this, details));
+    }
+
+    private String diagnostics() {
+        var read = metadata == null ? null : metadata.lastReadDiagnostic();
+        return "alignmentEntry=" + (diagnosticRun ? "DIAGNOSTIC_V2" : "ORIGINAL_V1")
+                + " failureAt=" + (failureAt == null ? "NONE" : failureAt)
+                + " backendPhase=" + (backendPhase == null ? "NOT_OBSERVED" : backendPhase)
+                + " backendFailure=" + (backendFailure == null ? "NOT_OBSERVED" : backendFailure)
+                + " backendMs=" + UiImageAlignmentTiming.value(backendMillis)
+                + " uiBeforeReadMs=" + UiImageAlignmentTiming.value(metadataMillis[0])
+                + " uiAfterReadMs=" + UiImageAlignmentTiming.value(metadataMillis[1])
+                + " imageBeforeReadMs=" + UiImageAlignmentTiming.value(metadataMillis[2])
+                + " imageAfterReadMs=" + UiImageAlignmentTiming.value(metadataMillis[3])
+                + " lastReadGate=" + (read == null ? "NOT_OBSERVED" : read.gate())
+                + " lastWindowsStatus=" + (read == null ? "NOT_OBSERVED" : read.windows().status())
+                + " lastActivitiesStatus=" + (read == null ? "NOT_OBSERVED" : read.activities().status())
+                + " lastParserGate=" + (read == null ? "NOT_OBSERVED" : read.parserGate());
+    }
+    /** Fixed diagnostic fields only; safe even when the visibility publication is rejected. */
+    String captureDiagnostics() {
+        return binding != null ? binding.diagnostics() : capture != null ? capture.diagnostics() : "captureDiagnostic=NOT_OBSERVED";
     }
 
     /** The Activity calls this once inside its existing visibility publication fence. */
@@ -294,7 +345,11 @@ final class UiImageAlignmentRuntime {
                 source = metadata != null && metadata.alignmentPublicationAuthorityMatches(shape);
             } catch (RuntimeException unavailable) { current = false; hidden = false; source = false; }
             // Even a failed scalar check consumes the sealed receipt, suppressing every region.
-            return publication == null ? unqualified() : publication.publish(now, current, hidden, source);
+            String result = publication == null ? unqualified() : publication.publish(now, current, hidden, source);
+            return result + "\nappendPublicationPresent=" + (publication != null) + " appendRuntimeCurrent=" + current
+                    + " appendHidden=" + hidden + " appendSourceReady=" + source
+                    + " appendQueueMs=" + UiImageAlignmentTiming.value(UiImageAlignmentTiming.elapsed(notifyAt, now))
+                    + "\n" + captureDiagnostics();
         } catch (RuntimeException unavailable) { return unqualified(); }
         finally { queueClose(); }
     }

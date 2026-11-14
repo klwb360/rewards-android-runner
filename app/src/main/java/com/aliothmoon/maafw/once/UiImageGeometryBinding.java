@@ -49,6 +49,8 @@ final class UiImageGeometryBinding {
     int width() { return shape.width(); }
     int height() { return shape.height(); }
     int rotation() { return shape.rotation(); }
+    long diagnosticUiStarted() { return source.diagnosticUiStarted(); }
+    long diagnosticUiAfterLower() { return source.diagnosticUiAfterLower(); }
     NativeUiRegions.Pair regions() { return regions; }
     boolean matchesOwners(Object owner, Object session, Object epoch) {
         return this.owner == owner && this.session == session && this.epoch == epoch;

@@ -39,18 +39,20 @@ final class ReviewShizukuPngBinding {
         private final Binding binding;
         private final AlignmentRecognizer recognizer;
         private final UiImageAlignmentCapture capture;
+        private final UiImageAlignmentDiagnostics.ReceiptState diagnostics = new UiImageAlignmentDiagnostics.ReceiptState();
         private boolean taken;
         private AlignmentBinding(Binding binding,AlignmentRecognizer recognizer,UiImageAlignmentCapture capture){
             this.binding=binding;this.recognizer=recognizer;this.capture=capture;
         }
         OnceBackend backend(){return binding.backend();}
+        String diagnostics(){return diagnostics.summary()+" "+capture.diagnostics();}
         UiImageAlignmentPublication publication(BingNavigationSnapshot.Ready after,long now,
                 Object uiOwner,Object session,Object epoch,long deadline){
             return new UiImageAlignmentPublication(takeReceipt(after,now),uiOwner,session,epoch,
                 Math.min(deadline,capture.deadline()));
         }
         synchronized AlignmentCompletion takeReceipt(BingNavigationSnapshot.Ready after,long now){
-            if(taken)return null;taken=true;
+            if(taken){diagnostics.receipt(UiImageAlignmentDiagnostics.Receipt.DUPLICATE);return null;}taken=true;
             UiImageAlignmentCapture.Candidate candidate=null;
             OnceBackend.Owner owner=null;
             long entered=-1,returned=-1;
@@ -62,31 +64,58 @@ final class ReviewShizukuPngBinding {
                 if(window!=null){entered=window.entered();returned=window.returned();}
                 candidate=recognizer.takeAlignmentCandidate(owner);
                 var maa=recognizer.alignmentAudit(owner);
-                healthy=terminal.phase()==OnceBackend.Phase.COMPLETED
-                    &&terminal.failure()==OnceBackend.Failure.NONE
-                    &&terminal.cancellation()==OnceBackend.Cancellation.NOT_REQUESTED
-                    &&clean!=null&&clean.clean()&&clean.liveTransport()==binding.live
-                    &&candidate!=null&&candidate.matches(capture,recognizer,owner)
-                    &&window!=null&&sameGray(candidate,binding.imageAudit(),maa,capture.width(),capture.height());
-            }catch(RuntimeException unavailable){healthy=false;}
+                if(terminal.phase()!=OnceBackend.Phase.COMPLETED)diagnostics.receipt(UiImageAlignmentDiagnostics.Receipt.BACKEND_PHASE);
+                else if(terminal.failure()!=OnceBackend.Failure.NONE)diagnostics.receipt(UiImageAlignmentDiagnostics.Receipt.BACKEND_FAILURE);
+                else if(terminal.cancellation()!=OnceBackend.Cancellation.NOT_REQUESTED)diagnostics.receipt(UiImageAlignmentDiagnostics.Receipt.CANCELED);
+                else if(clean==null)diagnostics.receipt(UiImageAlignmentDiagnostics.Receipt.CLEANUP_MISSING);
+                else if(!clean.clean())diagnostics.receipt(UiImageAlignmentDiagnostics.Receipt.CLEANUP_REJECTED);
+                else if(clean.liveTransport()!=binding.live)diagnostics.receipt(UiImageAlignmentDiagnostics.Receipt.TRANSPORT_MISMATCH);
+                else if(candidate==null)diagnostics.receipt(UiImageAlignmentDiagnostics.Receipt.CANDIDATE_MISSING);
+                else if(!candidate.matches(capture,recognizer,owner))diagnostics.receipt(UiImageAlignmentDiagnostics.Receipt.CANDIDATE_MISMATCH);
+                else if(window==null)diagnostics.receipt(UiImageAlignmentDiagnostics.Receipt.SOURCE_WINDOW_MISSING);
+                else {
+                    healthy=sameGray(candidate,binding.imageAudit(),maa,capture.width(),capture.height(),diagnostics);
+                    if(!healthy)diagnostics.receipt(UiImageAlignmentDiagnostics.Receipt.IMAGE_MATCH_REJECTED);
+                }
+            }catch(RuntimeException unavailable){healthy=false;diagnostics.receipt(UiImageAlignmentDiagnostics.Receipt.READ_ERROR);}
             boolean sealed=capture.sealSource(healthy?candidate:null,recognizer,owner,entered,returned,after,now);
+            if(healthy)diagnostics.receipt(sealed?UiImageAlignmentDiagnostics.Receipt.ACCEPTED:UiImageAlignmentDiagnostics.Receipt.SEAL_REJECTED);
             return healthy&&sealed?new AlignmentCompletion(capture,candidate.result(),binding.live):null;
         }
     }
     private static boolean sameGray(UiImageAlignmentCapture.Candidate candidate,PngImageAudit.Evidence png,
-            MaaImageBufferAudit.Result maa,int width,int height){
-        if(png==null||!png.isCleanupConfirmed()||png.status()!=PngImageAudit.Status.MATCH
-                ||png.width()!=width||png.height()!=height||!png.firstReplayEqual()
-                ||maa==null||!maa.cleanupQualified()||maa.status()!=MaaImageBufferAudit.Status.VERIFIED_EQUAL
-                ||maa.queryPosts()!=1||!maa.exactBindings()||!maa.positiveTaskBound()||!maa.queryQuiet()
-                ||!maa.javaScratchWiped()||!maa.imageDestroyed()||!maa.taskerDestroyed())return false;
+            MaaImageBufferAudit.Result maa,int width,int height,UiImageAlignmentDiagnostics.ReceiptState diagnostics){
+        if(png==null)return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.PNG_MISSING);
+        if(!png.isCleanupConfirmed())return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.PNG_CLEANUP);
+        var pngStatus=png.status();diagnostics.pngStatus(pngStatus);
+        if(pngStatus!=PngImageAudit.Status.MATCH)return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.PNG_STATUS);
+        if(png.width()!=width||png.height()!=height)return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.PNG_SHAPE);
+        if(!png.firstReplayEqual())return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.PNG_REPLAY);
+        if(maa==null)return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.MAA_MISSING);
+        if(!maa.cleanupQualified())return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.MAA_CLEANUP);
+        var maaStatus=maa.status();diagnostics.maaStatus(maaStatus);
+        if(maaStatus!=MaaImageBufferAudit.Status.VERIFIED_EQUAL)return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.MAA_STATUS);
+        if(maa.queryPosts()!=1)return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.MAA_POSTS);
+        if(!maa.exactBindings())return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.MAA_BINDING);
+        if(!maa.positiveTaskBound())return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.MAA_TASK);
+        if(!maa.queryQuiet())return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.MAA_QUIET);
+        if(!maa.javaScratchWiped())return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.MAA_SCRATCH);
+        if(!maa.imageDestroyed())return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.MAA_IMAGE);
+        if(!maa.taskerDestroyed())return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.MAA_TASKER);
         byte[] expected=null,pngHash=null;
         try{
             expected=candidate.graySha256();pngHash=decodeHash(png.sourceSha256());
-            return expected!=null&&expected.length==32&&pngHash!=null&&MessageDigest.isEqual(expected,pngHash)
-                &&png.sourceSha256().equals(png.replaySha256())&&png.sourceSha256().equals(png.standardSha256())
-                &&MaaImageBufferAudit.matchesGraySha256(maa.fingerprint(),width,height,expected);
+            if(expected==null||expected.length!=32)return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.CANDIDATE_DIGEST);
+            if(pngHash==null)return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.PNG_DIGEST_FORMAT);
+            if(!MessageDigest.isEqual(expected,pngHash))return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.CANDIDATE_PNG_DIGEST);
+            if(!png.sourceSha256().equals(png.replaySha256()))return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.PNG_REPLAY_DIGEST);
+            if(!png.sourceSha256().equals(png.standardSha256()))return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.PNG_STANDARD_DIGEST);
+            if(!MaaImageBufferAudit.matchesGraySha256(maa.fingerprint(),width,height,expected))return rejectImage(diagnostics,UiImageAlignmentDiagnostics.ImageMatch.MAA_DIGEST);
+            diagnostics.imageMatch(UiImageAlignmentDiagnostics.ImageMatch.ACCEPTED);return true;
         }finally{if(expected!=null)Arrays.fill(expected,(byte)0);if(pngHash!=null)Arrays.fill(pngHash,(byte)0);}
+    }
+    private static boolean rejectImage(UiImageAlignmentDiagnostics.ReceiptState diagnostics,UiImageAlignmentDiagnostics.ImageMatch gate){
+        diagnostics.imageMatch(gate);return false;
     }
     private static byte[] decodeHash(String value){
         if(value==null||value.length()!=64)return null;byte[] result=new byte[32];

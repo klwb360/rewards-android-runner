@@ -14,6 +14,13 @@ import java.nio.file.attribute.BasicFileAttributes;
 /** Fixed, independent one-attempt storage and quotas. Neither one grants live capture authority. */
 final class UiImageAlignmentScope {
     static final String DIRECTORY = "rewards-ui-image-alignment-v1";
+    static final String DIAGNOSTIC_DIRECTORY = "rewards-ui-image-alignment-diagnostic-v2";
+    private enum Profile {
+        ORIGINAL(DIRECTORY, "ui-image-alignment-v1"),
+        DIAGNOSTIC(DIAGNOSTIC_DIRECTORY, "ui-image-alignment-diagnostic-v2");
+        final String directory, marker;
+        Profile(String directory, String marker) { this.directory = directory; this.marker = marker; }
+    }
     static final long SESSION_TTL = 180_000L, CAPTURE_TTL = 90_000L;
     static final int MAX_UI_READS = 1, MAX_FRAMES = 1, MAX_OCR_PER_FRAME = 1;
     // Fixed read-only source metadata is separate from navigation or input.
@@ -33,11 +40,19 @@ final class UiImageAlignmentScope {
         return Math.min(now + CAPTURE_TTL, sessionEnd);
     }
 
-    static void burnRun(Path files) throws IOException { burn(files, Slot.RUN); }
-    static void burnUi(Path files) throws IOException { burn(files, Slot.UI); }
+    static void burnRun(Path files) throws IOException { burn(files, Slot.RUN, Profile.ORIGINAL); }
+    static void burnUi(Path files) throws IOException { burn(files, Slot.UI, Profile.ORIGINAL); }
+    static void burnDiagnosticRun(Path files) throws IOException { burn(files, Slot.RUN, Profile.DIAGNOSTIC); }
+    static void burnDiagnosticUi(Path files) throws IOException { burn(files, Slot.UI, Profile.DIAGNOSTIC); }
 
     /** The existing real grant consumes this store; fixture grants are never created here. */
     static RealCaptureClaim.BurnStore frameStore(Path files) {
+        return frameStore(files, Profile.ORIGINAL);
+    }
+    static RealCaptureClaim.BurnStore diagnosticFrameStore(Path files) {
+        return frameStore(files, Profile.DIAGNOSTIC);
+    }
+    private static RealCaptureClaim.BurnStore frameStore(Path files, Profile profile) {
         requireRootPath(files);
         return new RealCaptureClaim.BurnStore() {
             private boolean attempted;
@@ -49,7 +64,7 @@ final class UiImageAlignmentScope {
                     throw new SecurityException("Exact alignment frame claim required");
                 }
                 // The grant's UUID, owner/epoch metadata and arbitrary caller text are not persisted.
-                UiImageAlignmentScope.burn(files, Slot.FRAME);
+                UiImageAlignmentScope.burn(files, Slot.FRAME, profile);
             }
         };
     }
@@ -81,10 +96,10 @@ final class UiImageAlignmentScope {
     }
 
     /** A partial/existing marker or unconfirmed force is retained. No recovery or deletion API. */
-    private static void burn(Path files, Slot slot) throws IOException {
+    private static void burn(Path files, Slot slot, Profile profile) throws IOException {
         Path root = requireRootPath(files);
         Object rootIdentity = directoryIdentity(root);
-        Path directory = root.resolve(DIRECTORY);
+        Path directory = root.resolve(profile.directory);
         try { Files.createDirectory(directory); }
         catch (FileAlreadyExistsException existing) { /* The exact directory is checked below. */ }
         Object scopeIdentity = directoryIdentity(directory);
@@ -92,7 +107,7 @@ final class UiImageAlignmentScope {
         Path marker = directory.resolve(slot.name() + ".burned");
         try (FileChannel channel = FileChannel.open(marker, StandardOpenOption.CREATE_NEW,
                 StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
-            ByteBuffer bytes = StandardCharsets.UTF_8.encode("ui-image-alignment-v1 slot=" + slot.name()
+            ByteBuffer bytes = StandardCharsets.UTF_8.encode(profile.marker + " slot=" + slot.name()
                     + " maxUiReads=1 maxFrames=1 maxOcrPerFrame=1 maxNavigation=0 maxInput=0\n");
             while (bytes.hasRemaining()) {
                 if (channel.write(bytes) <= 0) throw new IOException("Alignment marker write unconfirmed");

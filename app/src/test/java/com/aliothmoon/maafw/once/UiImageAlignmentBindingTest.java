@@ -200,4 +200,48 @@ public class UiImageAlignmentBindingTest {
             assertFalse(MaaImageBufferAudit.matchesGraySha256(result.fingerprint(),f.width,f.height,new byte[31]));
         }finally{Arrays.fill(digest,(byte)0);}
     }
+
+    @Test public void diagnosticReadDoesNotTakeReceiptAndContainsOnlyFixedScalars()throws Exception{
+        var f=new Fixture(false,true);f.start();String before=f.binding.diagnostics();
+        assertTrue(before.contains("receiptGate=NOT_ATTEMPTED"));
+        assertEquals(before,f.binding.diagnostics());var receipt=f.receipt();assertNotNull(receipt);
+        String after=f.binding.diagnostics();assertTrue(after.contains("receiptGate=ACCEPTED"));
+        assertTrue(after.contains("imageMatchGate=ACCEPTED"));assertTrue(after.contains("pngAuditStatus=MATCH"));
+        assertTrue(after.contains("maaAuditStatus=VERIFIED_EQUAL"));
+        for(String field:after.split(" "))assertTrue(field,field.matches("[A-Za-z][A-Za-z0-9]*=(?:[A-Z_]+|true|false|-?[0-9]+)"));
+        assertFalse(after.contains("搜索"));assertFalse(after.contains("阅读"));
+        assertTrue(receipt.consume(f.ui.owner,f.ui.session,f.ui.epoch,NOW));
+        assertFalse(receipt.consume(f.ui.owner,f.ui.session,f.ui.epoch,NOW));assertEquals(1,f.sourceCalls);
+    }
+
+    @Test public void successfulBackendWithSlowRecognitionReportsMissingStaleCandidate()throws Exception{
+        var f=new Fixture();f.recognizer.observed=7201;
+        var result=f.start();assertEquals(OnceBackend.Phase.COMPLETED,result.phase());
+        assertEquals(OnceBackend.Failure.NONE,result.failure());assertEquals(OnceBackend.Cleanup.CONFIRMED,result.cleanup());
+        assertNull(f.binding.takeReceipt(ready(7300),7400));String diagnostic=f.binding.diagnostics();
+        assertTrue(diagnostic.contains("receiptGate=CANDIDATE_MISSING"));
+        assertTrue(diagnostic.contains("prepareGate=CURRENT_REJECTED candidateFormed=false"));
+        assertTrue(diagnostic.contains("firstCurrentReject=UI_GEOMETRY_REJECTED"));
+        assertTrue(diagnostic.contains("firstRejectedUiAfterAgeMs=5001"));
+        assertTrue(diagnostic.contains("imageMatchGate=NOT_CHECKED"));assertEquals(1,f.sourceCalls);
+        assertNull(f.binding.takeReceipt(ready(AFTER),NOW));assertEquals(1,f.sourceCalls);
+    }
+
+    @Test public void freshCandidateThenSlowPostReadReportsSealAgeFailure()throws Exception{
+        var f=new Fixture();assertEquals(OnceBackend.Phase.COMPLETED,f.start().phase());
+        assertNull(f.binding.takeReceipt(ready(7199),7201));String diagnostic=f.binding.diagnostics();
+        assertTrue(diagnostic.contains("receiptGate=SEAL_REJECTED"));assertTrue(diagnostic.contains("imageMatchGate=ACCEPTED"));
+        assertTrue(diagnostic.contains("prepareGate=ACCEPTED candidateFormed=true"));
+        assertTrue(diagnostic.contains("sealGate=AFTER_REJECTED"));assertTrue(diagnostic.contains("afterGate=CURRENT_REJECTED"));
+        assertTrue(diagnostic.contains("firstRejectedUiAfterAgeMs=5001"));assertTrue(diagnostic.contains("imageAfterAgeMs=2"));
+        assertNull(f.receipt());assertEquals(1,f.sourceCalls);
+    }
+
+    @Test public void nativeHashMismatchIsNotMisreportedAsAStaleOrMissingCandidate()throws Exception{
+        var f=new Fixture();f.recognizer.badFingerprint=true;f.start();assertNull(f.receipt());
+        String diagnostic=f.binding.diagnostics();assertTrue(diagnostic.contains("receiptGate=IMAGE_MATCH_REJECTED"));
+        assertTrue(diagnostic.contains("imageMatchGate=MAA_DIGEST"));
+        assertTrue(diagnostic.contains("prepareGate=ACCEPTED candidateFormed=true"));
+        assertTrue(diagnostic.contains("firstCurrentReject=NOT_CHECKED"));assertEquals(1,f.sourceCalls);
+    }
 }

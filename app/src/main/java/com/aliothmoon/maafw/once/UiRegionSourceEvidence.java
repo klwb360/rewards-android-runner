@@ -84,6 +84,8 @@ final class UiRegionSourceEvidence {
     }
     BingNavigationSnapshot.Shape geometryShape() { return before.profile().shape(); }
     long geometryObserved() { return after.observed(); }
+    long diagnosticUiStarted() { return report.started(); }
+    long diagnosticUiAfterLower() { return after.lower(); }
 
     private static boolean valid(NativeUiStructureProtocol.Report report, String nonce,
             BingNavigationSnapshot.Ready before, long beforeAt,
