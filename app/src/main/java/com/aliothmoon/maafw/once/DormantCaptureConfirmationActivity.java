@@ -547,7 +547,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  @Override protected void onCreate(Bundle state){
   super.onCreate(state);
   if(state!=null || android.os.Process.myUid()<10000 || !Application.getProcessName().equals(getPackageName()+":capture_once")) {finish();return;}
-  if(OwnStateSummaryUi.ACTIVE){OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION));return;}
+  if(OwnStateSummaryUi.ACTIVE){OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.TITLE_TIMING));return;}
   installed=BingPackageMetadata.read(getPackageManager());
   if(!CaptureReleaseGate.configured()){showNavigation();return;}
   rikka.shizuku.Shizuku.addRequestPermissionResultListener(permissionListener);
@@ -574,7 +574,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  }
  private void summaryRejected(){terminalShown=true;terminalSnapshot=new TerminalSnapshot(true,false,"OWN_STATE",false);OwnStateSummaryUi.rejected(this,this::cancelAndFinish);}
  private void showCaptureChoices(){
-  if(OwnStateSummaryUi.ACTIVE){if(!consumed){if(alignmentSelected)showAlignmentChoice();else OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION));}return;}
+  if(OwnStateSummaryUi.ACTIVE){if(!consumed){if(alignmentSelected)showAlignmentChoice();else OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.TITLE_TIMING));}return;}
   boolean ready=false;
   try{
    ready=rikka.shizuku.Shizuku.pingBinder()&&!rikka.shizuku.Shizuku.isPreV11()

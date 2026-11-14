@@ -46,10 +46,15 @@ final class UiRegionImageRefiner {
         }
     }
 
-    record Result(Item search, Item reading) {
+    record Result(Item search, Item reading, UiTitleDiagnostic.Sample searchTitleDiagnostic,
+                  UiTitleDiagnostic.Sample readingTitleDiagnostic) {
+        Result(Item search, Item reading) {
+            this(search, reading, UiTitleDiagnostic.notObserved(), UiTitleDiagnostic.notObserved());
+        }
         Result {
             if (search == null || reading == null || search.role() != NativeUiRegions.Role.SEARCH
-                    || reading.role() != NativeUiRegions.Role.READING) {
+                    || reading.role() != NativeUiRegions.Role.READING
+                    || searchTitleDiagnostic == null || readingTitleDiagnostic == null) {
                 throw new IllegalArgumentException("fixed result roles");
             }
         }
@@ -57,12 +62,18 @@ final class UiRegionImageRefiner {
         String summary(boolean qualified) {
             String limits = " nonAtomic=true counterAuthority=false actionAuthority=false";
             if (!qualified) return "uiImageAlignment=UNQUALIFIED regions=SUPPRESSED" + limits;
-            return "uiImageAlignment=DIAGNOSTIC_ONLY" + limits + " search=" + search + " reading=" + reading;
+            return "uiImageAlignment=DIAGNOSTIC_ONLY" + limits + " search=" + search + " reading=" + reading
+                    + " searchTitleDiagnostic=" + searchTitleDiagnostic + " readingTitleDiagnostic=" + readingTitleDiagnostic;
         }
     }
 
     static Result observe(NativeUiRegions.Pair ui, byte[] gray, int width, int height,
                           List<FrameStructureEvidence.Line> rows, BooleanSupplier cancel) {
+        return observe(ui, gray, width, height, rows, cancel, null);
+    }
+
+    static Result observe(NativeUiRegions.Pair ui, byte[] gray, int width, int height,
+                          List<FrameStructureEvidence.Line> rows, BooleanSupplier cancel, UiImageAlignmentTrace trace) {
         if (ui == null || cancel == null) return held(ui, Status.INVALID_INPUT);
         if (width <= 0 || height <= 0 || width > MAX_DIMENSION || height > MAX_DIMENSION
                 || (long) width * height > MAX_PIXELS || gray == null
@@ -76,10 +87,11 @@ final class UiRegionImageRefiner {
             check(cancel);
             // Shape validation only. A new artificial Binding here would not prove OCR provenance.
             if (!validRows(rows, width, height, cancel)) return held(ui, Status.INVALID_ROWS);
-            Item search = refine(NativeUiRegions.Role.SEARCH, ui.search(), gray, width, height, rows, cancel);
-            Item reading = refine(NativeUiRegions.Role.READING, ui.reading(), gray, width, height, rows, cancel);
+            UiTitleDiagnostic.Sample[] diagnostics = {UiTitleDiagnostic.notObserved(), UiTitleDiagnostic.notObserved()};
+            Item search = refine(NativeUiRegions.Role.SEARCH, ui.search(), gray, width, height, rows, cancel, diagnostics, trace);
+            Item reading = refine(NativeUiRegions.Role.READING, ui.reading(), gray, width, height, rows, cancel, diagnostics, trace);
             check(cancel);
-            return new Result(search, reading);
+            return new Result(search, reading, diagnostics[0], diagnostics[1]);
         } catch (Canceled ignored) {
             return held(ui, Status.CANCELED);
         } catch (RuntimeException unavailable) {
@@ -122,16 +134,28 @@ final class UiRegionImageRefiner {
 
     private static Item refine(NativeUiRegions.Role role, NativeUiRegions.Region region,
                                byte[] gray, int width, int height,
-                               List<FrameStructureEvidence.Line> rows, BooleanSupplier cancel) {
+                               List<FrameStructureEvidence.Line> rows, BooleanSupplier cancel,
+                               UiTitleDiagnostic.Sample[] diagnostics, UiImageAlignmentTrace trace) {
         if (region == null) return item(role, null, Status.NO_UI_REGION);
         NativeUiRegions.Rect coarse = region.card();
         int cw = coarse.right() - coarse.left(), ch = coarse.bottom() - coarse.top();
         if (cw < DIAGNOSTIC_MIN_SIDE || ch < DIAGNOSTIC_MIN_SIDE) return item(role, region, Status.NO_BOUNDARY);
-        int threshold = threshold(gray, width, height, coarse, cancel);
+        int threshold;
+        var thresholdSpan = trace == null ? null : trace.begin(role == NativeUiRegions.Role.SEARCH
+                ? UiImageAlignmentTrace.Phase.SEARCH_THRESHOLD : UiImageAlignmentTrace.Phase.READING_THRESHOLD);
+        try { threshold = threshold(gray, width, height, coarse, cancel); }
+        finally { if (trace != null) trace.end(thresholdSpan); }
         if (threshold < 0) return item(role, region, Status.NO_SURFACE_CONTRAST);
-        Geometry geometry = geometry(gray, width, height, coarse, threshold, cancel);
+        Geometry geometry;
+        var geometrySpan = trace == null ? null : trace.begin(role == NativeUiRegions.Role.SEARCH
+                ? UiImageAlignmentTrace.Phase.SEARCH_GEOMETRY : UiImageAlignmentTrace.Phase.READING_GEOMETRY);
+        try { geometry = geometry(gray, width, height, coarse, threshold, cancel); }
+        finally { if (trace != null) trace.end(geometrySpan); }
         if (geometry.status() != Status.VISUAL_CANDIDATE) return item(role, region, geometry.status());
         // OCR cannot select among competing pixel boundaries or repair a missing boundary.
+        var titleSpan = trace == null ? null : trace.begin(role == NativeUiRegions.Role.SEARCH
+                ? UiImageAlignmentTrace.Phase.SEARCH_TITLE : UiImageAlignmentTrace.Phase.READING_TITLE);
+        try {
         NativeUiRegions.Rect boundary = geometry.boundary();
         FrameStructureEvidence.Line title = null;
         String expected = role == NativeUiRegions.Role.SEARCH ? SEARCH_TITLE : READING_TITLE;
@@ -146,9 +170,15 @@ final class UiRegionImageRefiner {
             if (overlaps(boundary, box) && !boundary.contains(box)) {
                 return item(role, region, Status.ROW_CROSSES_BOUNDARY);
             }
-            if (row.text().equals(opposite)) return item(role, region, Status.WRONG_ROLE_TITLE);
+            if (row.text().equals(opposite)) {
+                diagnostics[role == NativeUiRegions.Role.SEARCH ? 0 : 1] =
+                        UiTitleDiagnostic.classify(role, row.text(), box, boundary, region.summary());
+                return item(role, region, Status.WRONG_ROLE_TITLE);
+            }
             if (!row.text().equals(expected)
                     && (row.text().contains(SEARCH_TITLE) || row.text().contains(READING_TITLE))) {
+                diagnostics[role == NativeUiRegions.Role.SEARCH ? 0 : 1] =
+                        UiTitleDiagnostic.classify(role, row.text(), box, boundary, region.summary());
                 return item(role, region, Status.UNSUPPORTED_TITLE);
             }
             if (row.text().equals(expected)) { titles++; title = row; }
@@ -156,6 +186,8 @@ final class UiRegionImageRefiner {
         if (titles == 0) return item(role, region, Status.TITLE_MISSING);
         if (titles != 1) return item(role, region, Status.AMBIGUOUS_TITLE);
         NativeUiRegions.Rect text = box(title);
+        diagnostics[role == NativeUiRegions.Role.SEARCH ? 0 : 1] =
+                UiTitleDiagnostic.classify(role, title.text(), text, boundary, region.summary());
         if (!boundary.contains(text)) return item(role, region, Status.TITLE_OUTSIDE_BOUNDARY);
         int bw = boundary.right() - boundary.left(), bh = boundary.bottom() - boundary.top();
         if ((long) (text.left() - boundary.left()) * DIAGNOSTIC_TITLE_START_DIVISOR > bw
@@ -164,6 +196,7 @@ final class UiRegionImageRefiner {
             return item(role, region, Status.TITLE_NOT_UPPER_LEFT);
         }
         return new Item(role, coarse, boundary, text, Status.VISUAL_CANDIDATE);
+        } finally { if (trace != null) trace.end(titleSpan); }
     }
 
     /** Local modes only; no More-card full-screen ratio or absolute white threshold is reused. */

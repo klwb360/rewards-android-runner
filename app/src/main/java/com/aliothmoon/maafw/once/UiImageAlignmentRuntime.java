@@ -268,13 +268,18 @@ final class UiImageAlignmentRuntime {
                     this::consumeFrameClaim, this::sourceGate, fence, Runnable::run, capture, preparedModels);
             bindingConstruction = false; backend = binding.backend();
             long backendStartedAt = SystemClock.elapsedRealtime();
-            var result = backend.start();
+            OnceBackend.Result result;
+            try { result = backend.start(); }
+            finally { capture.backendReturned(); }
             backendMillis = UiImageAlignmentTiming.elapsed(backendStartedAt, SystemClock.elapsedRealtime());
             backendPhase = result.phase(); backendFailure = result.failure();
             BingNavigationSnapshot.Ready imageAfter = null;
             if (result.phase() == OnceBackend.Phase.COMPLETED && result.failure() == OnceBackend.Failure.NONE
                     && result.cancellation() == OnceBackend.Cancellation.NOT_REQUESTED && actualResourcesClosed()) {
-                stage = Stage.IMAGE_AFTER; imageAfter = readSource(MetadataStage.IMAGE_AFTER);
+                stage = Stage.IMAGE_AFTER;
+                var afterTiming = capture.diagnosticsTrace().begin(UiImageAlignmentTrace.Phase.IMAGE_AFTER);
+                try { imageAfter = readSource(MetadataStage.IMAGE_AFTER); }
+                finally { capture.diagnosticsTrace().end(afterTiming); }
             }
             pendingPublication = binding.publication(imageAfter, SystemClock.elapsedRealtime(),
                     this, approvalOwner, epoch, sessionEnd);
@@ -350,7 +355,7 @@ final class UiImageAlignmentRuntime {
 
     private String diagnostics() {
         var read = metadata == null ? null : metadata.lastReadDiagnostic();
-        return "alignmentEntry=" + (calibration != null ? "CALIBRATION_V3_" + calibration : diagnosticRun ? "DIAGNOSTIC_V2" : "ORIGINAL_V1")
+        return "alignmentEntry=" + (calibration == UiImageAlignmentScope.Calibration.TITLE_TIMING ? "TITLE_TIMING_V4" : calibration != null ? "CALIBRATION_V3_" + calibration : diagnosticRun ? "DIAGNOSTIC_V2" : "ORIGINAL_V1")
                 + " modelPreparationMs=" + UiImageAlignmentTiming.value(modelPreparationMillis)
                 + " preparedModelsState=" + (preparedModels == null ? "NOT_USED" : preparedModels.state())
                 + " preparedModelsFailure=" + (preparedModels == null ? "NOT_USED" : preparedModels.failure())

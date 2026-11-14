@@ -119,6 +119,7 @@ public class UiImageAlignmentBindingTest {
         String safe=publication.publish(NOW,true,true,true);
         assertTrue(safe.contains("alignmentEvidence=UNQUALIFIED"));assertTrue(safe.contains("regions=SUPPRESSED"));
         assertFalse(safe.contains("SOURCE_CHECKED_NON_ATOMIC"));assertFalse(safe.contains("搜索积分"));assertNull(f.receipt());
+        assertFalse(safe.contains("mockOverlay="));assertFalse(safe.contains("mockReadingPoint="));assertFalse(safe.contains("mockSearchPoint="));
     }
     @Test public void generatedVisualCandidatesSurviveActualPngAuditAndOwnerJoinButStayNonlive()throws Exception{
         var f=new Fixture(false,true);assertEquals(OnceBackend.Phase.COMPLETED,f.start().phase());
@@ -133,6 +134,7 @@ public class UiImageAlignmentBindingTest {
         var publication=new UiImageAlignmentPublication(receipt,f.ui.owner,f.ui.session,f.ui.epoch,8000);
         String safe=publication.publish(NOW,true,true,true);
         assertTrue(safe.contains("regions=SUPPRESSED"));assertFalse(safe.contains("VISUAL_CANDIDATE"));
+        assertFalse(safe.contains("mockOverlay="));assertFalse(safe.contains("mockReadingPoint="));assertFalse(safe.contains("mockSearchPoint="));
         assertFalse(receipt.consume(f.ui.owner,f.ui.session,f.ui.epoch,NOW));
     }
     @Test public void failedReceiptAttemptCannotBeRetriedAfterStarting()throws Exception{

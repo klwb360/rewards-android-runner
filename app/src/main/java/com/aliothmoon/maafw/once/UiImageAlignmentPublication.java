@@ -31,6 +31,7 @@ final class UiImageAlignmentPublication {
             return head + " imageBinding=NOT_ESTABLISHED regions=SUPPRESSED publicationFence=REJECTED_AT_APPEND";
         }
         return head + " imageBinding=SAME_NATIVE_FRAME sourceTiming=PRODUCE_ENVELOPE_ONLY "
-                + completion.result().summary(true) + " publicationFence=CURRENT_AT_APPEND";
+                + completion.result().summary(true) + " " + UiMockOverlayPlan.summary(completion.result())
+                + " publicationFence=CURRENT_AT_APPEND";
     }
 }
