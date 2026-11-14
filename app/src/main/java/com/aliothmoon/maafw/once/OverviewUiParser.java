@@ -37,7 +37,9 @@ final class OverviewUiParser {
         for(var scroll:scrollNodes) {
             if(scroll==null)return OverviewUiProtocol.ScrollHint.UNKNOWN;
             var node=parser.byIndex.get(scroll.index());
-            if(!visible(node)||!box(node).contains(box(home))||!parser.descendant(home,node))continue;
+            // The exact home container can own scrolling itself; nested carousels cannot.
+            if(!visible(node)||!box(node).contains(box(home))
+                    ||node.index()!=home.index()&&!parser.descendant(home,node))continue;
             if(found!=null)return OverviewUiProtocol.ScrollHint.UNKNOWN;found=scroll;
         }
         if(found==null)return OverviewUiProtocol.ScrollHint.UNKNOWN;

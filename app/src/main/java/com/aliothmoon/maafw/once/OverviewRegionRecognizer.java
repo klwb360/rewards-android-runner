@@ -146,18 +146,22 @@ final class OverviewRegionRecognizer {
         for(var tick:geometry.ticks())if(ring.overlaps(full(tick.disk(),crop.box())))throw new Halt(Reason.TICK_CONFLICT);
         int ix=Math.max(2,(int)Math.ceil(.20*ring.width())),iy=Math.max(2,(int)Math.ceil(.20*ring.height()));
         Box safe=new Box(ring.left()+ix,ring.top()+iy,ring.right()-ix,ring.bottom()-iy);
-        Row numeral=null;int points=0;
+        Row numeral=null;int ringRows=0;
         for(Row row:rows)if(panel.overlaps(row.box())) {
             if(!panel.contains(row.box()))throw new Halt(Reason.ROW_CROSSES_REGION);
             if(conflict(row.text()))throw new Halt(Reason.STATE_CONFLICT);
             if(ring.overlaps(row.box())) {
                 if(!trusted(row))throw new Halt(Reason.LOW_CONFIDENCE);
-                Integer value=plainNumber(row.text());
-                if(numeral!=null||value==null||!safe.contains(row.box()))throw new Halt(Reason.NUMBER_INVALID);
-                numeral=row;points=value;
+                ringRows++;
+                if(numeral==null)numeral=row;
             }
         }
-        if(numeral==null)throw new Halt(Reason.NUMBER_INVALID);
+        if(numeral==null)throw new Halt(Reason.NUMBER_MISSING);
+        if(ringRows!=1)throw new Halt(Reason.NUMBER_MULTIPLE);
+        Integer points=plainNumber(numeral.text());
+        if(points==null)throw new Halt(numeral.text().matches("[0-9]{1,4}")
+                ?Reason.NUMBER_INVALID:Reason.NUMBER_NON_NUMERIC);
+        if(!safe.contains(numeral.box()))throw new Halt(Reason.NUMBER_OUTSIDE_SAFE_RING);
         if(argb==null)throw new Halt(Reason.COLOR_UNAVAILABLE);
         if(!yellowRing(argb,width,ring,cancel))throw new Halt(Reason.COLOR_NOT_YELLOW);
         out.add(item(index,0,r,panel,heading.box(),numeral.box(),Status.CANDIDATE,
@@ -223,15 +227,28 @@ final class OverviewRegionRecognizer {
 
     private static Row heading(OverviewUiRegions.Region region,List<Row> rows) {
         if(region.heading()==null)throw new Halt(Reason.HEADER_MISSING);
-        Row selected=null;
+        Row selected=null;boolean extraText=false;
         for(Row row:rows)if(region.heading().overlaps(row.box())) {
-            if(!headerText(region.role(),row.text()))continue;
+            if(!headerText(region.role(),row.text())) {
+                extraText|=containsHeaderText(region.role(),row.text());
+                continue;
+            }
             if(!trusted(row))throw new Halt(Reason.LOW_CONFIDENCE);
             if(selected!=null)throw new Halt(Reason.HEADER_CONFLICT);
             selected=row;
         }
-        if(selected==null)throw new Halt(Reason.HEADER_MISSING);
+        if(selected==null)throw new Halt(extraText?Reason.HEADER_WITH_EXTRA_TEXT:Reason.HEADER_MISSING);
         return selected;
+    }
+    /** Diagnostic only: a merged or decorated title remains rejected, without rewriting its row. */
+    private static boolean containsHeaderText(OverviewUiRegions.Role role,String text) {
+        return switch(role) {
+            case CHECK_IN -> text.contains("签入")||text.contains("签到");
+            case DAILY_PROGRESS,DAILY_ACTIVITIES -> text.contains("每日活动");
+            case MORE_ACTIVITIES -> text.contains("更多活动");
+            case POINTS_SUMMARY -> text.contains("今日积分");
+            case STREAK_SUMMARY -> text.contains("连续");
+        };
     }
     private static boolean headerText(OverviewUiRegions.Role role,String text) {
         return switch(role) {

@@ -46,6 +46,7 @@ final class OverviewScanRuntime {
     private RealCaptureClaim.Grant grant;
     private BingNavigationSnapshot.Ready baseline;
     private volatile Stage stage=Stage.NEW;
+    private volatile OverviewUiProtocol.ScrollHint lastScrollHint=OverviewUiProtocol.ScrollHint.UNKNOWN;
     private final OverviewFailureDiagnostic diagnostic=new OverviewFailureDiagnostic();
     private volatile boolean workerReturned,closed,released,constructionUnknown,claimUncertain,bindingConstruction;
     private boolean notified;
@@ -156,6 +157,7 @@ final class OverviewScanRuntime {
                         },exact);
                 if(uiRead==null||!uiRead.knownClean()||uiRead.protocolReport()==null||!uiRead.protocolReport().qualified())
                     throw new SecurityException("Overview UI observation unqualified");
+                lastScrollHint=uiRead.protocolReport().scrollHint();
                 diagnostic.at(Checkpoint.SOURCE_UI_AFTER);
                 var afterUi=readSource(UiImageAlignmentRuntime.MetadataStage.UI_AFTER);
                 if(afterUi==null)diagnostic.failed(Checkpoint.SOURCE_UI_AFTER);
@@ -293,7 +295,7 @@ final class OverviewScanRuntime {
     }
     private boolean allResourcesClosed(){return nativeResourcesClosed()&&!appendActive.get()&&(preview==null||preview.knownReleased());}
     private Path createArtifactDirectory()throws Exception{
-        Path cache=activity.getCacheDir().toPath();Path parent=cache.resolve("rewards-overview-v6");
+        Path cache=activity.getCacheDir().toPath();Path parent=cache.resolve("rewards-overview-v7");
         try{Files.createDirectory(parent);}catch(FileAlreadyExistsException exists){/* Verify exact directory. */}
         for(Path p:new Path[]{cache,parent}){var a=Files.readAttributes(p,BasicFileAttributes.class,LinkOption.NOFOLLOW_LINKS);
             if(!a.isDirectory()||a.isSymbolicLink()||a.fileKey()==null)throw new SecurityException("Local review directory unavailable");}
@@ -313,13 +315,14 @@ final class OverviewScanRuntime {
         activity.runOnUiThread(()->activity.overviewFinished(this,details));
     }
     boolean finishedAndReleased(){return workerReturned&&closed&&released;}
-    String fixedSummary(){return "profile=OVERVIEW_V6 stage="+stage+" stopReason="+stage+" terminal="+workerReturned+" released="+released
+    String fixedSummary(){return "profile=OVERVIEW_V7 stage="+stage+" stopReason="+stage+" terminal="+workerReturned+" released="+released
             +" cleanup="+(allResourcesClosed()?"CONFIRMED":"UNKNOWN")+" frames="+intent.frames()+" qualifiedFrames="+qualifiedFrames
             +" scrollSlotsSpent="+intent.swipes()+" scrollDispatchAttempts="+scrollDispatchAttempts+" swipes="+scrollExitedZero
             +" maxFrames=12 maxSwipes=11 taskTaps=0 back=0 textEntry=0"
             +" regions="+regions+" mockPoints="+points+" rolesObserved="+Integer.bitCount(seenRoles)
             +" countUnit=FRAME_ITEM_OBSERVATIONS_NOT_UNIQUE_TASKS"+roleSummary()
             +" "+diagnostic.summary()
+            +" lastScrollHint="+lastScrollHint
             +" coverageIncomplete=true actionAuthority=false counterAuthority=false taskCompletion=NOT_EVALUATED"
             +" rawDataUploaded=false artifacts="+(artifacts==null?"NONE":artifacts.getFileName().toString());}
     private String roleSummary(){
