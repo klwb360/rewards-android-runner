@@ -41,6 +41,13 @@ final class OwnedFrame {
                 return bytes[index] & 255;
             }
         }
+        @Override public void copyGrayRange(int sourceOffset, byte[] target, int targetOffset, int length) {
+            synchronized (OwnedFrame.this) {
+                checkReadable();
+                BackendPorts.checkGrayRange(bytes.length, sourceOffset, target, targetOffset, length);
+                System.arraycopy(bytes, sourceOffset, target, targetOffset, length);
+            }
+        }
     };
 
     BackendPorts.FrameSink sink() { return sink; }

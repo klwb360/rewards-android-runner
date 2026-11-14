@@ -15,9 +15,14 @@ import java.nio.file.attribute.BasicFileAttributes;
 final class UiImageAlignmentScope {
     static final String DIRECTORY = "rewards-ui-image-alignment-v1";
     static final String DIAGNOSTIC_DIRECTORY = "rewards-ui-image-alignment-diagnostic-v2";
+    enum Calibration { FIRST, CONFIRMATION }
+    static final String CALIBRATION_DIRECTORY = "rewards-ui-image-alignment-calibration-v3";
+    static final String CONFIRMATION_DIRECTORY = "rewards-ui-image-alignment-calibration-confirm-v3";
     private enum Profile {
         ORIGINAL(DIRECTORY, "ui-image-alignment-v1"),
-        DIAGNOSTIC(DIAGNOSTIC_DIRECTORY, "ui-image-alignment-diagnostic-v2");
+        DIAGNOSTIC(DIAGNOSTIC_DIRECTORY, "ui-image-alignment-diagnostic-v2"),
+        CALIBRATION(CALIBRATION_DIRECTORY, "ui-image-alignment-calibration-v3"),
+        CONFIRMATION(CONFIRMATION_DIRECTORY, "ui-image-alignment-calibration-confirm-v3");
         final String directory, marker;
         Profile(String directory, String marker) { this.directory = directory; this.marker = marker; }
     }
@@ -44,6 +49,17 @@ final class UiImageAlignmentScope {
     static void burnUi(Path files) throws IOException { burn(files, Slot.UI, Profile.ORIGINAL); }
     static void burnDiagnosticRun(Path files) throws IOException { burn(files, Slot.RUN, Profile.DIAGNOSTIC); }
     static void burnDiagnosticUi(Path files) throws IOException { burn(files, Slot.UI, Profile.DIAGNOSTIC); }
+    private static Profile calibrationProfile(Calibration attempt) {
+        return switch (java.util.Objects.requireNonNull(attempt)) {
+            case FIRST -> Profile.CALIBRATION;
+            case CONFIRMATION -> Profile.CONFIRMATION;
+        };
+    }
+    static void burnCalibrationRun(Path files, Calibration attempt) throws IOException { burn(files, Slot.RUN, calibrationProfile(attempt)); }
+    static void burnCalibrationUi(Path files, Calibration attempt) throws IOException { burn(files, Slot.UI, calibrationProfile(attempt)); }
+    static RealCaptureClaim.BurnStore calibrationFrameStore(Path files, Calibration attempt) {
+        return frameStore(files, calibrationProfile(attempt));
+    }
 
     /** The existing real grant consumes this store; fixture grants are never created here. */
     static RealCaptureClaim.BurnStore frameStore(Path files) {

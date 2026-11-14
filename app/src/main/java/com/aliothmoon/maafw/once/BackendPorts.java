@@ -88,5 +88,26 @@ final class BackendPorts {
         int height();
         int size();
         int unsignedByte(int index);
+
+        /** Copies one bounded GRAY8 range into caller-owned scratch; never exposes backing storage.
+         * Checks the whole range before writing. A reader failure may leave partial scratch, which
+         * the caller must wipe. Cancellation/source checks stay at their original caller sites. */
+        default void copyGrayRange(int sourceOffset, byte[] target, int targetOffset, int length) {
+            checkGrayRange(size(), sourceOffset, target, targetOffset, length);
+            for (int i = 0; i < length; i++) {
+                int value = unsignedByte(sourceOffset + i);
+                if (value < 0 || value > 255) throw new IllegalStateException();
+                target[targetOffset + i] = (byte) value;
+            }
+        }
+    }
+
+    static void checkGrayRange(int sourceSize, int sourceOffset, byte[] target, int targetOffset, int length) {
+        if (target == null) throw new NullPointerException();
+        if (length < 1 || length > 4096 || sourceSize < 0
+                || sourceOffset < 0 || sourceOffset > sourceSize || length > sourceSize - sourceOffset
+                || targetOffset < 0 || targetOffset > target.length || length > target.length - targetOffset) {
+            throw new IndexOutOfBoundsException();
+        }
     }
 }

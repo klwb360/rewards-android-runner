@@ -13,7 +13,7 @@ import java.util.function.BooleanSupplier;
 final class UiRegionImageRefiner {
     private static final int MAX_DIMENSION = 4096, MAX_PIXELS = 4 * 1024 * 1024;
     private static final int MAX_ROWS = 128, MAX_TEXT = 512, MAX_COMPONENTS = 512;
-    private static final int DIAGNOSTIC_MIN_CONTRAST = 8, DIAGNOSTIC_MAX_CONTRAST = 64;
+    private static final int DIAGNOSTIC_MIN_CONTRAST = 6, DIAGNOSTIC_MAX_CONTRAST = 64;
     private static final int DIAGNOSTIC_MODE_PIXELS = 4, DIAGNOSTIC_MIN_SIDE = 8;
     private static final int DIAGNOSTIC_COARSE_DIVISOR = 8, DIAGNOSTIC_MODE_AREA_DIVISOR = 64;
     private static final int DIAGNOSTIC_MIN_FILL_PERCENT = 75, DIAGNOSTIC_MIN_EDGE_SUPPORT_PERCENT = 80;

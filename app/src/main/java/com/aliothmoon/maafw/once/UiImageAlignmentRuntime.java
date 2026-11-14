@@ -15,7 +15,7 @@ import java.util.function.BooleanSupplier;
 /** One independent hidden-page UI read and one native frame. No navigation or task actor. */
 final class UiImageAlignmentRuntime {
     enum MetadataStage { UI_BEFORE, UI_AFTER, IMAGE_BEFORE, IMAGE_AFTER }
-    enum Stage { NEW, HANDOFF, UI_READ, IMAGE_READ, IMAGE_AFTER, SEALED, HOLD, CANCELED, CLEANUP_UNKNOWN }
+    enum Stage { NEW, HANDOFF, MODEL_PREPARATION, UI_READ, IMAGE_READ, IMAGE_AFTER, SEALED, HOLD, CANCELED, CLEANUP_UNKNOWN }
 
     /** Exact one-reader, four-pair sequence. A rejected attempt is never returned to the budget. */
     static final class MetadataPermit {
@@ -48,6 +48,9 @@ final class UiImageAlignmentRuntime {
     private final DormantCaptureConfirmationActivity activity;
     private final Object approvalOwner;
     private final boolean diagnosticRun;
+    private final UiImageAlignmentScope.Calibration calibration;
+    private PreparedAlignmentModels preparedModels;
+    private long modelPreparationMillis = -1;
     private final RealCaptureClaim.ProcessEpoch epoch;
     private final RealCaptureClaim.Grant grant;
     private final long sessionEnd;
@@ -78,22 +81,28 @@ final class UiImageAlignmentRuntime {
 
     private UiImageAlignmentRuntime(DormantCaptureConfirmationActivity activity, Object approvalOwner,
             RealCaptureClaim.ProcessEpoch epoch, RealCaptureClaim.Grant grant,
-            BingNavigationSnapshot.Shape shape, boolean diagnosticRun) {
+            BingNavigationSnapshot.Shape shape, boolean diagnosticRun, UiImageAlignmentScope.Calibration calibration) {
         this.activity = activity; this.approvalOwner = approvalOwner; this.epoch = epoch;
         this.grant = grant; this.sessionEnd = RealCaptureClaim.deadline(grant); this.shape = shape;
         this.diagnosticRun = diagnosticRun;
+        this.calibration = calibration;
     }
 
     static UiImageAlignmentRuntime start(DormantCaptureConfirmationActivity activity,
             DormantCaptureConfirmationActivity.LiveClick click, Object approvalOwner) {
-        return startSelected(activity, click, approvalOwner, false);
+        return startSelected(activity, click, approvalOwner, false, null);
     }
     static UiImageAlignmentRuntime startDiagnostic(DormantCaptureConfirmationActivity activity,
             DormantCaptureConfirmationActivity.LiveClick click, Object approvalOwner) {
-        return startSelected(activity, click, approvalOwner, true);
+        return startSelected(activity, click, approvalOwner, true, null);
+    }
+    static UiImageAlignmentRuntime startCalibrated(DormantCaptureConfirmationActivity activity,
+            DormantCaptureConfirmationActivity.LiveClick click, Object approvalOwner, UiImageAlignmentScope.Calibration attempt) {
+        return startSelected(activity, click, approvalOwner, false, java.util.Objects.requireNonNull(attempt));
     }
     private static UiImageAlignmentRuntime startSelected(DormantCaptureConfirmationActivity activity,
-            DormantCaptureConfirmationActivity.LiveClick click, Object approvalOwner, boolean diagnosticRun) {
+            DormantCaptureConfirmationActivity.LiveClick click, Object approvalOwner, boolean diagnosticRun,
+            UiImageAlignmentScope.Calibration calibration) {
         CaptureReleaseGate.requireConfigured();
         if (activity == null || click == null || approvalOwner == null || Looper.myLooper() != Looper.getMainLooper()
                 || android.os.Build.VERSION.SDK_INT < 34 || android.os.Process.myUid() < 10000
@@ -102,6 +111,7 @@ final class UiImageAlignmentRuntime {
             throw new SecurityException("Independent visible alignment confirmation required");
         }
         if (activity.alignmentDiagnosticSelected() != diagnosticRun) throw new SecurityException("Exact selected alignment entry required");
+        if (activity.alignmentCalibrationSelected() != calibration) throw new SecurityException("Exact calibration attempt required");
         var epoch = CaptureSessionRuntime.alignmentEpoch();
         long now = SystemClock.elapsedRealtime();
         var proof = VisibleCaptureAuthority.issueAlignment(activity, click, epoch, approvalOwner, now);
@@ -118,7 +128,7 @@ final class UiImageAlignmentRuntime {
             throw new SecurityException("Full original frame required");
         }
         var shape = new BingNavigationSnapshot.Shape(bounds.width(), bounds.height(), display.getRotation());
-        var run = new UiImageAlignmentRuntime(activity, approvalOwner, epoch, grant, shape, diagnosticRun);
+        var run = new UiImageAlignmentRuntime(activity, approvalOwner, epoch, grant, shape, diagnosticRun, calibration);
         run.root = CaptureSessionRuntime.retainAlignment(run, run.sessionEnd, run::latchCancel,
                 run::closeOnOwner, () -> run.closed, run::postOwner);
         try {
@@ -188,8 +198,28 @@ final class UiImageAlignmentRuntime {
         try {
             requireSessionCurrent();
             if (!hiddenCurrent() || !budget.claimRun()) throw new SecurityException("Alignment run unavailable");
-            if (diagnosticRun) UiImageAlignmentScope.burnDiagnosticRun(activity.getNoBackupFilesDir().toPath());
+            if (calibration != null) UiImageAlignmentScope.burnCalibrationRun(activity.getNoBackupFilesDir().toPath(), calibration);
+            else if (diagnosticRun) UiImageAlignmentScope.burnDiagnosticRun(activity.getNoBackupFilesDir().toPath());
             else UiImageAlignmentScope.burnRun(activity.getNoBackupFilesDir().toPath());
+            if (calibration != null) {
+                stage = Stage.MODEL_PREPARATION;
+                // Retain the handle in shared ROOT before the first filesystem operation.
+                preparedModels = PreparedAlignmentModels.create(this, MaaOnceModelStore::open);
+                long preparationStarted = SystemClock.elapsedRealtime();
+                boolean ready;
+                try {
+                    ready = preparedModels.prepare(this, activity.getNoBackupFilesDir().toPath(),
+                            index -> activity.getAssets().open("bundle/model/ocr/" + MaaOnceModelPolicy.name(index)),
+                            () -> !hiddenCurrent());
+                } catch (Error unknownPreparation) {
+                    constructionUnknown = true;
+                    throw new SecurityException("Model preparation outcome unknown");
+                } finally {
+                    modelPreparationMillis = UiImageAlignmentTiming.elapsed(preparationStarted, SystemClock.elapsedRealtime());
+                }
+                if (!ready) throw new SecurityException("Model preparation unconfirmed");
+                requireSessionCurrent();
+            }
             var installed = BingPackageMetadata.read(activity.getPackageManager());
             if (installed.state() != BingIdentityEvidence.PackageState.METADATA_OBSERVED) throw new SecurityException("Package unavailable");
             int bing = activity.getPackageManager().getApplicationInfo("com.microsoft.bing", 0).uid;
@@ -204,7 +234,8 @@ final class UiImageAlignmentRuntime {
                     Math.min(sessionEnd, SystemClock.elapsedRealtime() + 9000), this::hiddenCurrent, () -> {
                         var before = readSource(MetadataStage.UI_BEFORE);
                         if (before == null || !budget.claimUi()) return false;
-                        if (diagnosticRun) UiImageAlignmentScope.burnDiagnosticUi(activity.getNoBackupFilesDir().toPath());
+                        if (calibration != null) UiImageAlignmentScope.burnCalibrationUi(activity.getNoBackupFilesDir().toPath(), calibration);
+                        else if (diagnosticRun) UiImageAlignmentScope.burnDiagnosticUi(activity.getNoBackupFilesDir().toPath());
                         else UiImageAlignmentScope.burnUi(activity.getNoBackupFilesDir().toPath());
                         pending[0] = UiRegionSourceEvidence.begin(this, approvalOwner, epoch, nonce, before, SystemClock.elapsedRealtime());
                         sourceGate(); return pending[0] != null;
@@ -234,7 +265,7 @@ final class UiImageAlignmentRuntime {
             sourceGate();
             bindingConstruction = true;
             binding = ReviewShizukuPngBinding.bindReadOnlyAlignment(activity.getApplicationContext(),
-                    this::consumeFrameClaim, this::sourceGate, fence, Runnable::run, capture);
+                    this::consumeFrameClaim, this::sourceGate, fence, Runnable::run, capture, preparedModels);
             bindingConstruction = false; backend = binding.backend();
             long backendStartedAt = SystemClock.elapsedRealtime();
             var result = backend.start();
@@ -260,6 +291,11 @@ final class UiImageAlignmentRuntime {
             }
         } finally {
             workerReturned = true; reportReady = true;
+            try { if (preparedModels != null) preparedModels.closeBeforeAdoption(this); }
+            catch (RuntimeException | Error unknownModelClose) {
+                constructionUnknown = true;
+                if (failureAt == null) failureAt = stage;
+            }
             if (!actualResourcesClosed()) stage = Stage.CLEANUP_UNKNOWN;
             if (stage != Stage.SEALED || canceled.get()) closeOnOwner();
             notifyFinished();
@@ -272,7 +308,8 @@ final class UiImageAlignmentRuntime {
             return new BackendPorts.ClaimReceipt(backendOwner, BackendPorts.ClaimDecision.DENIED);
         }
         var outcome = RealCaptureClaim.consume(grant, epoch, approvalOwner, SystemClock.elapsedRealtime(),
-                diagnosticRun ? UiImageAlignmentScope.diagnosticFrameStore(activity.getNoBackupFilesDir().toPath())
+                calibration != null ? UiImageAlignmentScope.calibrationFrameStore(activity.getNoBackupFilesDir().toPath(), calibration)
+                        : diagnosticRun ? UiImageAlignmentScope.diagnosticFrameStore(activity.getNoBackupFilesDir().toPath())
                         : UiImageAlignmentScope.frameStore(activity.getNoBackupFilesDir().toPath()));
         claimUncertain = outcome == RealCaptureClaim.Outcome.UNCERTAIN;
         return new BackendPorts.ClaimReceipt(backendOwner, switch (outcome) {
@@ -295,7 +332,8 @@ final class UiImageAlignmentRuntime {
     }
 
     private boolean actualResourcesClosed() {
-        return resourcesClosed(AndroidUiStructureReader.processKnownClean() && (uiRead == null || uiRead.knownClean()),
+        return (preparedModels == null || preparedModels.knownReleased())
+                && resourcesClosed(AndroidUiStructureReader.processKnownClean() && (uiRead == null || uiRead.knownClean()),
                 ReviewBingNavigation.knownClean(), constructionUnknown || bindingConstruction, claimUncertain,
                 backend != null, backend == null ? null : backend.snapshot());
     }
@@ -312,7 +350,10 @@ final class UiImageAlignmentRuntime {
 
     private String diagnostics() {
         var read = metadata == null ? null : metadata.lastReadDiagnostic();
-        return "alignmentEntry=" + (diagnosticRun ? "DIAGNOSTIC_V2" : "ORIGINAL_V1")
+        return "alignmentEntry=" + (calibration != null ? "CALIBRATION_V3_" + calibration : diagnosticRun ? "DIAGNOSTIC_V2" : "ORIGINAL_V1")
+                + " modelPreparationMs=" + UiImageAlignmentTiming.value(modelPreparationMillis)
+                + " preparedModelsState=" + (preparedModels == null ? "NOT_USED" : preparedModels.state())
+                + " preparedModelsFailure=" + (preparedModels == null ? "NOT_USED" : preparedModels.failure())
                 + " failureAt=" + (failureAt == null ? "NONE" : failureAt)
                 + " backendPhase=" + (backendPhase == null ? "NOT_OBSERVED" : backendPhase)
                 + " backendFailure=" + (backendFailure == null ? "NOT_OBSERVED" : backendFailure)

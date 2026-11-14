@@ -85,6 +85,12 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
         r.alignmentCapture=java.util.Objects.requireNonNull(capture);return r;
     }
     private UiImageAlignmentCapture alignmentCapture;
+    private PreparedAlignmentModels preparedAlignmentModels;
+    static MaaRecognizer rootUiRegionAlignmentAudit(Context context,UiImageAlignmentCapture capture,
+            PreparedAlignmentModels prepared){
+        MaaRecognizer r=rootUiRegionAlignmentAudit(context,capture);
+        r.preparedAlignmentModels=java.util.Objects.requireNonNull(prepared);return r;
+    }
     private UiImageAlignmentCapture.Candidate alignmentCandidate;
     @Override public synchronized UiImageAlignmentCapture.Candidate takeAlignmentCandidate(OnceBackend.Owner expected){
         if(expected==null||expected!=owner||observation()==null)return null;
@@ -218,7 +224,7 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
     }
     private long resourceId, taskId;
     private boolean stopPosted;
-    private MaaOnceModelStore models;
+    private PreparedAlignmentModels.Store models;
     private Bitmap bitmap;
     private int[] row;
     private Encoded encoded;
@@ -257,11 +263,17 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             String version = api.MaaVersion();
             need("v5.15.0".equals(version) || "5.15.0".equals(version)); stage=Stage.LIBRARY_READY;
             checkStop(stop);
-            waiting(CleanupEvidence.Item.MODELS_CLOSE); models = MaaOnceModelStore.open(context.getNoBackupFilesDir().toPath());
-            try { models.prepare(); } catch (Exception e) { uncertain=true; throw e; }
-            for (int i=0;i<MaaOnceModelPolicy.count();i++) {
-                checkStop(stop);
-                try (InputStream in=context.getAssets().open("bundle/model/ocr/"+MaaOnceModelPolicy.name(i))) { models.write(i,in); }
+            waiting(CleanupEvidence.Item.MODELS_CLOSE);
+            if(preparedAlignmentModels!=null){
+                models=preparedAlignmentModels.claim(alignmentCapture.owner(),own);
+                need(models!=null);
+            }else{
+                models = MaaOnceModelStore.open(context.getNoBackupFilesDir().toPath());
+                try { models.prepare(); } catch (Exception e) { uncertain=true; throw e; }
+                for (int i=0;i<MaaOnceModelPolicy.count();i++) {
+                    checkStop(stop);
+                    try (InputStream in=context.getAssets().open("bundle/model/ocr/"+MaaOnceModelPolicy.name(i))) { models.write(i,in); }
+                }
             }
             stage=Stage.MODELS_READY;
             waiting(CleanupEvidence.Item.RESOURCE_DESTROY); resource = api.MaaResourceCreate(); need(resource != null);
@@ -386,11 +398,13 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
         int w=frame.width(), h=frame.height();
         need(w>0 && h>0 && w<=4096 && h<=4096 && (long)w*h<=4*1024*1024 && frame.size()==w*h);
         waiting(CleanupEvidence.Item.ROW_WIPE); row=new int[w]; waiting(CleanupEvidence.Item.BITMAP_WIPE_RECYCLE); bitmap=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888);
-        for(int y=0;y<h;y++) {
+        byte[] grayRow=new byte[w];
+        try{for(int y=0;y<h;y++) {
             checkStop(stop);
-            for(int x=0;x<w;x++){int g=frame.unsignedByte(y*w+x);need(g>=0&&g<=255);row[x]=0xff000000|(g<<16)|(g<<8)|g;}
+            frame.copyGrayRange(y*w,grayRow,0,w);
+            for(int x=0;x<w;x++){int g=grayRow[x]&255;row[x]=0xff000000|(g<<16)|(g<<8)|g;}
             bitmap.setPixels(row,0,w,0,y,w,1);
-        }
+        }}finally{Arrays.fill(grayRow,(byte)0);}
         waiting(CleanupEvidence.Item.ENCODED_WIPE); encoded=new Encoded(); need(bitmap.compress(Bitmap.CompressFormat.PNG,100,encoded));
         need(encoded.count>0); waiting(CleanupEvidence.Item.NATIVE_ENCODED_WIPE_CLOSE); nativeEncoded=new Memory(encoded.count);
         nativeEncoded.write(0,encoded.data,0,encoded.count);
@@ -485,7 +499,7 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
         checkStop(stop);if(materialFrame==null||materialRows==null)return;
         byte[] gray=new byte[frameWidth*frameHeight];
         try{
-            for(int i=0;i<gray.length;i++){if((i&4095)==0)checkStop(stop);gray[i]=(byte)materialFrame.unsignedByte(i);}
+            for(int i=0;i<gray.length;i+=4096){checkStop(stop);materialFrame.copyGrayRange(i,gray,i,Math.min(4096,gray.length-i));}
             imageAudit.observeGeometry(gray,frameWidth,frameHeight,stop);
             alignmentCandidate=alignmentCapture.prepare(this,owner,materialFrame,gray,materialRows,
                 stop::requested,android.os.SystemClock.elapsedRealtime());
@@ -654,7 +668,7 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             if(encoded!=null){Arrays.fill(encoded.data,(byte)0);confirmed(CleanupEvidence.Item.ENCODED_WIPE);encoded=null;}
             if(row!=null){Arrays.fill(row,0);confirmed(CleanupEvidence.Item.ROW_WIPE);row=null;}
             if(bitmap!=null){bitmap.eraseColor(0);bitmap.recycle();confirmed(CleanupEvidence.Item.BITMAP_WIPE_RECYCLE);bitmap=null;}
-            if(models!=null){models.close();confirmed(CleanupEvidence.Item.MODELS_CLOSE);models=null;}
+            if(models!=null){models.close();if(preparedAlignmentModels!=null)preparedAlignmentModels.confirmClosed(models);confirmed(CleanupEvidence.Item.MODELS_CLOSE);models=null;}
             if(observationStop.requested()) provisional=null;
             // A failed creator can leave no handle: never infer its destructor returned.
             receipts.unknownOutstanding();

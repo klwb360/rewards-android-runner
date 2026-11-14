@@ -48,6 +48,96 @@ public class UiImageAlignmentCaptureTest {
         public void close() { frame.wipeAfterQuiescence();Arrays.fill(gray, (byte) 0); }
     }
 
+    private static final class BulkFixture implements AutoCloseable {
+        final java.util.ArrayList<String> events = new java.util.ArrayList<>();
+        final UiImageGeometryBindingTest.Fixture ui = new UiImageGeometryBindingTest.Fixture();
+        final UiImageAlignmentCapture capture;
+        final Object recognizer = new Object();
+        final OnceBackend.Owner owner = owner();
+        final OwnedFrame frame = new OwnedFrame();
+        final byte[] gray;
+        final BackendPorts.FrameView view;
+        byte[] scratch;
+        int cancelCalls, revokedCalls, cancelAt = Integer.MAX_VALUE, revokedAt = Integer.MAX_VALUE;
+        boolean failCopy;
+        BulkFixture() {
+            capture = ui.geometry().beginFrame(ready(2350), 2400, 7000, () -> {
+                events.add("revoked"); return ++revokedCalls == revokedAt;
+            });
+            assertNotNull(capture); assertTrue(capture.claimTransport());
+            gray = new byte[capture.width() * capture.height()]; Arrays.fill(gray, (byte) 7);
+            frame.sink().begin(capture.width(), capture.height()); frame.sink().append(gray, 0, gray.length);
+            assertTrue(frame.seal());
+            view = new BackendPorts.FrameView() {
+                public int width() { return frame.view().width(); }
+                public int height() { return frame.view().height(); }
+                public int size() { return frame.view().size(); }
+                public int unsignedByte(int index) { throw new AssertionError("Expected bounded copy"); }
+                public void copyGrayRange(int offset, byte[] target, int targetOffset, int length) {
+                    assertTrue(length > 0 && length <= 4096); assertEquals(0, targetOffset);
+                    assertEquals(Math.min(4096, gray.length - offset), length);
+                    events.add("copy:" + offset); scratch = target;
+                    if (failCopy) { target[0] = 7; throw new IllegalStateException("fixture copy failure"); }
+                    frame.view().copyGrayRange(offset, target, targetOffset, length);
+                }
+            };
+            events.clear(); revokedCalls = 0;
+        }
+        UiImageAlignmentCapture.Candidate prepare() {
+            return capture.prepare(recognizer, owner, view, gray, List.of(), () -> {
+                events.add("cancel"); return ++cancelCalls == cancelAt;
+            }, 2600);
+        }
+        void scratchCleared() { assertNotNull(scratch); assertArrayEquals(new byte[scratch.length], scratch); }
+        public void close() { frame.wipeAfterQuiescence(); Arrays.fill(gray, (byte) 0); }
+    }
+
+    @Test public void bulkComparisonKeepsEveryOriginalCancelAndRevocationBoundaryInOrder() {
+        try (var f = new BulkFixture()) {
+            var candidate = f.prepare(); assertNotNull(candidate);
+            var expected = new java.util.ArrayList<String>(); expected.add("cancel"); expected.add("revoked");
+            for (int offset = 0; offset < f.gray.length; offset += 4096) {
+                expected.add("cancel"); expected.add("revoked"); expected.add("copy:" + offset);
+            }
+            assertEquals(expected, f.events.subList(0, expected.size()));
+            assertTrue(candidate.matches(f.capture, f.recognizer, f.owner, f.view)); f.scratchCleared();
+        }
+    }
+
+    @Test public void cancelAtTheNextOriginalBoundaryPreventsTheNextCopyAndStillWipesScratch() {
+        try (var f = new BulkFixture()) {
+            f.cancelAt = 3; assertNull(f.prepare());
+            assertEquals(List.of("cancel", "revoked", "cancel", "revoked", "copy:0", "cancel"), f.events);
+            assertEquals(2, f.revokedCalls); f.scratchCleared();
+            int count = f.events.size(); assertNull(f.prepare()); assertEquals(count, f.events.size());
+        }
+    }
+
+    @Test public void revocationAtTheNextOriginalBoundaryPreventsTheNextCopy() {
+        try (var f = new BulkFixture()) {
+            f.revokedAt = 3; assertNull(f.prepare());
+            assertEquals(List.of("cancel", "revoked", "cancel", "revoked", "copy:0", "cancel", "revoked"), f.events);
+            f.scratchCleared(); assertNull(f.prepare());
+        }
+    }
+
+    @Test public void mismatchInTheFinalCopyRejectsAndWipesTheWholeScratch() {
+        try (var f = new BulkFixture()) {
+            f.gray[f.gray.length - 1] ^= 1; assertNull(f.prepare()); f.scratchCleared();
+            assertTrue(f.capture.diagnostics().contains("prepareGate=PIXEL_MISMATCH"));
+            long copies = f.events.stream().filter(value -> value.startsWith("copy:")).count();
+            assertEquals((f.gray.length + 4095L) / 4096L, copies); assertNull(f.prepare());
+        }
+    }
+
+    @Test public void copyFailureAfterPartialWriteRejectsWipesAndSpendsPrepare() {
+        try (var f = new BulkFixture()) {
+            f.failCopy = true; assertNull(f.prepare()); f.scratchCleared();
+            assertTrue(f.capture.diagnostics().contains("prepareGate=ERROR"));
+            int count = f.events.size(); f.failCopy = false; assertNull(f.prepare()); assertEquals(count, f.events.size());
+        }
+    }
+
     @Test public void captureGateWorksBeforeSealWhilePublicationStaysClosed() {
         try (var f = new Fixture()) {
             assertTrue(f.capture.captureCurrent(2400));assertFalse(f.capture.publicationCurrent(2400));

@@ -258,18 +258,18 @@ final class MaaImageBufferAudit {
         Pointer raw=api.MaaImageBufferGetRawData(expected.image());
         if(!pointer(raw))return new Sample(Status.FORMAT_REJECTED,w,h,channels,type,0,0,0,-1,false);
         int rowBytes=Math.multiplyExact(w,3);
-        byte[] actual=null,wanted=null,expectedHash=null,actualHash=null;
+        byte[] actual=null,wanted=null,expectedHash=null,actualHash=null,grayRow=null;
         long mismatchPixels=0,mismatchChannels=0;int max=0;
         MessageDigest expectedDigest=MessageDigest.getInstance("SHA-256"),actualDigest=MessageDigest.getInstance("SHA-256");
         scratchClean=false;
         try{
-            actual=new byte[rowBytes];wanted=new byte[rowBytes];
+            actual=new byte[rowBytes];wanted=new byte[rowBytes];grayRow=new byte[w];
             for(int y=0;y<h;y++){
                 if(stop.requested())throw new BackendPorts.Cancelled();
                 raw.read(Math.multiplyExact((long)y,rowBytes),actual,0,rowBytes);
+                for(int offset=0;offset<w;offset+=4096)expected.frame().copyGrayRange(y*w+offset,grayRow,offset,Math.min(4096,w-offset));
                 for(int x=0;x<w;x++){
-                    int g=expected.frame().unsignedByte(y*w+x);
-                    if(g<0||g>255)throw new IllegalStateException("invalid frame byte");
+                    int g=grayRow[x]&255;
                     boolean different=false;
                     for(int c=0;c<3;c++){
                         int at=x*3+c,d=Math.abs((actual[at]&255)-g);wanted[at]=(byte)g;
@@ -286,6 +286,7 @@ final class MaaImageBufferAudit {
                 w,h,channels,type,(long)w*h,mismatchPixels,mismatchChannels,max,hashEqual);
         }finally{
             if(actual!=null)Arrays.fill(actual,(byte)0);if(wanted!=null)Arrays.fill(wanted,(byte)0);
+            if(grayRow!=null)Arrays.fill(grayRow,(byte)0);
             if(expectedHash!=null)Arrays.fill(expectedHash,(byte)0);if(actualHash!=null)Arrays.fill(actualHash,(byte)0);
             expectedDigest.reset();actualDigest.reset();scratchClean=true;
         }
