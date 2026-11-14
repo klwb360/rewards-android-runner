@@ -8,7 +8,7 @@ final class OwnStateSummary {
  static final long MAX_MILLIS=4000;
  static String inspect(String dataDir,int assignedUid,int actualUid,LongSupplier clock,BooleanSupplier cancelled){
   if(dataDir==null||assignedUid!=actualUid||actualUid<10000||clock==null||cancelled==null)return rejected("ROOT_UNAVAILABLE");
-  try{return inspectRoot(Path.of(dataDir),clock,cancelled);}catch(RuntimeException failure){return rejected("IO_UNKNOWN");}
+  try{return inspectRoot(Paths.get(dataDir),clock,cancelled);}catch(RuntimeException failure){return rejected("IO_UNKNOWN");}
  }
  static String rejected(String reason){return "profile=OWN_STATE_V54 status="+reason+" HOLD actionAuthority=false historyComplete=false businessWrites=0 bingReads=0";}
  static String inspectRoot(Path root,LongSupplier clock,BooleanSupplier cancelled){

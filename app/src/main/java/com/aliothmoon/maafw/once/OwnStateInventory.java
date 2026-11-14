@@ -24,7 +24,7 @@ final class OwnStateInventory {
   if(root==Root.NO_BACKUP&&relative.matches("synthetic-end-request-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\\.record"))return Optional.of(new Entry(root,relative,Role.SYNTHETIC_MARKER));
   return Optional.empty();
  }
- static boolean accepts(Entry e){return e!=null&&(FIXED.contains(e)||dynamic(e.root(),e.relative()).filter(e::equals).isPresent());}
+ static boolean accepts(Entry e){return e!=null&&(FIXED.contains(e)||dynamic(e.root(),e.relative()).filter(candidate -> java.util.Objects.equals(e,candidate)).isPresent());}
  private static boolean safe(String p){return p!=null&&p.length()>0&&p.length()<=240&&p.matches("[a-zA-Z0-9_./-]+")&&!p.startsWith("/")&&!p.endsWith("/")&&!p.contains("//")&&!p.contains("..")&&!p.contains(":" );}
  private static void add(List<Entry> out,Root root,String path,Role role){out.add(new Entry(root,path,role));}
  private static void burns(List<Entry> out,String dir,String slots){for(String slot:slots.split(" "))add(out,Root.NO_BACKUP,dir+"/"+slot+".burned",Role.BURN);}
