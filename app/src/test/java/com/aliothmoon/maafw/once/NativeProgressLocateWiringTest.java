@@ -6,13 +6,15 @@ public class NativeProgressLocateWiringTest {
  @Test public void absoluteWindowAndAdmissionCannotRenew(){long t=RootProgressLocateScope.STARTS_UTC;assertTrue(RootProgressLocateScope.current(t));assertFalse(RootProgressLocateScope.current(t-1));assertFalse(RootProgressLocateScope.current(RootProgressLocateScope.EXPIRES_UTC));assertFalse(RootProgressLocateScope.admissionCurrent(RootProgressLocateScope.EXPIRES_UTC-RootProgressLocateScope.SESSION_TTL));assertEquals(91000,RootProgressLocateScope.deadline(1000,t,181000));assertEquals(2000,RootProgressLocateScope.deadline(1000,t,2000));}
  @Test public void allOldLiveStartsAreBlocked()throws Exception{Matcher m=Pattern.compile("(?m)^    static CaptureSessionRuntime (start\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(source("CaptureSessionRuntime"));int n=0;while(m.find()){if(m.group(1).equals("startProgressLocate")||m.group(1).equals("startCheckpointRead"))continue;assertTrue(m.group(1),m.group(2).contains("if(RootProgressLocateScope.ACTIVE)throw"));n++;}assertTrue(n>=16);}
  @Test public void allOldLiveIssuersAreBlocked()throws Exception{
-  Matcher m=Pattern.compile("static [\\w.<>]+ (issue\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(source("VisibleCaptureAuthority"));int n=0,alignment=0;
+  Matcher m=Pattern.compile("static [\\w.<>]+ (issue\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(source("VisibleCaptureAuthority"));int n=0,alignment=0,overviewIntent=0,overviewFrame=0;
   while(m.find()){
    if(m.group(1).equals("issueAlignment")){alignment++;continue;} // Independently checked by UiImageAlignmentEntryTest.
+   if(m.group(1).equals("issueOverviewIntent")){overviewIntent++;continue;} // Independently checked by OverviewEntryWiringTest.
+   if(m.group(1).equals("issueOverviewFrame")){overviewFrame++;continue;}
    if(m.group(1).equals("issueProgressLocateIntent")||m.group(1).equals("issueProgressLocateFrame")||m.group(1).equals("issueCheckpointIntent")||m.group(1).equals("issueCheckpointFrame"))continue;
    assertTrue(m.group(1),m.group(2).contains("if(RootProgressLocateScope.ACTIVE)throw"));n++;
   }
-  assertTrue(n>=21);assertEquals(1,alignment);
+  assertTrue(n>=21);assertEquals(1,alignment);assertEquals(1,overviewIntent);assertEquals(1,overviewFrame);
  }
  @Test public void layoutRoutesAreDiagnosticAndFinalGated()throws Exception{String r=source("CaptureSessionRuntime"),i=source("RootReturnReadIntent");assertTrue(i.contains("boolean layoutDiagnostic(){return checkpoint!=null||progressLocate;}"));assertTrue(r.contains("if(returnReadIntent.layoutDiagnostic())pendingProgressPublication="));assertTrue(r.contains("returnReadIntent.layoutDiagnostic()?audit.compactSummary():audit.summary()"));assertTrue(r.contains("if(!returnReadIntent.layoutDiagnostic()&&readOnlyObservation"));assertTrue(r.contains("returnReadIntent.layoutDiagnostic()?ReadOnlyTwoStageRun.Capture.layoutDiagnostic("));assertTrue(source("DormantCaptureConfirmationActivity").contains("returnReadReports.add(exact.finalizeProgressPublication(details))"));}
  @Test public void exactCluesAndSafetyStopBeforeAnyNavigation()throws Exception{String r=source("CaptureSessionRuntime");int a=r.indexOf("layout.locateRowsUsable()"),b=r.indexOf("layout.locateSafetyStop()"),c=r.indexOf("layout.locateStopClue()"),d=r.indexOf("claimScroll(returnReadIndex");assertTrue(a>0&&a<b&&b<c&&c<d);assertTrue(r.contains("var progress=readOnlyObservation"));assertTrue(r.contains("if(progress.scanClue())"));}

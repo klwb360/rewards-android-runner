@@ -9,13 +9,15 @@ public class NativeProgressLayoutWiringTest {
  @Test public void singleFrameEntryRejectsAnyContinuation()throws Exception{String s=between(source("CaptureSessionRuntime"),"static CaptureSessionRuntime startCheckpointRead(","static RootReturnReadIntent approveProgressScan(");assertTrue(s.contains("index!=1||previous!=null"));assertTrue(s.contains("startReadInternal(a,intent,root,index,null)"));String v=between(source("VisibleCaptureAuthority"),"static Proof issueCheckpointFrame(","static RootReturnReadIntent issueProgressScanIntent(");assertTrue(v.contains("index!=1||previous!=null"));}
  @Test public void allPriorLiveStartsBlocked()throws Exception{Matcher m=Pattern.compile("(?m)^    static CaptureSessionRuntime (start\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(source("CaptureSessionRuntime"));int n=0;while(m.find()){if(m.group(1).equals("startCheckpointRead")||m.group(1).equals("startProgressLocate"))continue;assertTrue(m.group(1),m.group(2).contains("if(ReadOnlyCheckpoint.CURRENT!=null)throw"));n++;}assertTrue(n>=16);}
  @Test public void allPriorIssuersBlocked()throws Exception{
-  Matcher m=Pattern.compile("static [\\w.<>]+ (issue\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(source("VisibleCaptureAuthority"));int n=0,alignment=0;
+  Matcher m=Pattern.compile("static [\\w.<>]+ (issue\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(source("VisibleCaptureAuthority"));int n=0,alignment=0,overviewIntent=0,overviewFrame=0;
   while(m.find()){
    if(m.group(1).equals("issueAlignment")){alignment++;continue;} // Independently checked by UiImageAlignmentEntryTest.
+   if(m.group(1).equals("issueOverviewIntent")){overviewIntent++;continue;} // Independently checked by OverviewEntryWiringTest.
+   if(m.group(1).equals("issueOverviewFrame")){overviewFrame++;continue;}
    if(m.group(1).equals("issueCheckpointIntent")||m.group(1).equals("issueCheckpointFrame")||m.group(1).equals("issueProgressLocateIntent")||m.group(1).equals("issueProgressLocateFrame"))continue;
    assertTrue(m.group(1),m.group(2).contains("if(ReadOnlyCheckpoint.CURRENT!=null)throw"));n++;
   }
-  assertTrue(n>=21);assertEquals(1,alignment);
+  assertTrue(n>=21);assertEquals(1,alignment);assertEquals(1,overviewIntent);assertEquals(1,overviewFrame);
  }
  @Test public void producerUsesOriginalFullRowsInOneOwningCallback()throws Exception{String s=source("ReadOnlyTwoStageRun");assertTrue(s.contains("layoutDiagnostic?NativeProgressLayoutDiagnostics.observe(binding,binding,rows,w,h):null"));String r=source("CaptureSessionRuntime");assertTrue(r.contains("returnReadIntent.layoutDiagnostic()?ReadOnlyTwoStageRun.Capture.layoutDiagnostic("));assertTrue(r.contains("returnReadIntent.checkpoint().store("));}
  @Test public void layoutUsesTypedFinalPublicationNotBusinessCounter()throws Exception{String s=between(source("CaptureSessionRuntime"),"private void closeReturnReadOnOwner(){","static final class ReturnReadCompletion");assertTrue(s.contains("if(returnReadIntent.layoutDiagnostic())pendingProgressPublication=new NativeProgressPublication("));assertTrue(s.contains("readOnlyObservation.layout(),healthy"));assertFalse(s.contains("layout().summary("));assertTrue(source("NativeProgressPublication").contains("layoutMode?(layout==null?"));assertTrue(source("DormantCaptureConfirmationActivity").contains("returnReadReports.add(exact.finalizeProgressPublication(details))"));}

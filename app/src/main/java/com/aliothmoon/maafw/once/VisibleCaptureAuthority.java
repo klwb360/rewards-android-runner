@@ -11,6 +11,7 @@ final class VisibleCaptureAuthority {
         private final RootImageSeriesIntent.FramePermit seriesPermit;
         private final RootBoundedBusinessIntent.FramePermit boundedPermit;
         private final RootReturnReadIntent.FramePermit returnReadPermit;
+        private OverviewScanIntent.FramePermit overviewPermit;
         private Proof(RealCaptureClaim.ProcessEpoch epoch,Object owner,Object request,long now) {
             this(epoch,owner,request,now,now+BusinessCaptureScope.TTL);
         }
@@ -29,15 +30,57 @@ final class VisibleCaptureAuthority {
         private Proof(RootReturnReadIntent.FramePermit permit,Object request,long now){
             epoch=permit.epoch;owner=permit.owner;this.request=request;issued=now;deadline=permit.deadline;rootPermit=null;seriesPermit=null;boundedPermit=null;returnReadPermit=permit;
         }
+        private Proof(OverviewScanIntent.FramePermit permit, Object request, long now) {
+            epoch=permit.epoch;owner=permit.owner;this.request=request;issued=now;deadline=permit.deadline;
+            rootPermit=null;seriesPermit=null;boundedPermit=null;returnReadPermit=null;overviewPermit=permit;
+        }
         synchronized boolean consume(RealCaptureClaim.ProcessEpoch e,Object o,long now) {
             if(used)return false;used=true;
             return e==epoch && o==owner && request!=null && now>=issued && now<deadline
                 &&(rootPermit==null||rootPermit.live&&rootPermit.current(e,o,now))
                 &&(seriesPermit==null||seriesPermit.live&&seriesPermit.current(e,o,now))
                 &&(boundedPermit==null||boundedPermit.live&&boundedPermit.current(e,o,now))
-                &&(returnReadPermit==null||returnReadPermit.live&&returnReadPermit.current(e,o,now));
+                &&(returnReadPermit==null||returnReadPermit.live&&returnReadPermit.current(e,o,now))
+                &&(overviewPermit==null||overviewPermit.live&&overviewPermit.current(e,o,now));
         }
         long deadline(){return deadline;}
+    }
+    static final class OverviewApproval {
+        final RealCaptureClaim.ProcessEpoch epoch;
+        final Object owner, visible, request;
+        final long issued, deadline;
+        final boolean live;
+        private boolean used;
+        private OverviewApproval(RealCaptureClaim.ProcessEpoch epoch, Object owner, Object visible,
+                Object request, long issued, long deadline, boolean live) {
+            this.epoch=epoch;this.owner=owner;this.visible=visible;this.request=request;
+            this.issued=issued;this.deadline=deadline;this.live=live;
+        }
+        synchronized boolean consume(long now) {
+            boolean first=!used;used=true;
+            return first&&epoch!=null&&owner!=null&&visible!=null&&request!=null&&now>=issued&&now<deadline;
+        }
+    }
+    static OverviewScanIntent issueOverviewIntent(DormantCaptureConfirmationActivity activity,
+            DormantCaptureConfirmationActivity.LiveClick click, RealCaptureClaim.ProcessEpoch epoch,
+            Object owner, long now) {
+        CaptureReleaseGate.requireConfigured();
+        long deadline=OverviewScanScope.sessionDeadline(now);
+        if(activity==null||click==null||epoch!=CaptureSessionRuntime.alignmentEpoch()||owner==null
+                ||!NativeCheckInSession.permissionReady()||!activity.overviewApprovalMatches(owner,click)
+                ||!click.consume(activity,activity.requestIdentity(),owner,epoch))
+            throw new SecurityException("Fresh visible overview confirmation required");
+        return new OverviewScanIntent(new OverviewApproval(epoch,owner,activity,activity.requestIdentity(),now,deadline,true),now);
+    }
+    static Proof issueOverviewFrame(OverviewScanIntent.FramePermit permit, long now) {
+        CaptureReleaseGate.requireConfigured();
+        if(permit==null||!permit.live||!permit.claimProof(now))
+            throw new SecurityException("Current unspent overview frame required");
+        return new Proof(permit,permit.intent,now);
+    }
+    static OverviewScanIntent fixtureOverviewIntent(RealCaptureClaim.ProcessEpoch epoch,Object owner,long now) {
+        return new OverviewScanIntent(new OverviewApproval(epoch,owner,new Object(),new Object(),now,
+                OverviewScanScope.sessionDeadline(now),false),now);
     }
     static Proof issue(DormantCaptureConfirmationActivity activity,
             DormantCaptureConfirmationActivity.LiveClick click,RealCaptureClaim.ProcessEpoch epoch,Object owner,long now) {

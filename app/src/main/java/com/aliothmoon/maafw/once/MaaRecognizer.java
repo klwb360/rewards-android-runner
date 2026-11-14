@@ -13,7 +13,7 @@ import java.util.Arrays;
  * A blocked/throwing native call leaves the entire graph in the static anchor.
  * Process-global privacy requires an isolated worker process, without other Maa users.
  */
-final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Provider, ReviewShizukuPngBinding.AlignmentRecognizer {
+final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Provider, ReviewShizukuPngBinding.AlignmentRecognizer, OverviewPngBinding.OverviewRecognizer {
     public interface Api extends Library, MaaImageBufferAudit.ImageApi {
         String MaaVersion();
         Pointer MaaStringBufferCreate(); long MaaStringBufferSize(Pointer p); Pointer MaaStringBufferGet(Pointer p); byte MaaStringBufferClear(Pointer p); void MaaStringBufferDestroy(Pointer p);
@@ -85,6 +85,24 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
         r.alignmentCapture=java.util.Objects.requireNonNull(capture);return r;
     }
     private UiImageAlignmentCapture alignmentCapture;
+    private OverviewFrameCapture overviewCapture;
+    private OverviewFrameCapture.Candidate overviewCandidate;
+    /** Independent overview frame, never a capture grant or navigation capability. */
+    static MaaRecognizer rootOverviewAudit(Context context,OverviewFrameCapture capture,
+            PreparedAlignmentModels prepared){
+        MaaRecognizer r=new MaaRecognizer(context);r.liveCheckin=true;r.rootPreflight=true;
+        r.imageAuditEnabled=true;r.imageSeriesStatsEnabled=true;
+        r.overviewCapture=java.util.Objects.requireNonNull(capture);
+        r.preparedAlignmentModels=java.util.Objects.requireNonNull(prepared);return r;
+    }
+    @Override public synchronized OverviewFrameCapture.Candidate takeOverviewCandidate(OnceBackend.Owner expected){
+        if(expected==null||expected!=owner||observation()==null)return null;
+        var value=overviewCandidate;overviewCandidate=null;
+        return value!=null&&value.matches(overviewCapture,this,expected)?value:null;
+    }
+    @Override public synchronized MaaImageBufferAudit.Result overviewAudit(OnceBackend.Owner expected){
+        return imageBufferAudit(expected);
+    }
     private PreparedAlignmentModels preparedAlignmentModels;
     static MaaRecognizer rootUiRegionAlignmentAudit(Context context,UiImageAlignmentCapture capture,
             PreparedAlignmentModels prepared){
@@ -107,8 +125,8 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             complete&&image==null,taskerDestroyed);
     }
     private MaaImageBufferAudit.Binding auditBinding(BackendPorts.FrameView frame){
-        Object request=alignmentCapture!=null?alignmentCapture.owner():readOnlyCapture!=null?readOnlyCapture.owner:nativePreparedCapture==null?null:nativePreparedCapture.requestOwner();
-        Object holder=alignmentCapture!=null?alignmentCapture:readOnlyCapture!=null?readOnlyCapture:nativePreparedCapture;
+        Object request=overviewCapture!=null?overviewCapture.owner():alignmentCapture!=null?alignmentCapture.owner():readOnlyCapture!=null?readOnlyCapture.owner:nativePreparedCapture==null?null:nativePreparedCapture.requestOwner();
+        Object holder=overviewCapture!=null?overviewCapture:alignmentCapture!=null?alignmentCapture:readOnlyCapture!=null?readOnlyCapture:nativePreparedCapture;
         return new MaaImageBufferAudit.Binding(this,owner,request,holder,frame,tasker,image);
     }
     private RootMarkerDiagnostic rootMarkers;
@@ -266,7 +284,8 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             checkStop(stop);
             waiting(CleanupEvidence.Item.MODELS_CLOSE);
             if(preparedAlignmentModels!=null){
-                models=preparedAlignmentModels.claim(alignmentCapture.owner(),own);
+                if(overviewCapture!=null)models=preparedAlignmentModels.claim(overviewCapture.owner(),own);
+                else models=preparedAlignmentModels.claim(alignmentCapture.owner(),own);
                 need(models!=null);
             }else{
                 models = MaaOnceModelStore.open(context.getNoBackupFilesDir().toPath());
@@ -321,6 +340,7 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             }
             if(rootPreflight)rootMarkers=rootMarkers(materialRows);
             if(alignmentCapture!=null)refineUiImageAlignment(stop);
+            if(overviewCapture!=null)refineOverview(stop);
             if(readOnlyCapture!=null) refineReadOnlyQuote(stop);
             if(nativePreparedCapture!=null) refinePreparedRewardCard(stop);
             if(nativeCardCapture!=null) refineNativeRewardCard(stop);
@@ -347,6 +367,7 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             if (!recognized || stop.requested()) nativePreparedObservation=null;
             if (!recognized || stop.requested()) readOnlyObservation=null;
             if (!recognized || stop.requested()) alignmentCandidate=null;
+            if (!recognized || stop.requested()) overviewCandidate=null;
             if (!recognized || stop.requested()) rootMarkers=null;
             synchronized (this) { returned = true; confirmed(CleanupEvidence.Item.RECOGNIZE_RETURN); }
         }
@@ -426,7 +447,7 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
         waiting(CleanupEvidence.Item.IMAGE_DESTROY); image=api.MaaImageBufferCreate(); need(image!=null);
         need(api.MaaImageBufferSetEncoded(image,nativeEncoded,encoded.count)!=0);
         if(imageAuditEnabled){
-            checkStop(stop);need(rootPreflight&&liveCheckin&&(readOnlyCapture!=null||nativePreparedCapture!=null||alignmentCapture!=null));
+            checkStop(stop);need(rootPreflight&&liveCheckin&&(readOnlyCapture!=null||nativePreparedCapture!=null||alignmentCapture!=null||overviewCapture!=null));
             imageAudit=new MaaImageBufferAudit(auditBinding(frame),imageSeriesStatsEnabled);
             imageAudit.before(api,auditBinding(frame),stop);checkStop(stop);
         }
@@ -487,7 +508,7 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             }finally{Arrays.fill(gray,(byte)0);}
             return;
         }
-        if(nativeCapture!=null||nativeCardCapture!=null||readOnlyCapture!=null||nativePreparedCapture!=null||alignmentCapture!=null){materialRows=java.util.List.copyOf(rows);return;}
+        if(nativeCapture!=null||nativeCardCapture!=null||readOnlyCapture!=null||nativePreparedCapture!=null||alignmentCapture!=null||overviewCapture!=null){materialRows=java.util.List.copyOf(rows);return;}
         if(materialFrame==null || observationStop==null || observationStop.requested())return;
         byte[] gray=new byte[frameWidth*frameHeight];
         try {
@@ -510,6 +531,17 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
         }finally{Arrays.fill(gray,(byte)0);materialRows=null;}
     }
     /** Same materialFrame and all[] rows used by the audited native OCR query. */
+    /** The overview receives only the same native OCR batch and owned audited frame. */
+    private void refineOverview(BackendPorts.StopSignal stop)throws Exception{
+        checkStop(stop);
+        if(materialFrame==null||materialRows==null)throw new IOException();
+        byte[] gray=new byte[frameWidth*frameHeight];
+        try{
+            for(int i=0;i<gray.length;i+=4096){checkStop(stop);materialFrame.copyGrayRange(i,gray,i,Math.min(4096,gray.length-i));}
+            overviewCandidate=overviewCapture.prepare(this,owner,materialFrame,gray,materialRows,
+                    stop::requested,android.os.SystemClock.elapsedRealtime());
+        }finally{Arrays.fill(gray,(byte)0);materialRows=null;}
+    }
     private void refineUiImageAlignment(BackendPorts.StopSignal stop)throws Exception{
         checkStop(stop);if(materialFrame==null||materialRows==null)return;
         byte[] gray=new byte[frameWidth*frameHeight];
