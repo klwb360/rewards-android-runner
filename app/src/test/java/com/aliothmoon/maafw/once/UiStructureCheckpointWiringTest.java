@@ -11,13 +11,15 @@ public class UiStructureCheckpointWiringTest {
  @Test public void allOldRuntimeStartsAndIssuersUseExhaustiveBlocker()throws Exception{
   int count=0;Matcher m=Pattern.compile("(?m)^    static CaptureSessionRuntime (start\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(s("CaptureSessionRuntime"));
   while(m.find()){if(m.group(1).equals("startCheckpointRead"))continue;assertTrue(m.group(1),m.group(2).contains("if(ReadOnlyCheckpoint.blocksLiveInput())throw"));count++;}assertTrue(count>=17);
-  count=0;int alignment=0;m=Pattern.compile("static [\\w.<>]+ (issue\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(s("VisibleCaptureAuthority"));
+  count=0;int alignment=0,overviewIntent=0,overviewFrame=0;m=Pattern.compile("static [\\w.<>]+ (issue\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(s("VisibleCaptureAuthority"));
   while(m.find()){
    if(m.group(1).equals("issueAlignment")){alignment++;continue;} // Independently checked by UiImageAlignmentEntryTest.
+   if(m.group(1).equals("issueOverviewIntent")){overviewIntent++;continue;} // Independently checked by OverviewEntryWiringTest.
+   if(m.group(1).equals("issueOverviewFrame")){overviewFrame++;continue;}
    if(m.group(1).equals("issueCheckpointIntent")||m.group(1).equals("issueCheckpointFrame"))continue;
    assertTrue(m.group(1),m.group(2).contains("if(ReadOnlyCheckpoint.blocksLiveInput())throw"));count++;
   }
-  assertTrue(count>=23);assertEquals(1,alignment);
+  assertTrue(count>=23);assertEquals(1,alignment);assertEquals(1,overviewIntent);assertEquals(1,overviewFrame);
  }
  @Test public void allFiveInputFactoriesBlocked()throws Exception{int count=0;for(String n:new String[]{"ReviewShizukuSwipeActor","ReviewShizukuTapActor","ReviewShizukuBackActor"}){Matcher m=Pattern.compile("static "+n+" (for\\w*)\\(Context context\\) \\{([^{}]*)").matcher(s(n));while(m.find()){assertTrue(m.group(1),m.group(2).stripLeading().startsWith("if(ReadOnlyCheckpoint.blocksLiveInput())throw"));count++;}}assertEquals(5,count);}
  @Test public void uiDisclosureAndChoiceAreExplicit()throws Exception{String c=s("DormantCaptureConfirmationActivity");assertTrue(c.contains("case UI_STRUCTURE->RootCaptureUi.uiStructureChoice"));assertTrue(s("RootCaptureUi").contains("批准V45设备内UI结构只读：零输入"));assertTrue(s("NativeUiStructureHelper").contains("FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES"));}

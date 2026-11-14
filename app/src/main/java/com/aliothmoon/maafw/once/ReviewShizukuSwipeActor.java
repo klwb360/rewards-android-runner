@@ -76,13 +76,23 @@ final class ReviewShizukuSwipeActor {
     private final boolean production;
     private final Direction allowedDirection;
     private final ProcessFence processFence;
+    private OverviewScanIntent.ScrollPermit overviewPermit;
     private boolean quarantined(){return processFence!=null&&processFence.quarantine!=null;}
     private boolean scopeCurrent(){
+        if(overviewPermit!=null)return overviewPermit.intent.live()&&overviewPermit.current(android.os.SystemClock.elapsedRealtime());
         if(!production)return true;
         if(ReadOnlyCheckpoint.blocksLiveInput())return false;
         long now=System.currentTimeMillis();
         return allowedDirection==Direction.DOWN?RootProgressLocateScope.ACTIVE&&RootProgressLocateScope.current(now)
             :!RootProgressLocateScope.ACTIVE&&RootProgressScanScope.ACTIVE&&RootProgressScanScope.current(now);
+    }
+    /** New independent overview authority; old factories, quotas and expired scopes stay unchanged. */
+    static ReviewShizukuSwipeActor forOverview(Context context,OverviewScanIntent.ScrollPermit permit){
+        if(permit==null||PROCESS.quarantine!=null||!permit.claimActor(android.os.SystemClock.elapsedRealtime()))
+            throw new SecurityException("Fresh overview scroll permit required");
+        var actor=new ReviewShizukuSwipeActor(new AndroidReviewShizukuSwipeBackend(context),
+                new AtomicBoolean(),true,PROCESS,permit.direction);
+        actor.overviewPermit=permit;return actor;
     }
     /** Exact already-consented root profile, isolated ordinary app process only. */
     static ReviewShizukuSwipeActor forProgressScan(Context context) {
