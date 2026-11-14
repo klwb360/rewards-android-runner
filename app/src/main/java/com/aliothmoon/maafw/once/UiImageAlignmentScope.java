@@ -15,14 +15,16 @@ import java.nio.file.attribute.BasicFileAttributes;
 final class UiImageAlignmentScope {
     static final String DIRECTORY = "rewards-ui-image-alignment-v1";
     static final String DIAGNOSTIC_DIRECTORY = "rewards-ui-image-alignment-diagnostic-v2";
-    enum Calibration { FIRST, CONFIRMATION }
+    enum Calibration { FIRST, CONFIRMATION, TITLE_TIMING }
     static final String CALIBRATION_DIRECTORY = "rewards-ui-image-alignment-calibration-v3";
     static final String CONFIRMATION_DIRECTORY = "rewards-ui-image-alignment-calibration-confirm-v3";
+    static final String TITLE_TIMING_DIRECTORY = "rewards-ui-image-title-timing-v4";
     private enum Profile {
         ORIGINAL(DIRECTORY, "ui-image-alignment-v1"),
         DIAGNOSTIC(DIAGNOSTIC_DIRECTORY, "ui-image-alignment-diagnostic-v2"),
         CALIBRATION(CALIBRATION_DIRECTORY, "ui-image-alignment-calibration-v3"),
-        CONFIRMATION(CONFIRMATION_DIRECTORY, "ui-image-alignment-calibration-confirm-v3");
+        CONFIRMATION(CONFIRMATION_DIRECTORY, "ui-image-alignment-calibration-confirm-v3"),
+        TITLE_TIMING(TITLE_TIMING_DIRECTORY, "ui-image-title-timing-v4");
         final String directory, marker;
         Profile(String directory, String marker) { this.directory = directory; this.marker = marker; }
     }
@@ -53,6 +55,7 @@ final class UiImageAlignmentScope {
         return switch (java.util.Objects.requireNonNull(attempt)) {
             case FIRST -> Profile.CALIBRATION;
             case CONFIRMATION -> Profile.CONFIRMATION;
+            case TITLE_TIMING -> Profile.TITLE_TIMING;
         };
     }
     static void burnCalibrationRun(Path files, Calibration attempt) throws IOException { burn(files, Slot.RUN, calibrationProfile(attempt)); }

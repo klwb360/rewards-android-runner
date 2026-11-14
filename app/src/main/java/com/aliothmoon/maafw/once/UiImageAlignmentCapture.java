@@ -14,6 +14,8 @@ final class UiImageAlignmentCapture {
     private final long lower, deadline;
     private final BooleanSupplier revoked;
     private final UiImageAlignmentDiagnostics diagnostics;
+    private final UiImageAlignmentTrace trace = new UiImageAlignmentTrace(System::nanoTime);
+    private UiImageAlignmentTrace.Span prepareCompleted;
     private boolean transportClaimed, prepared, sealAttempted;
     private Candidate candidate;
     private BingNavigationSnapshot.Ready imageAfter;
@@ -26,7 +28,7 @@ final class UiImageAlignmentCapture {
         this.imageBefore = imageBefore;
         this.lower = lower;
         this.deadline = deadline;
-        this.revoked = revoked;
+        this.revoked = trace.watch(UiImageAlignmentTrace.Check.SOURCE_CURRENT, revoked);
         diagnostics = new UiImageAlignmentDiagnostics(geometry.diagnosticUiStarted(), geometry.diagnosticUiAfterLower(), lower);
     }
 
@@ -44,7 +46,10 @@ final class UiImageAlignmentCapture {
     long deadline() { return deadline; }
     boolean matchesOwners(Object owner, Object session, Object epoch) { return geometry.matchesOwners(owner, session, epoch); }
     boolean captureCurrent(long now) { return current(now); }
-    String diagnostics() { return diagnostics.summary(); }
+    String diagnostics() { return diagnostics.summary() + " " + trace.summary(); }
+    UiImageAlignmentTrace diagnosticsTrace() { return trace; }
+    /** Observation only; does not assert backend cleanup, source freshness or successful preparation. */
+    synchronized void backendReturned() { trace.end(prepareCompleted); }
     synchronized boolean claimTransport() {
         boolean first = !transportClaimed && !prepared && !sealAttempted;
         transportClaimed = true;
@@ -56,40 +61,58 @@ final class UiImageAlignmentCapture {
         boolean first = !prepared;
         prepared = true;
         if (!first) return rejectPrepare(Prepare.DUPLICATE);
-        diagnostics.prepareAttempt(observedAt);
-        if (!transportClaimed) return rejectPrepare(Prepare.TRANSPORT_UNCLAIMED);
-        if (sealAttempted) return rejectPrepare(Prepare.SEAL_ATTEMPTED);
-        if (recognizer == null || owner == null || actualFrame == null) return rejectPrepare(Prepare.IDENTITY_MISSING);
-        if (gray == null || rows == null) return rejectPrepare(Prepare.INPUT_MISSING);
-        if (stopped(cancel)) return rejectPrepare(Prepare.CANCELED);
-        if (!current(observedAt)) return rejectPrepare(Prepare.CURRENT_REJECTED);
+        BooleanSupplier observedCancel = trace.watch(UiImageAlignmentTrace.Check.CANCEL, cancel);
         byte[] scratch = null;
         try {
-            long size = (long) width() * height();
-            if (actualFrame.width() != width() || actualFrame.height() != height()
-                    || actualFrame.size() != size || gray.length != size) return rejectPrepare(Prepare.SHAPE_MISMATCH);
-            // The digest and candidate must describe these exact bytes, not a same-sized caller image.
-            scratch = new byte[Math.min(gray.length, 4096)];
-            for (int offset = 0; offset < gray.length; offset += 4096) {
-                // Same global 4096-byte boundaries and short circuit as the original scalar loop.
-                if (stopped(cancel) || stopped(revoked)) return rejectPrepare(Prepare.CANCELED);
-                int length = Math.min(4096, gray.length - offset);
-                actualFrame.copyGrayRange(offset, scratch, 0, length);
-                for (int i = 0; i < length; i++) {
-                    if (scratch[i] != gray[offset + i]) return rejectPrepare(Prepare.PIXEL_MISMATCH);
-                }
-            }
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(gray);
-            var result = UiRegionImageRefiner.observe(geometry.regions(), gray, width(), height(), rows,
-                    () -> stopped(cancel) || stopped(revoked));
-            if (result == null) return rejectPrepare(Prepare.REFINER_UNAVAILABLE);
-            if (stopped(cancel)) return rejectPrepare(Prepare.CANCELED);
+            diagnostics.prepareAttempt(observedAt);
+            if (!transportClaimed) return rejectPrepare(Prepare.TRANSPORT_UNCLAIMED);
+            if (sealAttempted) return rejectPrepare(Prepare.SEAL_ATTEMPTED);
+            if (recognizer == null || owner == null || actualFrame == null) return rejectPrepare(Prepare.IDENTITY_MISSING);
+            if (gray == null || rows == null) return rejectPrepare(Prepare.INPUT_MISSING);
+            if (stopped(observedCancel)) return rejectPrepare(Prepare.CANCELED);
             if (!current(observedAt)) return rejectPrepare(Prepare.CURRENT_REJECTED);
-            candidate = new Candidate(this, recognizer, owner, actualFrame, observedAt, cancel, digest, result);
-            diagnostics.prepare(Prepare.ACCEPTED);
-            return candidate;
-        } catch (RuntimeException | NoSuchAlgorithmException invalid) { return rejectPrepare(Prepare.ERROR); }
-        finally { if (scratch != null) Arrays.fill(scratch, (byte) 0); }
+            try {
+                var comparison = trace.begin(UiImageAlignmentTrace.Phase.FRAME_COMPARE);
+                try {
+                    long size = (long) width() * height();
+                    if (actualFrame.width() != width() || actualFrame.height() != height()
+                            || actualFrame.size() != size || gray.length != size) return rejectPrepare(Prepare.SHAPE_MISMATCH);
+                    // The digest and candidate must describe these exact bytes, not a same-sized caller image.
+                    scratch = new byte[Math.min(gray.length, 4096)];
+                    for (int offset = 0; offset < gray.length; offset += 4096) {
+                        // Same global 4096-byte boundaries and short circuit as the original scalar loop.
+                        if (stopped(observedCancel) || stopped(revoked)) return rejectPrepare(Prepare.CANCELED);
+                        int length = Math.min(4096, gray.length - offset);
+                        actualFrame.copyGrayRange(offset, scratch, 0, length);
+                        for (int i = 0; i < length; i++) {
+                            if (scratch[i] != gray[offset + i]) return rejectPrepare(Prepare.PIXEL_MISMATCH);
+                        }
+                    }
+                } finally { trace.end(comparison); }
+                byte[] digest;
+                var hashing = trace.begin(UiImageAlignmentTrace.Phase.FRAME_HASH);
+                try { digest = MessageDigest.getInstance("SHA-256").digest(gray); }
+                finally { trace.end(hashing); }
+                UiRegionImageRefiner.Result result;
+                var refining = trace.begin(UiImageAlignmentTrace.Phase.REFINER);
+                try {
+                    result = UiRegionImageRefiner.observe(geometry.regions(), gray, width(), height(), rows,
+                            () -> stopped(observedCancel) || stopped(revoked), trace);
+                } finally { trace.end(refining); }
+                if (result == null) return rejectPrepare(Prepare.REFINER_UNAVAILABLE);
+                if (stopped(observedCancel)) return rejectPrepare(Prepare.CANCELED);
+                if (!current(observedAt)) return rejectPrepare(Prepare.CURRENT_REJECTED);
+                candidate = new Candidate(this, recognizer, owner, actualFrame, observedAt, observedCancel, digest, result);
+                diagnostics.prepare(Prepare.ACCEPTED);
+                return candidate;
+            } catch (RuntimeException | NoSuchAlgorithmException invalid) { return rejectPrepare(Prepare.ERROR); }
+        } finally {
+            if (scratch != null) Arrays.fill(scratch, (byte) 0);
+            // Start only once, after every first preparation outcome and its scratch wipe.
+            // Includes the caller's remaining work and native cleanup, even when no candidate formed.
+            // This diagnostic span never participates in a source/freshness/cleanup decision.
+            prepareCompleted = trace.begin(UiImageAlignmentTrace.Phase.CANDIDATE_TO_BACKEND_RETURN);
+        }
     }
     private Candidate rejectPrepare(Prepare gate) { diagnostics.prepare(gate); return null; }
 

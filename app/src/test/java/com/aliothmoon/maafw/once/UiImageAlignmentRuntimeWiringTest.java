@@ -91,7 +91,7 @@ public class UiImageAlignmentRuntimeWiringTest {
     }
 
     @Test public void postImageSourceReadRequiresActualCleanNativeCompletion() throws Exception {
-        String s = block(source("UiImageAlignmentRuntime"), "var result = backend.start()", "} catch (Exception failed)");
+        String s = block(source("UiImageAlignmentRuntime"), "OnceBackend.Result result;", "} catch (Exception failed)");
         assertTrue(s.contains("result.phase() == OnceBackend.Phase.COMPLETED"));
         assertTrue(s.contains("result.failure() == OnceBackend.Failure.NONE"));
         assertTrue(s.contains("result.cancellation() == OnceBackend.Cancellation.NOT_REQUESTED && actualResourcesClosed()"));

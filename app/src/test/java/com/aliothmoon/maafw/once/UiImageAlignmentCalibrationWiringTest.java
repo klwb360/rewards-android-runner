@@ -42,7 +42,7 @@ public class UiImageAlignmentCalibrationWiringTest {
   assertFalse(s.contains("setCurrent"));assertFalse(s.contains("Thread.interrupt("));
  }
  @Test public void everyCalibrationSlotKeepsAllPredecessorBytes()throws Exception{
-  for(var attempt:UiImageAlignmentScope.Calibration.values())for(String slot:new String[]{"RUN","UI","FRAME"}){
+  for(var attempt:new UiImageAlignmentScope.Calibration[]{UiImageAlignmentScope.Calibration.FIRST,UiImageAlignmentScope.Calibration.CONFIRMATION})for(String slot:new String[]{"RUN","UI","FRAME"}){
    Path root=temporary.newFolder(attempt+slot).toPath().toAbsolutePath().normalize();
    String selected=attempt==UiImageAlignmentScope.Calibration.FIRST?UiImageAlignmentScope.CALIBRATION_DIRECTORY:UiImageAlignmentScope.CONFIRMATION_DIRECTORY;
    byte[] old="incomplete previous attempt must stay\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);

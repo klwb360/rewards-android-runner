@@ -249,6 +249,7 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             owner = own; receipts.bind(own); waiting(CleanupEvidence.Item.RECOGNIZE_RETURN); entered = true; observationStop = stop;
         }
         boolean recognized = false;
+        UiImageAlignmentTrace.Span alignmentPhase = beginAlignmentPhase(UiImageAlignmentTrace.Phase.NATIVE_SETUP);
         try {
             synchronized (MaaRecognizer.class) {
                 if (anchor != null) throw new IOException();
@@ -284,7 +285,10 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             checkStop(stop);
             waiting(CleanupEvidence.Item.TASKER_DESTROY); tasker = api.MaaTaskerCreate(); need(tasker != null);
             need(api.MaaTaskerBindResource(tasker,resource) != 0);
+            endAlignmentPhase(alignmentPhase);
+            alignmentPhase = beginAlignmentPhase(UiImageAlignmentTrace.Phase.IMAGE_ENCODING_AND_AUDIT);
             prepareImage(frame, stop); stage=Stage.IMAGE_READY;
+            endAlignmentPhase(alignmentPhase); alignmentPhase = null;
             frameWidth=frame.width();frameHeight=frame.height();perception.frame(frameWidth,frameHeight);
             if (materialKind != null || liveCheckin) materialFrame = frame;
             structureBinding=new FrameStructureEvidence.Binding(this,own,structureEpoch,structureFrame);
@@ -292,6 +296,7 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             boolean hit = false;
             for (RewardsQuery query : RewardsQuery.values()) {
                 checkStop(stop);
+                alignmentPhase = beginAlignmentPhase(UiImageAlignmentTrace.Phase.NATIVE_OCR);
                 // Prior task is truly quiet before reuse; reset evidence before posting.
                 taskQuiet=false; waiting(CleanupEvidence.Item.TASKER_RUNNING_FALSE); lastTaskStatus=0; taskId=0;
                 perception.posted(query);
@@ -299,6 +304,8 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
                 need(taskId>0); stage=Stage.TASK_POSTED;
                 if(imageAuditEnabled)imageAudit.posted(auditBinding(frame),taskId);
                 int status=awaitTask(stop);perception.terminal(query,status);
+                endAlignmentPhase(alignmentPhase);
+                alignmentPhase = beginAlignmentPhase(UiImageAlignmentTrace.Phase.OCR_DETAIL_AND_IMAGE_AUDIT);
                 checkStop(stop);
                 hits[query.ordinal()]=detail(status,query==RewardsQuery.REWARDS_MARKER);
                 perception.detail(query,hits[query.ordinal()]); stage=Stage.DETAIL_READ;
@@ -307,6 +314,7 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
                     imageAudit.after(api,auditBinding(frame),taskId,taskQuiet,stop);
                     checkStop(stop);
                 }
+                endAlignmentPhase(alignmentPhase); alignmentPhase = null;
                 hit |= hits[query.ordinal()];
                 checkStop(stop);
                 if(liveCheckin)break; // One full native OCR batch, not four duplicate screen queries.
@@ -330,6 +338,7 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             // Unknown native outcome or wrapper failure: no destructive retry.
             uncertain = true; throw e;
         } finally {
+            endAlignmentPhase(alignmentPhase);
             materialFrame = null;
             materialRows = null; roiRows = null; readingLabelRoi = false;
             if (!recognized || stop.requested()) provisional=null;
@@ -341,6 +350,12 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             if (!recognized || stop.requested()) rootMarkers=null;
             synchronized (this) { returned = true; confirmed(CleanupEvidence.Item.RECOGNIZE_RETURN); }
         }
+    }
+    private UiImageAlignmentTrace.Span beginAlignmentPhase(UiImageAlignmentTrace.Phase phase) {
+        return alignmentCapture == null ? null : alignmentCapture.diagnosticsTrace().begin(phase);
+    }
+    private void endAlignmentPhase(UiImageAlignmentTrace.Span span) {
+        if (alignmentCapture != null) alignmentCapture.diagnosticsTrace().end(span);
     }
     private void options() throws IOException {
         try (Memory off=new Memory(4); Memory empty=new Memory(1); Memory no=new Memory(1); Memory cache=new Memory(8)) {
@@ -498,13 +513,15 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
     private void refineUiImageAlignment(BackendPorts.StopSignal stop)throws Exception{
         checkStop(stop);if(materialFrame==null||materialRows==null)return;
         byte[] gray=new byte[frameWidth*frameHeight];
+        UiImageAlignmentTrace.Span copyTiming = beginAlignmentPhase(UiImageAlignmentTrace.Phase.FRAME_COPY_AND_GEOMETRY_AUDIT);
         try{
             for(int i=0;i<gray.length;i+=4096){checkStop(stop);materialFrame.copyGrayRange(i,gray,i,Math.min(4096,gray.length-i));}
             imageAudit.observeGeometry(gray,frameWidth,frameHeight,stop);
+            endAlignmentPhase(copyTiming); copyTiming = null;
             alignmentCandidate=alignmentCapture.prepare(this,owner,materialFrame,gray,materialRows,
                 stop::requested,android.os.SystemClock.elapsedRealtime());
             checkStop(stop);
-        }finally{Arrays.fill(gray,(byte)0);materialRows=null;}
+        }finally{endAlignmentPhase(copyTiming);Arrays.fill(gray,(byte)0);materialRows=null;}
     }
     private void refinePreparedRewardCard(BackendPorts.StopSignal stop)throws Exception{
         checkStop(stop);if(materialFrame==null||materialRows==null)return;
