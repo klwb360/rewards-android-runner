@@ -170,6 +170,65 @@ public class LocalCardMockPlanTest {
         assertEquals("INVALID_LOCAL_CROP",LocalCardMockPlan.prepare(new byte[1],new int[1],W,H,()->false).reason());
         var p=plan();assertEquals("CANCELED",p.finish(batches(),()->true).reason());assertEquals("ALREADY_CONSUMED",p.finish(batches(),()->false).reason());
     }
+    @Test public void capturedPlanUsesNativeProvenanceWithoutChangingTheNineRegionsOrPreview(){
+        var f=fixture();Object owner=new Object();byte[] png=new byte[128];Arrays.fill(png,(byte)31);
+        var receipt=CardNativeMockReceipt.seal(owner,CardNativeMockReceipt.digest(png),W,H);
+        assertTrue(receipt.claim(owner,png,W,H));
+        var captured=LocalCardMockPlan.prepareCaptured(f.gray(),f.argb(),W,H,receipt,owner,()->false);
+        var historical=LocalCardMockPlan.prepare(f.gray(),f.argb(),W,H,()->false);
+        assertTrue(captured.reason(),captured.admitted());
+        assertEquals(com.aliothmoon.maafw.rewards.RewardRegionGate.Source.REAL_DISPLAY_NATIVE,captured.source());
+        assertEquals(com.aliothmoon.maafw.rewards.RewardRegionGate.Source.USER_STATIC_MATERIAL,historical.source());
+        assertEquals(historical.rois(),captured.rois());assertEquals(historical.finish(batches(),()->false),captured.finish(batches(),()->false));
+    }
+    @Test public void capturedPlanCannotPromoteUnclaimedForeignOrCanceledReceipts(){
+        var f=fixture();Object owner=new Object();byte[] png=new byte[128];
+        var receipt=CardNativeMockReceipt.seal(owner,CardNativeMockReceipt.digest(png),W,H);
+        assertEquals("CAPTURE_RECEIPT_UNAVAILABLE",LocalCardMockPlan.prepareCaptured(f.gray(),f.argb(),W,H,receipt,owner,()->false).reason());
+        assertTrue(receipt.claim(owner,png,W,H));
+        assertEquals("CAPTURE_RECEIPT_UNAVAILABLE",LocalCardMockPlan.prepareCaptured(f.gray(),f.argb(),W,H,receipt,new Object(),()->false).reason());
+        receipt.cancel();
+        assertEquals("CAPTURE_RECEIPT_UNAVAILABLE",LocalCardMockPlan.prepareCaptured(f.gray(),f.argb(),W,H,receipt,owner,()->false).reason());
+        assertEquals("CANCELED",LocalCardMockPlan.prepareCaptured(f.gray(),f.argb(),W,H,receipt,owner,()->true).reason());
+    }
+    @Test public void capturedReceiptCannotMintAnotherPlanAndCancellationRevokesTheFirstPlan(){
+        var f=fixture();Object owner=new Object();byte[] png=new byte[128];
+        var receipt=CardNativeMockReceipt.seal(owner,CardNativeMockReceipt.digest(png),W,H);assertTrue(receipt.claim(owner,png,W,H));
+        var first=LocalCardMockPlan.prepareCaptured(f.gray(),f.argb(),W,H,receipt,owner,()->false);assertTrue(first.admitted());
+        assertEquals("CAPTURE_RECEIPT_UNAVAILABLE",LocalCardMockPlan.prepareCaptured(f.gray(),f.argb(),W,H,receipt,owner,()->false).reason());
+        receipt.cancel();assertFalse(first.admitted());assertFalse(first.claimRecognition());assertFalse(first.matchesGray8(f.gray(),W,H,()->false));
+        assertEquals("CAPTURE_RECEIPT_UNAVAILABLE",first.finish(batches(),()->false).reason());
+    }
+    @Test public void duplicatePayloadClaimRevokesAnAlreadyPreparedCapturePlan(){
+        var f=fixture();Object owner=new Object();byte[] png=new byte[128];
+        var receipt=CardNativeMockReceipt.seal(owner,CardNativeMockReceipt.digest(png),W,H);assertTrue(receipt.claim(owner,png,W,H));
+        var first=LocalCardMockPlan.prepareCaptured(f.gray(),f.argb(),W,H,receipt,owner,()->false);assertTrue(first.admitted());
+        assertFalse(receipt.claim(owner,png,W,H));assertFalse(first.admitted());assertFalse(first.claimRecognition());
+        assertEquals(0,first.finish(batches(),()->false).hypotheticalClicks());
+    }
+    @Test public void captureRevocationWhileReadingTheLastRegionCannotIssueAPreview(){
+        var f=fixture();Object owner=new Object();byte[] png=new byte[128];
+        var receipt=CardNativeMockReceipt.seal(owner,CardNativeMockReceipt.digest(png),W,H);assertTrue(receipt.claim(owner,png,W,H));
+        var p=LocalCardMockPlan.prepareCaptured(f.gray(),f.argb(),W,H,receipt,owner,()->false);var original=batches();
+        List<List<FrameStructureEvidence.Line>> revokeOnLastRegion=new java.util.AbstractList<>(){
+            public int size(){return original.size();}
+            public List<FrameStructureEvidence.Line> get(int index){if(index==8)receipt.cancel();return original.get(index);}
+        };
+        var result=p.finish(revokeOnLastRegion,()->false);assertEquals("CANCELED",result.reason());
+        assertEquals(0,result.hypotheticalClicks());assertEquals(0,result.realExecutions());assertEquals(-1,result.x());
+    }
+    @Test public void capturedPlanStillRejectsZeroMultipleLowScoreAndBoundaryTouchingRows(){
+        for(int mode=0;mode<4;mode++){
+            var f=fixture();Object owner=new Object();byte[] png=new byte[128];
+            var receipt=CardNativeMockReceipt.seal(owner,CardNativeMockReceipt.digest(png),W,H);assertTrue(receipt.claim(owner,png,W,H));
+            var p=LocalCardMockPlan.prepareCaptured(f.gray(),f.argb(),W,H,receipt,owner,()->false);var rows=batches();var nativeNumber=rows.get(1).get(0);
+            rows.set(1,mode==0?List.of():mode==1?List.of(nativeNumber,nativeNumber):mode==2?
+                    List.of(new FrameStructureEvidence.Line(nativeNumber.text(),nativeNumber.x(),nativeNumber.y(),nativeNumber.width(),nativeNumber.height(),.849)):
+                    List.of(new FrameStructureEvidence.Line(nativeNumber.text(),p.rois().get(1).left(),nativeNumber.y(),nativeNumber.width(),nativeNumber.height(),.99)));
+            var result=p.finish(rows,()->false);assertEquals(0,result.hypotheticalClicks());assertEquals(0,result.realExecutions());assertEquals(-1,result.x());
+            assertEquals(mode<2?"ROI_ROW_COUNT":mode==2?"ROI_ROW_SHAPE_OR_CONFIDENCE":"ROW_TOUCHES_ROI",result.reason());
+        }
+    }
     @Test public void originalRowsAndRasterRemainUnchanged(){
         var f=fixture();var original=f.gray().clone();var colors=f.argb().clone();var p=LocalCardMockPlan.prepare(f.gray(),f.argb(),W,H,()->false);
         assertArrayEquals(original,f.gray());assertArrayEquals(colors,f.argb());

@@ -98,7 +98,7 @@ public class CardRevealProbeEntryTest {
         String capture=between(runtime,"private void capture(","private boolean checkBoundary(");
         ordered(capture,"if(!initialClipped||swipes<1||dispatches<1||firstScrollRequest<0||revealMs<=0)throw",
                 "AndroidCardRegionCapture.capture(");
-        assertEquals("rewards-card-reveal-v2",CardRevealProbeScope.DIRECTORY);
+        assertEquals("rewards-card-native-chain-v1",CardRevealProbeScope.DIRECTORY);
     }
     @Test public void publicationOwnsPixelsUntilFinallyWipeAndCannotResetOrOverwriteRecords()throws Exception{
         String runtime=source("CardRevealProbeRuntime");

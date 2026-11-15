@@ -8,8 +8,8 @@ import android.widget.TextView;
 
 /** Visible confirmation for one check-in panel reveal and direct-region screenshot test. */
 final class CardRevealProbeUi {
-    static final String OPEN = "打开实际滚动局部截图补测（尚不采集）";
-    static final String RUN = "确认本次实际滚动补测";
+    static final String OPEN = "打开滚动截图原生OCR串联测试（尚不采集）";
+    static final String RUN = "确认本次滚动截图模拟标点";
     private static LinearLayout page(Activity activity, String text) {
         ScrollView scroll = new ScrollView(activity); LinearLayout box = new LinearLayout(activity);
         box.setOrientation(LinearLayout.VERTICAL); box.setPadding(24,24,24,24);
@@ -22,19 +22,19 @@ final class CardRevealProbeUi {
         box.addView(button);
     }
     static void choice(Activity activity, boolean ready, Runnable run, Runnable close) {
-        LinearLayout box = page(activity, "实际滚动局部截图补测\n"
+        LinearLayout box = page(activity, "滚动、局部截图和原生OCR串联测试\n"
                 + "本次从签到面板未完整露出的状态开始，程序自行滚动并记录到确认完整露出并停稳的耗时。起点已完整或没有实际滚动时停止，不采集。\n"
-                + "本轮仅验证已核对的1440×2560竖屏布局。最多滚动8次、观察界面24次，最长120秒；仅直接采集面板区域1张图片，完成后停止。\n"
-                + "不进行整屏截图，不做OCR，不点击任务。图片和结果只保存在本机，保留全部旧记录。\n"
+                + "本轮仅验证已核对的1440×2560竖屏布局。最多滚动8次、观察界面24次，最长120秒；仅直接采集完整面板区域1张图片，随后在安卓中对这同一次采集的局部图进行九个小区域OCR。\n"
+                + "不进行整屏截图，不点击任务。来源和完整边框核对通过后，仅标记一个拟点击点；识别不确定时停止。图片及不含原文的诊断只保存在本机，保留全部旧记录。\n"
                 + (ready ? "现有服务可用，确认后重新核对页面来源。" : "现有服务不可用，不能开始。"));
         button(activity, box, RUN, ready, run); button(activity, box, "关闭", true, close);
     }
     static void running(Activity activity, Runnable close) {
-        LinearLayout box = page(activity, "正在定位完整签到面板并记录露出耗时；仅采集该区域一次。");
+        LinearLayout box = page(activity, "正在自主滚动到完整签到面板并计时；仅采集该区域一次，然后由APK内的原生OCR识别并模拟标点。");
         button(activity, box, "停止并关闭", true, close);
     }
     static void status(Activity activity, String summary, Runnable close) {
-        LinearLayout box = page(activity, "实际滚动补测已停止\n没有点击任务或验证积分到账。\n" + summary);
+        LinearLayout box = page(activity, "滚动截图原生OCR测试已停止\n没有点击任务或验证积分到账。\n" + summary);
         button(activity, box, "关闭", true, close);
     }
     private CardRevealProbeUi() { }

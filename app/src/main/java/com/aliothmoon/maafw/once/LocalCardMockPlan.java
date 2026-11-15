@@ -13,7 +13,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 
-/** Historical local crop replay only. Geometry, OCR and a fake receipt never grant device input. */
+/** Owned local crop processing only. Geometry, OCR and a fake receipt never grant device input. */
 final class LocalCardMockPlan {
     static final int QUERIES=9,MAX_PIXELS=2_097_152;
     private static final double MIN_CONFIDENCE=.85;
@@ -27,32 +27,35 @@ final class LocalCardMockPlan {
         private final String reason;
         private final int width,height;
         private final boolean diagnosticOnly;
+        private final BooleanSupplier provenanceCurrent;
         private final AtomicBoolean recognitionClaimed=new AtomicBoolean(),finished=new AtomicBoolean();
         private Plan(DailyCheckInRegion.Geometry geometry,Box panel,Box ring,List<Box> rois,
-                String reason,int width,int height,boolean diagnosticOnly){
+                String reason,int width,int height,boolean diagnosticOnly,BooleanSupplier provenanceCurrent){
             this.geometry=geometry;this.panel=panel;this.ring=ring;this.rois=List.copyOf(rois);
-            this.reason=reason;this.width=width;this.height=height;this.diagnosticOnly=diagnosticOnly;
+            this.reason=reason;this.width=width;this.height=height;this.diagnosticOnly=diagnosticOnly;this.provenanceCurrent=provenanceCurrent;
         }
-        boolean admitted(){return reason.equals("READY")&&geometry!=null&&rois.size()==QUERIES;}
+        boolean admitted(){return reason.equals("READY")&&geometry!=null&&rois.size()==QUERIES&&provenanceCurrent.getAsBoolean();}
         String reason(){return reason;}
         List<Box> rois(){return rois;}
         int width(){return width;}
         int height(){return height;}
+        RewardRegionGate.Source source(){return geometry==null?null:geometry.key().source();}
         boolean claimRecognition(){return admitted()&&recognitionClaimed.compareAndSet(false,true);}
         boolean matchesGray8(byte[] gray,int w,int h,BooleanSupplier canceled){
             return admitted()&&!stopped(canceled)&&w==width&&h==height&&gray!=null
-                    &&gray.length==(long)w*h&&geometry.pixelHash().equals(hash(gray))&&!stopped(canceled);
+                    &&gray.length==(long)w*h&&geometry.pixelHash().equals(hash(gray))&&!stopped(canceled)&&provenanceCurrent.getAsBoolean();
         }
         /** Each batch contains unmodified native boxes in this crop's coordinate space. */
         Outcome finish(List<List<FrameStructureEvidence.Line>> batches,BooleanSupplier canceled){
             if(!finished.compareAndSet(false,true))return hold("ALREADY_CONSUMED",0);
             int count=batches==null?0:batches.size();
             if(stopped(canceled))return hold("CANCELED",count);
+            if(!provenanceCurrent.getAsBoolean())return hold("CAPTURE_RECEIPT_UNAVAILABLE",count);
             if(!admitted())return hold(reason,count);
             if(batches==null||batches.size()!=QUERIES)return hold("MISSING_BATCHES",count);
             List<Row> rows=new ArrayList<>();double minimum=1;
             for(int i=0;i<QUERIES;i++){
-                if(stopped(canceled))return hold("CANCELED",count);
+                if(stopped(canceled)||!provenanceCurrent.getAsBoolean())return hold("CANCELED",count);
                 var batch=batches.get(i);Box roi=rois.get(i);
                 if(batch==null)return hold("ROI_ROWS_UNAVAILABLE",count);
                 if(batch.size()!=1)return hold("ROI_ROW_COUNT",count);
@@ -72,18 +75,18 @@ final class LocalCardMockPlan {
                 minimum=Math.min(minimum,line.score());
                 rows.add(new Row(line.text(),b,line.score(),Origin.STATIC_OCR));
             }
-            if(stopped(canceled))return hold("CANCELED",count);
+            if(stopped(canceled)||!provenanceCurrent.getAsBoolean())return hold("CANCELED",count);
             var text=new DailyCheckInRegion.TextEvidence(geometry.key(),rows);
             var associated=DailyCheckInRegion.associate(geometry,text);
             if(associated.status()==DailyCheckInRegion.Status.CANDIDATE){
                 if(diagnosticOnly)return new Outcome("DIAGNOSTIC_ONLY","ALL_ROIS_VALID",0,0,-1,-1,-1,-1,count,minimum);
                 var session=new DailyCheckInRegion.Session(associated);
-                if(stopped(canceled)){session.cancel();return hold("CANCELED",count);}
+                if(stopped(canceled)||!provenanceCurrent.getAsBoolean()){session.cancel();return hold("CANCELED",count);}
                 var receipt=session.previewOnce();
                 if(receipt.outcome()!=DailyCheckInRegion.Outcome.PREVIEW_ONLY||receipt.hypotheticalClicks()!=1
                         ||receipt.realExecutions()!=0||receipt.candidate()==null)return hold("FAKE_RECEIPT_REJECTED",count);
                 var candidate=receipt.candidate();
-                if(stopped(canceled)){session.cancel();return hold("CANCELED",count);}
+                if(stopped(canceled)||!provenanceCurrent.getAsBoolean()){session.cancel();return hold("CANCELED",count);}
                 return new Outcome("PREVIEW_ONLY","ONE_FAKE_RECEIPT",1,0,(int)Math.floor(candidate.cropX()),
                         (int)Math.floor(candidate.cropY()),candidate.day(),candidate.displayedPoints(),count,minimum);
             }
@@ -101,6 +104,20 @@ final class LocalCardMockPlan {
         return prepare(gray,argb,width,height,false,canceled);
     }
     static Plan prepare(byte[] gray,int[] argb,int width,int height,boolean diagnosticOnly,BooleanSupplier canceled){
+        var key=new RewardRegionGate.Key(RewardRegionGate.Source.USER_STATIC_MATERIAL,"local-card-mock-v1",1,"CHECK_IN");
+        return prepareOwned(gray,argb,width,height,diagnosticOnly,canceled,key,()->true);
+    }
+    /** A consumed same-run capture receipt changes provenance only, never any recognition gate. */
+    static Plan prepareCaptured(byte[] gray,int[] argb,int width,int height,
+            CardNativeMockReceipt receipt,Object owner,BooleanSupplier canceled){
+        if(stopped(canceled))return denied("CANCELED",width,height);
+        if(receipt==null||owner==null||!receipt.claimedBy(owner)||receipt.width()!=width||receipt.height()!=height||!receipt.claimPlan(owner))
+            return denied("CAPTURE_RECEIPT_UNAVAILABLE",width,height);
+        var key=new RewardRegionGate.Key(RewardRegionGate.Source.REAL_DISPLAY_NATIVE,"card-native-chain-v1",1,"CHECK_IN");
+        return prepareOwned(gray,argb,width,height,false,canceled,key,()->receipt.claimedBy(owner));
+    }
+    private static Plan prepareOwned(byte[] gray,int[] argb,int width,int height,boolean diagnosticOnly,
+            BooleanSupplier canceled,RewardRegionGate.Key key,BooleanSupplier provenanceCurrent){
         if(stopped(canceled))return denied("CANCELED",width,height);
         if(width<32||height<32||width>4096||height>4096||(long)width*height>MAX_PIXELS||gray==null
                 ||gray.length!=(long)width*height||argb==null||argb.length!=gray.length)
@@ -110,7 +127,6 @@ final class LocalCardMockPlan {
             int p=argb[i],g=(77*((p>>>16)&255)+150*((p>>>8)&255)+29*(p&255)+128)>>>8;
             if((p>>>24)!=255||g!=(gray[i]&255))return denied("COLOR_GRAY_MISMATCH",width,height);
         }
-        var key=new RewardRegionGate.Key(RewardRegionGate.Source.USER_STATIC_MATERIAL,"local-card-mock-v1",1,"CHECK_IN");
         var geometry=DailyCheckInRegion.observeGray8(key,gray,width,height,canceled);
         if(geometry.status()!=DailyCheckInRegion.Status.OBSERVED)return denied("GEOMETRY_"+geometry.status().name(),width,height);
         if(geometry.surfaces().size()!=1||!geometry.surfaces().get(0).complete())return denied("NO_UNIQUE_COMPLETE_PANEL",width,height);
@@ -131,9 +147,10 @@ final class LocalCardMockPlan {
         rois.addAll(columns.dayRois());
         for(Box roi:rois)if(roi.width()<4||roi.height()<4||!panel.contains(roi))return denied("INVALID_ROI_GEOMETRY",width,height);
         if(stopped(canceled))return denied("CANCELED",width,height);
-        return new Plan(geometry,panel,ring,rois,"READY",width,height,diagnosticOnly);
+        if(!provenanceCurrent.getAsBoolean())return denied("CAPTURE_RECEIPT_UNAVAILABLE",width,height);
+        return new Plan(geometry,panel,ring,rois,"READY",width,height,diagnosticOnly,provenanceCurrent);
     }
-    private static Plan denied(String reason,int width,int height){return new Plan(null,null,null,List.of(),reason,width,height,false);}
+    private static Plan denied(String reason,int width,int height){return new Plan(null,null,null,List.of(),reason,width,height,false,()->true);}
     private static Outcome hold(String reason,int count){return new Outcome("HOLD",reason,0,0,-1,-1,-1,-1,count,-1);}
     private static boolean stopped(BooleanSupplier canceled){return canceled!=null&&canceled.getAsBoolean();}
     private static boolean positive(String text){
