@@ -48,6 +48,29 @@ public class LocalCardMockPlanTest {
         var p=plan();assertEquals(1,p.finish(batches(),()->false).hypotheticalClicks());
         var again=p.finish(batches(),()->false);assertEquals("ALREADY_CONSUMED",again.reason());assertEquals(0,again.hypotheticalClicks());assertEquals(-1,again.x());
     }
+    @Test public void diagnosticOnlyModeCannotIssueAFakeClickOrPointEvenWhenAllRowsPass(){
+        var f=fixture();var p=LocalCardMockPlan.prepare(f.gray(),f.argb(),W,H,true,()->false);
+        var result=p.finish(batches(),()->false);assertEquals("DIAGNOSTIC_ONLY",result.status());
+        assertEquals("ALL_ROIS_VALID",result.reason());assertEquals(0,result.hypotheticalClicks());assertEquals(0,result.realExecutions());
+        assertEquals(-1,result.x());assertEquals(-1,result.y());assertEquals(-1,result.day());assertEquals(-1,result.displayedPoints());
+        assertEquals(9,result.ocrQueries());assertEquals("ALREADY_CONSUMED",p.finish(batches(),()->false).reason());
+    }
+    @Test public void diagnosticOnlyModeStillRejectsZeroMultipleAndUnavailableBatches(){
+        for(int mode=0;mode<3;mode++){
+            var f=fixture();var p=LocalCardMockPlan.prepare(f.gray(),f.argb(),W,H,true,()->false);var rows=batches();
+            rows.set(1,mode==0?List.of():mode==1?List.of(rows.get(1).get(0),rows.get(1).get(0)):null);
+            var result=p.finish(rows,()->false);assertEquals("HOLD",result.status());assertEquals(mode==2?"ROI_ROWS_UNAVAILABLE":"ROI_ROW_COUNT",result.reason());
+            assertEquals(0,result.hypotheticalClicks());assertEquals(-1,result.x());
+        }
+    }
+    @Test public void unavailableValidatedRowsAndTrueNativeEmptyHaveDifferentReasons(){
+        var unavailable=batches();unavailable.set(0,null);
+        var absent=plan().finish(unavailable,()->false);assertEquals("ROI_ROWS_UNAVAILABLE",absent.reason());
+        assertEquals(0,absent.hypotheticalClicks());assertEquals(-1,absent.x());
+        var empty=batches();empty.set(0,List.of());
+        var zero=plan().finish(empty,()->false);assertEquals("ROI_ROW_COUNT",zero.reason());
+        assertEquals(0,zero.hypotheticalClicks());assertEquals(-1,zero.x());
+    }
     @Test public void failedBatchConsumesThePlanAndDoesNotRetry(){
         var p=plan();var rows=batches();rows.remove(8);assertEquals("MISSING_BATCHES",p.finish(rows,()->false).reason());
         assertEquals("ALREADY_CONSUMED",p.finish(batches(),()->false).reason());

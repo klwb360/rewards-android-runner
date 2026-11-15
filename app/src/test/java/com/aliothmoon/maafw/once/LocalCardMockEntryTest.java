@@ -68,11 +68,19 @@ public class LocalCardMockEntryTest {
         String pause=between(activity,"@Override protected void onPause()","@Override protected void onActivityResult(");
         ordered(pause,"localMockVisible=false","localMockRun.cancel()","resumed=false","super.onPause()");
     }
+    @Test public void diagnosticModeNeverSelectsOrDrawsAMockPointAndPublishesOnlyAfterCleanup()throws Exception {
+        String run=source("LocalCardMockRuntime");
+        assertTrue(run.contains("LocalCardMockPlan.prepare(gray,argb,w,h,true,()->!current())"));
+        ordered(run,"if(!cleanupConfirmed(result)","recognizer.localCardRoiDiagnostic(result.owner())","publishDiagnostic()");
+        assertTrue(run.contains("if(outcome.hypotheticalClicks()!=0)throw"));
+        assertTrue(run.contains("LocalCardMockFiles.write(output,\"DIAGNOSTICS.json\",bytes)"));
+        excludes(run,"new Canvas(","drawCircle(","Session.previewOnce(","marks=1","hypothetical=outcome.hypotheticalClicks()");
+    }
     @Test public void newUiIsHistoricalNativeOcrAndAddsNoCaptureOrTaskInputRoute()throws Exception {
         String ui=source("LocalCardMockUi");
         assertTrue(ui.contains("APK内的MaaFramework模型在安卓中识别"));
         assertTrue(ui.contains("历史图片的局部回放"));
-        assertTrue(ui.contains("核对通过后仅标出一个拟点击点"));
+        assertTrue(ui.contains("不含原文的逐区域行数、解码状态和校验原因，不生成模拟选择"));
         excludes(ui,"requestPermission(","startActivity(","newProcess(","screencap","performAction(",
                 "dispatchGesture(","ReviewShizukuTapActor","ReviewShizukuBackActor");
         String choices=source("OwnStateSummaryUi");

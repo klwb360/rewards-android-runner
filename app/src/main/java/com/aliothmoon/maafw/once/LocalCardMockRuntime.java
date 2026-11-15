@@ -2,14 +2,10 @@ package com.aliothmoon.maafw.once;
 
 import android.app.Application;
 import android.graphics.Bitmap;
-import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.Paint;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.SystemClock;
-import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -31,9 +27,10 @@ final class LocalCardMockRuntime {
     private volatile Bitmap image;
     private Path output;
     private LocalCardMockPlan.Outcome outcome;
+    private LocalCardRoiDiagnostic.Report diagnostic;
     private volatile String stage="NEW",backendPhase="NONE",reason="NONE";
     private volatile boolean workerReturned,closed,released,unknown;
-    private int queries,marks,hypothetical;
+    private int queries,marks,hypothetical,diagSaved;
     private long nativeMs=-1;
     private boolean notified;
     private LocalCardMockRuntime(DormantCaptureConfirmationActivity activity,long deadline){this.activity=activity;this.deadline=deadline;}
@@ -66,7 +63,7 @@ final class LocalCardMockRuntime {
             try{
                 image.getPixels(argb,0,w,0,0,w,h);
                 for(int i=0;i<argb.length;i++){int p=argb[i];gray[i]=(byte)((77*((p>>>16)&255)+150*((p>>>8)&255)+29*(p&255)+128)>>>8);}
-                stage="REGION_PLAN";var plan=LocalCardMockPlan.prepare(gray,argb,w,h,()->!current());
+                stage="REGION_PLAN";var plan=LocalCardMockPlan.prepare(gray,argb,w,h,true,()->!current());
                 if(!plan.admitted()){reason=plan.reason();stage="HOLD";return;}
                 requireCurrent();stage="ANDROID_NATIVE_OCR";recognizer=MaaRecognizer.localCardMock(activity,plan);
                 var source=new StaticSource(gray,w,h);AtomicBoolean claim=new AtomicBoolean();
@@ -74,50 +71,49 @@ final class LocalCardMockRuntime {
                         current()&&claim.compareAndSet(false,true)?BackendPorts.ClaimDecision.CLAIMED:BackendPorts.ClaimDecision.DENIED),source,recognizer,Runnable::run);
                 long began=SystemClock.elapsedRealtime();var result=backend.start();nativeMs=SystemClock.elapsedRealtime()-began;
                 backendPhase=result.phase().name();
-                if(result.phase()!=OnceBackend.Phase.COMPLETED||result.failure()!=OnceBackend.Failure.NONE
-                        ||result.cancellation()!=OnceBackend.Cancellation.NOT_REQUESTED||result.memory()!=OnceBackend.Memory.WIPED)
-                    throw new SecurityException("Native OCR cleanup or result unavailable");
-                requireCurrent();outcome=recognizer.localCardMockOutcome(result.owner());
-                if(outcome==null)throw new SecurityException("Exact owner native outcome unavailable");
-                queries=outcome.ocrQueries();reason=outcome.reason();hypothetical=outcome.hypotheticalClicks();
+                if(!cleanupConfirmed(result)||result.cancellation()!=OnceBackend.Cancellation.NOT_REQUESTED)
+                    throw new SecurityException("Native diagnostic cleanup unavailable");
+                requireCurrent();diagnostic=recognizer.localCardRoiDiagnostic(result.owner());
+                if(diagnostic==null)throw new SecurityException("Exact owner native diagnostic unavailable");
+                queries=diagnostic.completedQueries();
+                if(result.phase()==OnceBackend.Phase.COMPLETED&&result.failure()==OnceBackend.Failure.NONE){
+                    outcome=recognizer.localCardMockOutcome(result.owner());
+                    if(outcome==null)throw new SecurityException("Exact owner diagnostic outcome unavailable");
+                    reason=outcome.reason();
+                    if(outcome.hypotheticalClicks()!=0)throw new SecurityException("Diagnostic cannot create a fake selection");
+                }else reason="NATIVE_"+result.failure().name();
             }finally{Arrays.fill(argb,0);Arrays.fill(gray,(byte)0);}
-            if(outcome!=null&&(outcome.hypotheticalClicks()==1||outcome.status().equals("VISUAL_PREVIEW_ONLY"))){
-                stage="PUBLICATION";publish();stage=hypothetical==1?"MOCK_COMPLETE":"VISUAL_PREVIEW_ONLY";
+            if(diagnostic!=null){stage="PUBLICATION";publishDiagnostic();
+                stage=queries==LocalCardMockPlan.QUERIES?"DIAGNOSTIC_COMPLETE":"DIAGNOSTIC_PARTIAL";
             }else stage="HOLD";
         }catch(Exception failed){if(failed instanceof InterruptedException)Thread.currentThread().interrupt();stage=canceled.get()?"CANCELED":"HOLD";}
         catch(Error failed){unknown=true;stage="CLEANUP_UNKNOWN";}
         finally{workerReturned=true;closeImage();closeOnOwner();}
     }
-    private void publish()throws Exception{
+    private void publishDiagnostic()throws Exception{
         CountDownLatch done=new CountDownLatch(1);AtomicBoolean committed=new AtomicBoolean();appendActive.set(true);
         if(!main.post(()->{
             try{
                 boolean outer=activity.localCardMockPublish(this,()->{
-                    if(!current()||!nativeClosed()||outcome.x()<0||outcome.y()<0||image==null
-                            ||outcome.x()>=image.getWidth()||outcome.y()>=image.getHeight())return;
-                    byte[] bytes=null;var encoded=new WipingOutput();
-                    try{
-                        Canvas canvas=new Canvas(image);Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG);paint.setColor(Color.RED);paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(5);
-                        canvas.drawCircle(outcome.x(),outcome.y(),25,paint);canvas.drawLine(outcome.x()-36,outcome.y(),outcome.x()+36,outcome.y(),paint);canvas.drawLine(outcome.x(),outcome.y()-36,outcome.x(),outcome.y()+36,paint);
-                        paint.setStyle(Paint.Style.FILL);paint.setTextSize(28);canvas.drawText("1 - MOCK ONLY",Math.min(outcome.x()+45,image.getWidth()-270),Math.max(35,outcome.y()-25),paint);
-                        if(!image.compress(Bitmap.CompressFormat.PNG,100,encoded))return;bytes=encoded.toByteArray();
-                        LocalCardMockFiles.write(output,"MARKED.png",bytes);LocalCardMockFiles.write(output,"RESULT.json",manifest().getBytes(StandardCharsets.UTF_8));
-                        committed.set(true);
-                    }catch(Exception failed){/* Partial files remain local and unqualified. */}
-                    finally{if(bytes!=null)Arrays.fill(bytes,(byte)0);encoded.wipe();}
+                    if(!current()||!nativeClosed()||diagnostic==null)return;
+                    byte[] bytes=null;
+                    try{bytes=manifest().getBytes(StandardCharsets.UTF_8);
+                        LocalCardMockFiles.write(output,"DIAGNOSTICS.json",bytes);committed.set(true);
+                    }catch(Exception failed){/* Partial output stays local and unqualified. */}
+                    finally{if(bytes!=null)Arrays.fill(bytes,(byte)0);}
                 });
                 if(!outer||!current()||!nativeClosed())committed.set(false);
-                if(committed.get())marks=1;
+                if(committed.get())diagSaved=1;
             }finally{appendActive.set(false);done.countDown();if(workerReturned){closeImage();postOwner(this::closeOnOwner);}}
-        })){appendActive.set(false);throw new SecurityException("Local publication queue unavailable");}
+        })){appendActive.set(false);throw new SecurityException("Local diagnostic publication queue unavailable");}
         long left=Math.min(10000,deadline-SystemClock.elapsedRealtime());
-        if(left<=0||!done.await(left,TimeUnit.MILLISECONDS)){unknown=true;throw new SecurityException("Local publication unresolved");}
-        if(!committed.get())throw new SecurityException("Visible native mock publication rejected");
+        if(left<=0||!done.await(left,TimeUnit.MILLISECONDS)){unknown=true;throw new SecurityException("Diagnostic publication unresolved");}
+        if(!committed.get())throw new SecurityException("Visible diagnostic publication rejected");
     }
-    private String manifest(){return "{\"profile\":\"NATIVE_CARD_MOCK_V1\",\"mode\":\"ANDROID_NATIVE_OCR_ON_HISTORICAL_LOCAL_CROP\",\"inputSha256\":\""+LocalCardMockFiles.IMAGE_SHA
-            +"\",\"width\":1336,\"height\":588,\"coordinateSpace\":\"CROP_LOCAL_ONLY\",\"status\":\""+outcome.status()+"\",\"reason\":\""+outcome.reason()
-            +"\",\"x\":"+outcome.x()+",\"y\":"+outcome.y()+",\"day\":"+outcome.day()+",\"displayedPoints\":"+outcome.displayedPoints()+",\"confidence\":"+outcome.confidence()
-            +",\"ocrQueries\":"+queries+",\"nativeMs\":"+nativeMs+",\"hypotheticalClicks\":"+hypothetical+",\"realExecutions\":0,\"captures\":0,\"actionAuthority\":false,\"creditVerified\":false}\n";}
+    private String manifest(){return "{\"profile\":\"NATIVE_CARD_ROI_DIAG_V2\",\"mode\":\"ANDROID_NATIVE_DIAGNOSTIC_ON_HISTORICAL_LOCAL_CROP\",\"inputSha256\":\""+LocalCardMockFiles.IMAGE_SHA
+            +"\",\"width\":1336,\"height\":588,\"coordinateSpace\":\"CROP_LOCAL_ONLY\",\"reason\":\""+reason
+            +"\",\"nativeMs\":"+nativeMs+",\"report\":"+diagnostic.json()
+            +",\"hypotheticalClicks\":0,\"realExecutions\":0,\"captures\":0,\"actionAuthority\":false,\"rawTextIncluded\":false}\n";}
     private boolean nativeClosed(){var b=backend;if(b==null)return true;return cleanupConfirmed(b.snapshot());}
     static boolean cleanupConfirmed(OnceBackend.Result r){return r!=null&&r.terminal()&&(
             r.cleanup()==OnceBackend.Cleanup.CONFIRMED&&r.quiescence()==OnceBackend.Quiescence.CONFIRMED&&r.memory()==OnceBackend.Memory.WIPED
@@ -132,10 +128,9 @@ final class LocalCardMockRuntime {
         if(!resourcesClosed()){stage="CLEANUP_UNKNOWN";notifyFinished();return;}closed=true;root.releaseIfClosed();released=true;loop.quitSafely();notifyFinished();}
     private void notifyFinished(){if(notified)return;notified=true;String text=fixedSummary();main.post(()->activity.localCardMockFinished(this,text));}
     boolean finishedAndReleased(){return workerReturned&&closed&&released;}
-    String fixedSummary(){return "profile=NATIVE_CARD_MOCK_V1 stage="+stage+" terminal="+workerReturned+" released="+released+" cleanup="+(resourcesClosed()?"CONFIRMED":"UNKNOWN")
-            +" backendPhase="+backendPhase+" reason="+reason+" ocrQueries="+queries+" nativeMs="+nativeMs+" marks="+marks+" hypotheticalClicks="+hypothetical
-            +" realExecutions=0 taskTaps=0 captures=0 fullScreenCaptures=0 inputSource=HISTORICAL_LOCAL_CROP coordinateSpace=CROP_LOCAL_ONLY actionAuthority=false creditVerified=false rawDataUploaded=false artifacts="+(output==null?"NONE":output.getFileName().toString());}
-    private static final class WipingOutput extends ByteArrayOutputStream {void wipe(){Arrays.fill(buf,(byte)0);reset();}}
+    String fixedSummary(){return "profile=NATIVE_CARD_ROI_DIAG_V2 stage="+stage+" terminal="+workerReturned+" released="+released+" cleanup="+(resourcesClosed()?"CONFIRMED":"UNKNOWN")
+            +" backendPhase="+backendPhase+" reason="+reason+" diagSaved="+diagSaved+" ocrQueries="+queries+" nativeMs="+nativeMs+" marks="+marks+" hypotheticalClicks="+hypothetical
+            +" "+(diagnostic==null?"roiDiagnostic=UNAVAILABLE":diagnostic.summary())+" realExecutions=0 taskTaps=0 captures=0 fullScreenCaptures=0 inputSource=HISTORICAL_LOCAL_CROP coordinateSpace=CROP_LOCAL_ONLY actionAuthority=false creditVerified=false rawDataUploaded=false artifacts="+(output==null?"NONE":output.getFileName().toString());}
     private static final class StaticSource implements BackendPorts.FrameSource {
         private final byte[] gray;private final int w,h;private OnceBackend.Owner owner;private boolean returned,released;
         StaticSource(byte[] gray,int w,int h){this.gray=gray;this.w=w;this.h=h;}

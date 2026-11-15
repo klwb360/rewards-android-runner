@@ -50,7 +50,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
   }catch(RuntimeException rejected){
    if(localMockRun!=null)localMockRun.cancel();if(click!=null)click.invalidate();
    localMockFinished=true;terminalShown=true;terminalSnapshot=new TerminalSnapshot(true,false,"CURRENT_STATUS",false);
-   localMockHistory="profile=NATIVE_CARD_MOCK_V1 stage=START_REJECTED taskTaps=0 fullScreenCaptures=0 cleanup=NOT_CONFIRMED";
+   localMockHistory="profile=NATIVE_CARD_ROI_DIAG_V2 stage=START_REJECTED taskTaps=0 fullScreenCaptures=0 cleanup=NOT_CONFIRMED";
    LocalCardMockUi.status(this,localMockHistory,this::cancelAndFinish);
   }
  }

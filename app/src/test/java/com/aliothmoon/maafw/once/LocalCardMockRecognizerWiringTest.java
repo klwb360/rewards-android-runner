@@ -25,4 +25,23 @@ public class LocalCardMockRecognizerWiringTest {
         for(String bad:new String[]{"ReviewShizukuTapActor","ReviewShizukuPngBinding","screencap","RealCaptureClaim","input tap"})assertFalse(bad,plan.contains(bad));
         assertTrue(plan.contains("session.previewOnce()"));assertTrue(plan.contains("recognitionClaimed.compareAndSet(false,true)"));
     }
+    @Test public void perRoiDecodeMetadataIsRecordedBeforeRejectingTheDetail()throws Exception{
+        String text=source("MaaRecognizer"),read=section(text,"private void readStructure(","private void observeLive(");
+        assertTrue(read.indexOf("localCardRoiDiagnostics.decoded(activeLocalCardRoi,decoded)")<read.indexOf("need(decoded.transportAccepted())"));
+        assertTrue(read.contains("localCardRoiDiagnostics.rows(activeLocalCardRoi,rows)"));
+        String local=section(text,"private void refineLocalCardMock(","/** Run only after readStructure");
+        assertTrue(local.contains("localCardRoiDiagnostics.attempted(index)"));assertTrue(local.contains("localCardRoiDiagnostics.completed(index,status)"));
+        assertTrue(local.contains("batches.add(roiRows)"));assertFalse(local.contains("roiRows==null?java.util.List.of():roiRows"));
+        assertTrue(local.indexOf("localCardRoiDiagnostics.attempted(index)")<local.indexOf("api.MaaTaskerPostRecognition"));
+        String plan=source("LocalCardMockPlan");
+        assertTrue(plan.contains("if(batch==null)return hold(\"ROI_ROWS_UNAVAILABLE\",count)"));
+        assertTrue(plan.contains("if(batch.size()!=1)return hold(\"ROI_ROW_COUNT\",count)"));
+    }
+    @Test public void scalarDiagnosticGetterNeedsExactOwnerAndActualCleanReleaseButNotABusinessHit()throws Exception{
+        String text=source("MaaRecognizer"),getter=section(text,"synchronized LocalCardRoiDiagnostic.Report localCardRoiDiagnostic(","private BackendPorts.FrameView materialFrame;");
+        assertTrue(getter.contains("expected==owner&&returned&&complete&&!uncertain"));assertTrue(getter.contains("!observationStop.requested()"));
+        assertFalse(getter.contains("observation()!=null"));assertTrue(getter.contains("localCardRoiDiagnostics.snapshot()"));
+        String plan=source("LocalCardMockPlan");int diagnostic=plan.indexOf("if(diagnosticOnly)return new Outcome(\"DIAGNOSTIC_ONLY\"");
+        assertTrue(diagnostic>0&&diagnostic<plan.indexOf("new DailyCheckInRegion.Session(associated)"));
+    }
 }
