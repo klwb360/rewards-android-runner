@@ -47,7 +47,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
   }catch(RuntimeException rejected){
    if(cardRevealRuntime!=null)cardRevealRuntime.cancel();if(click!=null)click.invalidate();
    cardRevealFinished=true;terminalShown=true;terminalSnapshot=new TerminalSnapshot(true,false,"CURRENT_STATUS",false);
-   cardRevealHistory="profile=CARD_REVEAL_V1 stage=START_REJECTED taskTaps=0 fullScreenCaptures=0 cleanup=NOT_CONFIRMED";
+   cardRevealHistory="profile=CARD_REVEAL_V2 stage=START_REJECTED taskTaps=0 fullScreenCaptures=0 cleanup=NOT_CONFIRMED";
    CardRevealProbeUi.status(this,cardRevealHistory,this::cancelAndFinish);
   }
  }

@@ -9,7 +9,7 @@ import java.nio.file.attribute.BasicFileAttributes;
 
 /** Independent UI-only locate and one direct-region capture. Never reuses earlier records. */
 final class CardRevealProbeScope {
-    static final String DIRECTORY = "rewards-card-reveal-v1";
+    static final String DIRECTORY = "rewards-card-reveal-v2";
     static final int MAX_SWIPES = 8, MAX_UI_OBSERVATIONS = 24, MAX_CROPS = 1;
     static final long SESSION_TTL = 120_000L, UI_TTL = 9_000L;
 
@@ -53,7 +53,7 @@ final class CardRevealProbeScope {
         Object child = directory(dir); same(files, parent, dir, child);
         try (FileChannel c = FileChannel.open(dir.resolve(slot + ".burned"), StandardOpenOption.CREATE_NEW,
                 StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
-            ByteBuffer bytes = StandardCharsets.US_ASCII.encode("card-reveal-v1 slot=" + slot
+            ByteBuffer bytes = StandardCharsets.US_ASCII.encode("card-reveal-v2 slot=" + slot
                     + " maxUi=24 maxSwipes=8 maxRegionCaptures=1 fullScreenCaptures=0 taskTaps=0 ocr=0\n");
             while (bytes.hasRemaining()) if (c.write(bytes) <= 0) throw new IOException("Card reveal marker incomplete");
             c.force(true);

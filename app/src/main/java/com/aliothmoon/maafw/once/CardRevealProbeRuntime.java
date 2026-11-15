@@ -26,10 +26,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 
-/** One UI-only reveal sequence followed by one direct region capture. No OCR or task input. */
+/** One independent follow-up: a UI-clipped start must move before one direct region capture. */
 final class CardRevealProbeRuntime {
     enum Stage { NEW,HANDOFF,RUN_RECORD,UI_READ,SOURCE_UI_AFTER,TARGET,SCROLL_SOURCE,SCROLL,
-        STABILITY_WAIT,IMAGE_BEFORE,REGION_CAPTURE,IMAGE_AFTER,BOUNDARY,PUBLICATION,
+        START_NOT_CLIPPED,NO_SCROLL_MOVEMENT,STABILITY_WAIT,IMAGE_BEFORE,REGION_CAPTURE,IMAGE_AFTER,BOUNDARY,PUBLICATION,
         COMPLETE,HOLD,NO_DIRECTION,TOO_LARGE,BUDGET_STOP,CANCELED,CLEANUP_UNKNOWN }
     private final DormantCaptureConfirmationActivity activity;
     private final RealCaptureClaim.ProcessEpoch epoch;
@@ -49,11 +49,12 @@ final class CardRevealProbeRuntime {
     private volatile Stage stage=Stage.NEW,failedAt=Stage.NEW;
     private volatile String uiStatus="NONE",cropStatus="NONE",helperStatus="NONE",boundaryStatus="NONE";
     private volatile OverviewUiProtocol.ScrollHint scrollHint=OverviewUiProtocol.ScrollHint.UNKNOWN;
-    private volatile boolean workerReturned,closed,released,constructionUnknown,boundaryConfirmed;
+    private volatile boolean workerReturned,closed,released,constructionUnknown,boundaryConfirmed,initialClipped;
     private boolean notified;
     private int dispatches,swipes,qualifiedCrops,savedImages;
     private long firstScrollRequest=-1,stableAt=-1,revealMs=-1,cropMs=-1,boundaryMs=-1;
     private Path artifacts;
+    private Box initialCoarse;
 
     private CardRevealProbeRuntime(DormantCaptureConfirmationActivity activity,RealCaptureClaim.ProcessEpoch epoch,
             CardRevealProbeIntent intent,BingNavigationSnapshot.Shape shape){
@@ -77,6 +78,8 @@ final class CardRevealProbeRuntime {
         if(bounds.left!=0||bounds.top!=0||bounds.width()<=0||bounds.height()<=bounds.width()
                 ||bounds.width()>4096||bounds.height()>4096||(long)bounds.width()*bounds.height()>4L*1024*1024||display.getRotation()!=Surface.ROTATION_0)
             throw new SecurityException("Bounded portrait probe required");
+        if(bounds.width()!=1440||bounds.height()!=2560)
+            throw new SecurityException("Reviewed follow-up display geometry required");
         var run=new CardRevealProbeRuntime(activity,epoch,intent,new BingNavigationSnapshot.Shape(bounds.width(),bounds.height(),0));
         run.root=CaptureSessionRuntime.retainAlignment(run,intent.deadline(),run::latchCancel,run::closeOnOwner,()->run.closed,run::postOwner);
         try{
@@ -149,6 +152,11 @@ final class CardRevealProbeRuntime {
                     throw new SecurityException("UI source bracket rejected");
                 intent.finishUi(exact,true,true,SystemClock.elapsedRealtime());stage=Stage.TARGET;
                 var selected=CardRevealProbeTarget.select(report,shape.width(),shape.height());
+                if(exact.index==1){
+                    initialClipped=CardRevealProbeTarget.initialClipped(report,shape.width(),shape.height());
+                    if(!initialClipped){stage=Stage.START_NOT_CLIPPED;break;}
+                    for(var region:report.overview().regions())if(region.role()==OverviewUiRegions.Role.CHECK_IN)initialCoarse=region.coarse();
+                }
                 if(selected.state()==CardRevealProbeTarget.State.SCROLL){
                     if(intent.swipeCount()>=CardRevealProbeScope.MAX_SWIPES){stage=Stage.BUDGET_STOP;break;}
                     scroll(exact,selected.direction());previous=null;settle();continue;
@@ -158,7 +166,8 @@ final class CardRevealProbeRuntime {
                             :selected.state()==CardRevealProbeTarget.State.TOO_LARGE?Stage.TOO_LARGE:Stage.HOLD;break;
                 }
                 if(!selected.sameCandidate(previous)){previous=selected;stage=Stage.STABILITY_WAIT;settle();continue;}
-                stableAt=SystemClock.elapsedRealtime();revealMs=firstScrollRequest<0?0:stableAt-firstScrollRequest;
+                if(!initialClipped||swipes<1||dispatches<1||firstScrollRequest<0||selected.region().coarse().equals(initialCoarse)){stage=Stage.NO_SCROLL_MOVEMENT;break;}
+                stableAt=SystemClock.elapsedRealtime();revealMs=stableAt-firstScrollRequest;
                 capture(exact,report,before[0],beforeAt[0],afterUi,selected);break;
             }
             if(stage==Stage.UI_READ||stage==Stage.SCROLL||stage==Stage.STABILITY_WAIT)stage=Stage.BUDGET_STOP;
@@ -195,6 +204,7 @@ final class CardRevealProbeRuntime {
     private void capture(CardRevealProbeIntent.UiPermit exact,OverviewUiProtocol.Report report,
             BingNavigationSnapshot.Ready before,long beforeAt,BingNavigationSnapshot.Ready afterUi,
             CardRevealProbeTarget.Selection selected)throws Exception{
+        if(!initialClipped||swipes<1||dispatches<1||firstScrollRequest<0||revealMs<=0)throw new SecurityException("Actual reveal scroll required");
         stage=Stage.IMAGE_BEFORE;var imageBefore=readSource(UiImageAlignmentRuntime.MetadataStage.IMAGE_BEFORE);
         long lower=SystemClock.elapsedRealtime();
         BooleanSupplier fresh=()->observationCurrent(exact)&&CardRevealProbeSource.beforeCrop(report,before,beforeAt,afterUi,
@@ -240,7 +250,7 @@ final class CardRevealProbeRuntime {
             if(bitmap==null||bitmap.getWidth()!=roi.width()||bitmap.getHeight()!=roi.height())throw new SecurityException("Crop decode rejected");
             argb=new int[roi.width()*roi.height()];gray=new byte[argb.length];bitmap.getPixels(argb,0,roi.width(),0,0,roi.width(),roi.height());
             for(int i=0;i<argb.length;i++){int p=argb[i];gray[i]=(byte)((77*((p>>>16)&255)+150*((p>>>8)&255)+29*(p&255)+128)>>>8);}
-            var key=new RewardRegionGate.Key(RewardRegionGate.Source.REAL_DISPLAY_NATIVE,"card-reveal-v1",1,"CHECK_IN");
+            var key=new RewardRegionGate.Key(RewardRegionGate.Source.REAL_DISPLAY_NATIVE,"card-reveal-v2",1,"CHECK_IN");
             var geometry=DailyCheckInRegion.observeGray8(key,gray,roi.width(),roi.height(),stop);boundaryStatus=geometry.status().name();
             var heading=selected.region().heading();Box local=new Box(heading.left()-roi.left(),heading.top()-roi.top(),heading.right()-roi.left(),heading.bottom()-roi.top());
             int count=0;for(var surface:geometry.surfaces())if(surface.complete()&&surface.box().contains(local))count++;
@@ -273,11 +283,11 @@ final class CardRevealProbeRuntime {
         if(!published.get())throw new SecurityException("Crop publication rejected");
     }
     private String manifest(CardRevealProbeTarget.Selection selected){
-        Box b=selected.crop();return "{\"profile\":\"CARD_REVEAL_V1\",\"region\":\"CHECK_IN\",\"roi\":["+b.left()+","+b.top()+","+b.right()+","+b.bottom()
+        Box b=selected.crop();return "{\"profile\":\"CARD_REVEAL_V2\",\"region\":\"CHECK_IN\",\"roi\":["+b.left()+","+b.top()+","+b.right()+","+b.bottom()
                 +"],\"width\":"+b.width()+",\"height\":"+b.height()+",\"timingLabel\":\"UI_CONFIRMED_FULL_REVEAL\",\"revealMs\":"+revealMs
                 +",\"cropMs\":"+cropMs+",\"boundaryMs\":"+boundaryMs+",\"fullCardBoundaryConfirmed\":"+boundaryConfirmed
                 +",\"boundaryStatus\":\""+boundaryStatus+"\",\"sourceBracketQualified\":true,\"publicationRequiresTerminalQualifiedCrops\":1"
-                +",\"swipes\":"+swipes+",\"fullScreenCaptures\":0,\"taskTaps\":0,\"ocrQueries\":0,\"taskCompletion\":\"NOT_EVALUATED\"}\n";
+                +",\"initialClipped\":"+initialClipped+",\"initialEvidence\":\"UI_GEOMETRY\",\"swipes\":"+swipes+",\"fullScreenCaptures\":0,\"taskTaps\":0,\"ocrQueries\":0,\"taskCompletion\":\"NOT_EVALUATED\"}\n";
     }
     private void writeFile(String name,byte[] bytes)throws Exception{
         var before=Files.readAttributes(artifacts,BasicFileAttributes.class,LinkOption.NOFOLLOW_LINKS);
@@ -309,10 +319,10 @@ final class CardRevealProbeRuntime {
     }
     private void notifyFinished(){if(notified)return;notified=true;String details=fixedSummary();activity.runOnUiThread(()->activity.cardRevealFinished(this,details));}
     boolean finishedAndReleased(){return workerReturned&&closed&&released;}
-    String fixedSummary(){return "profile=CARD_REVEAL_V1 stage="+stage+" failedAt="+failedAt+" terminal="+workerReturned+" released="+released
+    String fixedSummary(){return "profile=CARD_REVEAL_V2 stage="+stage+" failedAt="+failedAt+" terminal="+workerReturned+" released="+released
             +" cleanup="+(allResourcesClosed()?"CONFIRMED":"UNKNOWN")+" uiObservations="+intent.uiCount()+" scrollSlotsSpent="+intent.swipeCount()
             +" scrollDispatchAttempts="+dispatches+" swipes="+swipes+" cropAttempts="+(intent.cropSpent()?1:0)+" qualifiedCrops="+qualifiedCrops+" savedImages="+savedImages
-            +" revealMs="+revealMs+" cropMs="+cropMs+" boundaryMs="+boundaryMs+" fullCardBoundary="+boundaryConfirmed
+            +" initialClipped="+initialClipped+" initialEvidence=UI_GEOMETRY revealMs="+revealMs+" cropMs="+cropMs+" boundaryMs="+boundaryMs+" fullCardBoundary="+boundaryConfirmed
             +" timingLabel=UI_CONFIRMED_FULL_REVEAL uiStatus="+uiStatus+" cropStatus="+cropStatus+" helperStatus="+helperStatus+" boundaryStatus="+boundaryStatus
             +" lastScrollHint="+scrollHint+" maxUi=24 maxSwipes=8 maxCrops=1 fullScreenCaptures=0 taskTaps=0 back=0 textEntry=0 ocrQueries=0"
             +" actionAuthority=false taskCompletion=NOT_EVALUATED rawDataUploaded=false artifacts="+(artifacts==null?"NONE":artifacts.getFileName().toString());}
