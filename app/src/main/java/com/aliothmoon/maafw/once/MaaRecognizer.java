@@ -198,6 +198,23 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
     }
     static MaaRecognizer liveCheckIn(Context context){MaaRecognizer r=new MaaRecognizer(context);r.liveCheckin=true;return r;}
     synchronized String liveCheckInSummary(OnceBackend.Owner expected){return expected==owner && observation()!=null?liveSummary:null;}
+    private RemainingCardPlan.Plan remainingCardPlan;
+    private RemainingCardPlan.Outcome remainingCardResult;
+    private RemainingCardRoiDiagnostic remainingCardDiagnostics;
+    private int activeRemainingCardRoi=-1;
+    /** One same-run committed crop. Every native query is bounded to a preplanned small ROI. */
+    static MaaRecognizer remainingCardMock(Context context,RemainingCardPlan.Plan plan){
+        if(plan==null||!plan.claimRecognition())throw new IllegalArgumentException("One admitted remaining card plan required");
+        MaaRecognizer recognizer=new MaaRecognizer(context);recognizer.remainingCardPlan=plan;
+        recognizer.remainingCardDiagnostics=new RemainingCardRoiDiagnostic(plan);return recognizer;
+    }
+    synchronized RemainingCardPlan.Outcome remainingCardOutcome(OnceBackend.Owner expected){
+        return expected!=null&&expected==owner&&returned&&observation()!=null?remainingCardResult:null;
+    }
+    synchronized RemainingCardRoiDiagnostic.Report remainingCardDiagnostic(OnceBackend.Owner expected){
+        return expected!=null&&expected==owner&&returned&&complete&&!uncertain&&remainingCardDiagnostics!=null
+                &&observationStop!=null&&!observationStop.requested()?remainingCardDiagnostics.snapshot():null;
+    }
     private LocalCardMockPlan.Plan localCardMockPlan;
     private LocalCardMockPlan.Outcome localCardMockResult;
     private LocalCardRoiDiagnostic localCardRoiDiagnostics;
@@ -329,6 +346,13 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             frameWidth=frame.width();frameHeight=frame.height();perception.frame(frameWidth,frameHeight);
             if (materialKind != null || liveCheckin) materialFrame = frame;
             structureBinding=new FrameStructureEvidence.Binding(this,own,structureEpoch,structureFrame);
+            if(remainingCardPlan!=null){
+                refineRemainingCardMock(frame,stop);
+                provisional=RewardsObservation.classify(false,false,false,false);
+                checkStop(stop);recognized=true;
+                return new BackendPorts.Recognition(own,remainingCardResult!=null
+                        &&remainingCardResult.status().equals("PREVIEW_ONLY"));
+            }
             if(localCardMockPlan!=null){
                 refineLocalCardMock(frame,stop);
                 provisional=RewardsObservation.classify(false,false,false,false);
@@ -388,6 +412,7 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             materialRows = null; roiRows = null; readingLabelRoi = false;
             if (!recognized || stop.requested()) provisional=null;
             if (!recognized || stop.requested()) localCardMockResult=null;
+            if (!recognized || stop.requested()) remainingCardResult=null;
             if (!recognized || stop.requested()) materialObservation=null;
             if (!recognized || stop.requested()) nativeCardObservation=null;
             if (!recognized || stop.requested()) nativePreparedObservation=null;
@@ -502,12 +527,14 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
     }
     private void readStructure(long reco,boolean matched) throws IOException {
         if(readingLabelRoi&&activeLocalCardRoi>=0&&localCardRoiDiagnostics!=null)localCardRoiDiagnostics.detailStarted(activeLocalCardRoi);
+        if(readingLabelRoi&&activeRemainingCardRoi>=0&&remainingCardDiagnostics!=null)remainingCardDiagnostics.detailStarted(activeRemainingCardRoi);
         waiting(CleanupEvidence.Item.OCR_DETAIL_CLEAR_DESTROY);
         detailBuffer=api.MaaStringBufferCreate();need(detailBuffer!=null);
         need(api.MaaTaskerGetRecognitionDetail(tasker,reco,null,null,new ByteByReference(),null,detailBuffer,null,null)!=0);
         long size=api.MaaStringBufferSize(detailBuffer);
         if(size<=0||size>65536){
-            if(readingLabelRoi&&activeLocalCardRoi>=0&&localCardRoiDiagnostics!=null)localCardRoiDiagnostics.sizeRejected(activeLocalCardRoi);
+            if(readingLabelRoi&&activeLocalCardRoi>=0&&localCardRoiDiagnostics!=null){localCardRoiDiagnostics.sizeRejected(activeLocalCardRoi);}
+            if(readingLabelRoi&&activeRemainingCardRoi>=0&&remainingCardDiagnostics!=null){remainingCardDiagnostics.sizeRejected(activeRemainingCardRoi);}
             perception.sizeRejected(size);throw new IOException();
         }
         Pointer ptr=api.MaaStringBufferGet(detailBuffer);need(ptr!=null);
@@ -516,6 +543,7 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             OcrDetailDecoder.Result decoded=OcrDetailDecoder.decode(bytes,structureBinding,frameWidth,frameHeight,
                     readingLabelRoi ? this::observeRoiRows : liveCheckin ? this::observeLive : materialKind == null ? null : this::observeMaterial);
             if(readingLabelRoi&&activeLocalCardRoi>=0&&localCardRoiDiagnostics!=null)localCardRoiDiagnostics.decoded(activeLocalCardRoi,decoded);
+            if(readingLabelRoi&&activeRemainingCardRoi>=0&&remainingCardDiagnostics!=null)remainingCardDiagnostics.decoded(activeRemainingCardRoi,decoded);
             if (!readingLabelRoi) perception.decoded(decoded);
             need(decoded.transportAccepted());
             // Empty all[] is a valid no-text non-match, never a matching page.
@@ -528,6 +556,7 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
     private void observeRoiRows(java.util.List<FrameStructureEvidence.Line> rows){
         roiRows=rows;
         if(activeLocalCardRoi>=0&&localCardRoiDiagnostics!=null)localCardRoiDiagnostics.rows(activeLocalCardRoi,rows);
+        if(activeRemainingCardRoi>=0&&remainingCardDiagnostics!=null)remainingCardDiagnostics.rows(activeRemainingCardRoi,rows);
     }
     private void observeLive(java.util.List<FrameStructureEvidence.Line> rows) {
         if(imageAuditEnabled)imageAudit.observeRows(rows);
@@ -553,6 +582,31 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             }
             liveSummary=LiveCheckInObservation.observe(gray,frameWidth,frameHeight,rows,observationStop::requested);
         } finally {Arrays.fill(gray,(byte)0);}
+    }
+    private void refineRemainingCardMock(BackendPorts.FrameView frame,BackendPorts.StopSignal stop)throws Exception{
+        checkStop(stop);need(remainingCardPlan!=null&&remainingCardPlan.admitted());
+        byte[] gray=new byte[frameWidth*frameHeight];
+        var batches=new java.util.ArrayList<java.util.List<FrameStructureEvidence.Line>>();
+        try{
+            for(int at=0;at<gray.length;at+=4096){checkStop(stop);frame.copyGrayRange(at,gray,at,Math.min(4096,gray.length-at));}
+            need(remainingCardPlan.matchesGray8(gray,frameWidth,frameHeight,stop::requested));
+            int index=0;
+            for(var roi:remainingCardPlan.rois()){
+                checkStop(stop);need(roi.left()>=0&&roi.top()>=0&&roi.right()<=frameWidth&&roi.bottom()<=frameHeight
+                        &&roi.width()>0&&roi.height()>0);
+                taskQuiet=false;waiting(CleanupEvidence.Item.TASKER_RUNNING_FALSE);lastTaskStatus=0;taskId=0;
+                String params="{\"expected\":[\".+\"],\"threshold\":0.3,\"only_rec\":false,\"roi\":["
+                        +roi.left()+","+roi.top()+","+roi.width()+","+roi.height()+"]}";
+                activeRemainingCardRoi=index;remainingCardDiagnostics.attempted(index);
+                taskId=api.MaaTaskerPostRecognition(tasker,"OCR",params,image);need(taskId>0);stage=Stage.TASK_POSTED;
+                remainingCardDiagnostics.posted(index);
+                int status=awaitTask(stop);remainingCardDiagnostics.completed(index,status);checkStop(stop);roiRows=null;readingLabelRoi=true;
+                try{detail(status,true);}finally{readingLabelRoi=false;}
+                // Null means the validated callback withheld rows, not a native empty all[].
+                batches.add(roiRows);roiRows=null;activeRemainingCardRoi=-1;index++;checkStop(stop);
+            }
+            remainingCardResult=remainingCardPlan.finish(batches,stop::requested);checkStop(stop);
+        }finally{Arrays.fill(gray,(byte)0);batches.clear();roiRows=null;readingLabelRoi=false;activeRemainingCardRoi=-1;remainingCardPlan=null;}
     }
     /** Cropped-image-only OCR: all returned boxes already include the ROI origin.
      * No text, score or box is rewritten, and no full-image query is posted in this mode. */

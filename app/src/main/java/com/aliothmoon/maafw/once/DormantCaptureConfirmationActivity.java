@@ -73,16 +73,28 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  private volatile CardRevealProbeRuntime cardRevealRuntime;
  private Object cardRevealOwner;
  private boolean cardRevealSelected,cardRevealSpent;
+ private RemainingCardChoice remainingCardSelection,approvedRemainingCardChoice;
+ RemainingCardChoice cardRevealChoice(){return approvedRemainingCardChoice;}
+ RemainingCardChoice remainingCardSelection(){return remainingCardSelection;}
  private volatile boolean cardRevealFinished;
  private volatile String cardRevealHistory;
  boolean cardRevealSelected(){return cardRevealSelected;}
  boolean cardRevealApprovalMatches(Object owner,LiveClick incoming){
   return cardRevealSelected&&cardRevealSpent&&!cardRevealFinished&&owner!=null&&owner==cardRevealOwner
-    &&incoming!=null&&incoming==click&&isResumedForApproval();
+    &&approvedRemainingCardChoice==remainingCardSelection&&incoming!=null&&incoming==click&&isResumedForApproval();
+ }
+ private void openRemainingCardChoice(){
+  if(consumed||cardRevealSpent||localMockSpent||alignmentSpent||overviewSpent||!isResumedForApproval())return;
+  RemainingCardsUi.choose(this,this::selectRemainingCard,this::cancelAndFinish);
+ }
+ private void selectRemainingCard(RemainingCardChoice choice){
+  if(choice==null||consumed||cardRevealSpent||localMockSpent||alignmentSpent||overviewSpent||!isResumedForApproval())return;
+  remainingCardSelection=choice;approvedRemainingCardChoice=null;
+  cardRevealSelected=true;localMockSelected=false;alignmentSelected=false;overviewSelected=false;showCardRevealChoice();
  }
  private void openCardRevealChoice(){
   if(consumed||cardRevealSpent||alignmentSpent||overviewSpent||!isResumedForApproval())return;
-  cardRevealSelected=true;alignmentSelected=false;overviewSelected=false;showCardRevealChoice();
+  remainingCardSelection=null;approvedRemainingCardChoice=null;cardRevealSelected=true;alignmentSelected=false;overviewSelected=false;showCardRevealChoice();
  }
  private void showCardRevealChoice(){
   if(destroyed||isFinishing()||isDestroyed())return;
@@ -92,6 +104,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  private void confirmCardReveal(){
   if(consumed||cardRevealSpent||!cardRevealSelected||!isResumedForApproval())return;
   cardRevealSpent=true;consumed=true;terminalShown=false;cardRevealOwner=new Object();click=new LiveClick(this);
+  approvedRemainingCardChoice=remainingCardSelection;
   terminalSnapshot=new TerminalSnapshot(false,false,"CURRENT_STATUS",false);
   try{
    if(!NativeCheckInSession.permissionReady())throw new SecurityException("Existing permission unavailable");
@@ -100,7 +113,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
   }catch(RuntimeException rejected){
    if(cardRevealRuntime!=null)cardRevealRuntime.cancel();if(click!=null)click.invalidate();
    cardRevealFinished=true;terminalShown=true;terminalSnapshot=new TerminalSnapshot(true,false,"CURRENT_STATUS",false);
-   cardRevealHistory="profile=CARD_NATIVE_CHAIN_V1 stage=START_REJECTED taskTaps=0 fullScreenCaptures=0 cleanup=NOT_CONFIRMED";
+   cardRevealHistory="profile="+(approvedRemainingCardChoice==null?"CARD_NATIVE_CHAIN_V1":"REMAINING_CARDS_V1 choice="+approvedRemainingCardChoice.key())+" stage=START_REJECTED taskTaps=0 fullScreenCaptures=0 cleanup=NOT_CONFIRMED";
    CardRevealProbeUi.status(this,cardRevealHistory,this::cancelAndFinish);
   }
  }
@@ -708,7 +721,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  @Override protected void onCreate(Bundle state){
   super.onCreate(state);
   if(state!=null || android.os.Process.myUid()<10000 || !Application.getProcessName().equals(getPackageName()+":capture_once")) {finish();return;}
-  if(OwnStateSummaryUi.ACTIVE){OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.TITLE_TIMING),this::openOverviewChoice,this::openCardRevealChoice,this::openLocalCardMockChoice);return;}
+  if(OwnStateSummaryUi.ACTIVE){OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.TITLE_TIMING),this::openOverviewChoice,this::openCardRevealChoice,this::openLocalCardMockChoice,this::openRemainingCardChoice);return;}
   installed=BingPackageMetadata.read(getPackageManager());
   if(!CaptureReleaseGate.configured()){showNavigation();return;}
   rikka.shizuku.Shizuku.addRequestPermissionResultListener(permissionListener);
@@ -735,7 +748,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  }
  private void summaryRejected(){terminalShown=true;terminalSnapshot=new TerminalSnapshot(true,false,"OWN_STATE",false);OwnStateSummaryUi.rejected(this,this::cancelAndFinish);}
  private void showCaptureChoices(){
-  if(OwnStateSummaryUi.ACTIVE){if(!consumed){if(localMockSelected)showLocalCardMockChoice();else if(cardRevealSelected)showCardRevealChoice();else if(overviewSelected)showOverviewChoice();else if(alignmentSelected)showAlignmentChoice();else OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.TITLE_TIMING),this::openOverviewChoice,this::openCardRevealChoice,this::openLocalCardMockChoice);}return;}
+  if(OwnStateSummaryUi.ACTIVE){if(!consumed){if(localMockSelected)showLocalCardMockChoice();else if(cardRevealSelected)showCardRevealChoice();else if(overviewSelected)showOverviewChoice();else if(alignmentSelected)showAlignmentChoice();else OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.TITLE_TIMING),this::openOverviewChoice,this::openCardRevealChoice,this::openLocalCardMockChoice,this::openRemainingCardChoice);}return;}
   boolean ready=false;
   try{
    ready=rikka.shizuku.Shizuku.pingBinder()&&!rikka.shizuku.Shizuku.isPreV11()

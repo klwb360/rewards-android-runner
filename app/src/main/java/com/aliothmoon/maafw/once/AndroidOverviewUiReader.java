@@ -51,9 +51,24 @@ final class AndroidOverviewUiReader {
             @Override public boolean claim(long now) { return permit.claimReader(now); }
         });
     }
+    /** Same one-use UI observation capability, with a separate scalar-only card envelope. */
+    static Result readRemainingCards(Context context,String nonce,long absoluteDeadline,BooleanSupplier current,
+            DispatchGate finalGate,CardRevealProbeIntent.UiPermit permit){
+        BooleanSupplier boundedCurrent=current==null||permit==null?null
+                :()->permit.current(SystemClock.elapsedRealtime())&&current.getAsBoolean();
+        return readBound(context,nonce,permit==null?absoluteDeadline:Math.min(absoluteDeadline,permit.deadline),
+                boundedCurrent,finalGate,permit==null?null:new ReadPermit(){
+            @Override public boolean live(){return permit.intent.live();}
+            @Override public boolean claim(long now){return permit.claimReader(now);}
+        },true);
+    }
     private interface ReadPermit { boolean live(); boolean claim(long now); }
     private static Result readBound(Context context, String nonce, long absoluteDeadline, BooleanSupplier current,
             DispatchGate finalGate, ReadPermit permit) {
+        return readBound(context,nonce,absoluteDeadline,current,finalGate,permit,false);
+    }
+    private static Result readBound(Context context,String nonce,long absoluteDeadline,BooleanSupplier current,
+            DispatchGate finalGate,ReadPermit permit,boolean cardsMode){
         byte[] bytes = new byte[OverviewUiProtocol.MAX_LINE + 1];
         IRemoteProcess process = null;
         InputStream input = null;
@@ -75,7 +90,7 @@ final class AndroidOverviewUiReader {
             if (binder == null || !binder.isBinderAlive()) throw new Stop(status);
             var service = IShizukuService.Stub.asInterface(binder);
             if (service == null) throw new Stop(status);
-            String[] command = {"/system/bin/app_process", "-cp", apk, "/system/bin", HELPER, nonce, Long.toString(deadline), "OVERVIEW_V5"};
+            String[] command = {"/system/bin/app_process", "-cp", apk, "/system/bin", HELPER, nonce, Long.toString(deadline), cardsMode?"OVERVIEW_CARDS_V1":"OVERVIEW_V5"};
             if (!authority(context) || !live(current, deadline)) throw new Stop(status);
             if (!permit.claim(SystemClock.elapsedRealtime())) throw new Stop(FixedStatus.ALREADY_CLAIMED);
             status = FixedStatus.GATE_REJECTED;
@@ -123,8 +138,9 @@ final class AndroidOverviewUiReader {
             // Require one complete ASCII frame and reject diagnostics, trailing bytes and extra lines.
             if (!validFrame(bytes, count)) throw new Stop(FixedStatus.PROTOCOL_REJECTED);
             try {
-                report = OverviewUiProtocol.parse(new String(bytes,0,count-1,StandardCharsets.US_ASCII),
-                        nonce,dispatched,deadline,SystemClock.elapsedRealtime());
+                String frame=new String(bytes,0,count-1,StandardCharsets.US_ASCII);
+                report=cardsMode?OverviewUiProtocol.parseRemaining(frame,nonce,dispatched,deadline,SystemClock.elapsedRealtime())
+                        :OverviewUiProtocol.parse(frame,nonce,dispatched,deadline,SystemClock.elapsedRealtime());
             } catch (RuntimeException invalid) { throw new Stop(FixedStatus.PROTOCOL_REJECTED); }
             status = FixedStatus.READ_COMPLETE;
         } catch (Stop stopped) {

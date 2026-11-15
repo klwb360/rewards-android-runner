@@ -3,12 +3,13 @@ package com.aliothmoon.maafw.once;
 import com.aliothmoon.maafw.rewards.RewardRegionLocator.Box;
 import java.util.ArrayList;
 
-/** Independent scalar-only overview envelope. The existing UIS1-5 grammar stays unchanged. */
+/** Independent scalar-only overview envelopes. OVR1 and the existing UIS grammars stay unchanged. */
 final class OverviewUiProtocol {
     static final int MAX_LINE = 8192;
     enum ScrollHint { UNKNOWN, DECLARED_FORWARD, DECLARED_BACKWARD, DECLARED_BOTH, DECLARED_NONE }
     record Report(NativeUiStructureProtocol.Report source, OverviewUiRegions.Result overview,
-                  ScrollHint scrollHint) {
+                  ScrollHint scrollHint, RemainingCardUi.Result cards) {
+        Report(NativeUiStructureProtocol.Report source,OverviewUiRegions.Result overview,ScrollHint scrollHint){this(source,overview,scrollHint,null);}
         Report {
             if (source == null || overview == null || scrollHint == null || source.readiness() == null
                     || source.structureBound() || source.fieldDiagnostics() != null || source.regions() != null
@@ -22,15 +23,25 @@ final class OverviewUiProtocol {
                 Box frame = new Box(source.left(),source.top(),source.right(),source.bottom());
                 if (!frame.equals(overview.viewport())) throw invalid();
             }
+            if(cards!=null){
+                if((!sourceReady||overview.status()!=OverviewUiRegions.Status.OBSERVED)&&cards.status()==RemainingCardUi.Status.OBSERVED)throw invalid();
+                for(var item:cards.items()){
+                    if(overview.viewport()==null||!overview.viewport().contains(item.coarse()))throw invalid();
+                    OverviewUiRegions.Region parent=null;
+                    for(var region:overview.regions())if(region.role()==item.role())parent=region;
+                    if(parent==null||!parent.coarse().contains(item.coarse()))throw invalid();
+                }
+            }
         }
         boolean qualified() {
             return source.qualified() && !source.readiness().blocked()
-                    && overview.status() == OverviewUiRegions.Status.OBSERVED;
+                    && overview.status() == OverviewUiRegions.Status.OBSERVED
+                    && (cards==null||cards.status()==RemainingCardUi.Status.OBSERVED);
         }
     }
 
     static String encode(Report report) {
-        StringBuilder out=new StringBuilder("OVR1|").append(NativeUiStructureProtocol.encode(report.source()))
+        StringBuilder out=new StringBuilder(report.cards()==null?"OVR1|":"OVR2|").append(NativeUiStructureProtocol.encode(report.source()))
                 .append("|OV|").append(report.overview().status()).append('|').append(report.scrollHint());
         appendBox(out,report.overview().viewport());
         out.append('|').append(report.overview().regions().size());
@@ -39,16 +50,32 @@ final class OverviewUiProtocol {
             appendBox(out,region.counter());out.append('|').append(region.completeVisible()?1:0)
                     .append('|').append(region.current()).append('|').append(region.target());
         }
+        if(report.cards()!=null){
+            var cards=report.cards();out.append("|CARDS|").append(cards.status()).append('|').append(cards.dailyCount())
+                    .append('|').append(cards.moreCount()).append('|').append(cards.items().size());
+            for(var item:cards.items()){
+                out.append('|').append(item.role()).append('|').append(item.index());appendBox(out,item.coarse());
+                appendBox(out,item.title());appendBox(out,item.reward());out.append('|').append(item.completeVisible()?1:0);
+            }
+        }
         if(out.length()>MAX_LINE)throw invalid();
         return out.toString();
     }
+    /** Historical callers accept OVR1 only, even if an OVR2 frame otherwise looks qualified. */
     static Report parse(String line,String nonce,long dispatched,long deadline,long now) {
-        if(line==null||line.length()>MAX_LINE||!line.startsWith("OVR1|UIS2|")
+        return parseVersion(line,nonce,dispatched,deadline,now,false);
+    }
+    static Report parseRemaining(String line,String nonce,long dispatched,long deadline,long now) {
+        return parseVersion(line,nonce,dispatched,deadline,now,true);
+    }
+    private static Report parseVersion(String line,String nonce,long dispatched,long deadline,long now,boolean cardsMode) {
+        if(line==null||line.length()>MAX_LINE||!line.startsWith(cardsMode?"OVR2|UIS2|":"OVR1|UIS2|")
                 ||!line.matches("[A-Z0-9a-f_|-]+"))throw invalid();
-        int marker=line.indexOf("|OV|",5);
-        if(marker<0||marker!=line.lastIndexOf("|OV|"))throw invalid();
+        int marker=line.indexOf("|OV|",5),cardMarker=line.indexOf("|CARDS|",5);
+        if(marker<0||marker!=line.lastIndexOf("|OV|")||cardsMode!=(cardMarker>=0)
+                ||cardMarker!=line.lastIndexOf("|CARDS|")||cardsMode&&cardMarker<=marker)throw invalid();
         var source=NativeUiStructureProtocol.parse(line.substring(5,marker),nonce,dispatched,deadline,now,true);
-        String[] fields=line.substring(marker+4).split("\\|",-1);
+        String[] fields=line.substring(marker+4,cardsMode?cardMarker:line.length()).split("\\|",-1);
         if(fields.length<7)throw invalid();
         try {
             var status=OverviewUiRegions.Status.valueOf(fields[0]);
@@ -62,7 +89,18 @@ final class OverviewUiProtocol {
                 regions.add(new OverviewUiRegions.Region(role,box(fields,at+1,false),box(fields,at+5,true),
                         box(fields,at+9,true),visible==1,integer(fields[at+14]),integer(fields[at+15])));
             }
-            var result=new Report(source,new OverviewUiRegions.Result(status,viewport,regions),scroll);
+            RemainingCardUi.Result cards=null;
+            if(cardsMode){
+                var c=line.substring(cardMarker+7).split("\\|",-1);if(c.length<4)throw invalid();
+                var cs=RemainingCardUi.Status.valueOf(c[0]);int daily=integer(c[1]),more=integer(c[2]),n=integer(c[3]);
+                if(n<0||n>16||c.length!=4+n*15)throw invalid();var items=new ArrayList<RemainingCardUi.Item>();
+                for(int i=0;i<n;i++){
+                    int at=4+i*15;int visible=integer(c[at+14]);if(visible!=0&&visible!=1)throw invalid();
+                    items.add(new RemainingCardUi.Item(OverviewUiRegions.Role.valueOf(c[at]),integer(c[at+1]),box(c,at+2,false),box(c,at+6,true),box(c,at+10,true),visible==1));
+                }
+                cards=new RemainingCardUi.Result(cs,daily,more,items);
+            }
+            var result=new Report(source,new OverviewUiRegions.Result(status,viewport,regions),scroll,cards);
             if(!encode(result).equals(line))throw invalid();
             return result;
         } catch(IllegalArgumentException|ArithmeticException rejected) {throw invalid();}
