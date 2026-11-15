@@ -30,7 +30,7 @@ import java.util.function.BooleanSupplier;
 final class CardRevealProbeRuntime {
     enum Stage { NEW,HANDOFF,RUN_RECORD,UI_READ,SOURCE_UI_AFTER,TARGET,SCROLL_SOURCE,SCROLL,
         START_NOT_CLIPPED,NO_SCROLL_MOVEMENT,STABILITY_WAIT,IMAGE_BEFORE,REGION_CAPTURE,IMAGE_AFTER,BOUNDARY,PUBLICATION,
-        COMPLETE,HOLD,NO_DIRECTION,TOO_LARGE,BUDGET_STOP,CANCELED,CLEANUP_UNKNOWN }
+        COMPLETE,OCR,PUBLISH_OCR,MOCK_COMPLETE,HOLD,NO_DIRECTION,TOO_LARGE,BUDGET_STOP,CANCELED,CLEANUP_UNKNOWN }
     private final DormantCaptureConfirmationActivity activity;
     private final RealCaptureClaim.ProcessEpoch epoch;
     private final CardRevealProbeIntent intent;
@@ -55,6 +55,12 @@ final class CardRevealProbeRuntime {
     private long firstScrollRequest=-1,stableAt=-1,revealMs=-1,cropMs=-1,boundaryMs=-1;
     private Path artifacts;
     private Box initialCoarse;
+    private volatile CardNativeMockProcessor mockProcessor;
+    private LocalCardMockPlan.Outcome mockOutcome;
+    private LocalCardRoiDiagnostic.Report diagnostic;
+    private String captureSha="NONE",ocrReason="NOT_STARTED",backendPhase="NONE";
+    private int cropWidth,cropHeight,ocrQueries,diagSaved,marks,hypotheticalClicks;
+    private long nativeOcrMs=-1;
 
     private CardRevealProbeRuntime(DormantCaptureConfirmationActivity activity,RealCaptureClaim.ProcessEpoch epoch,
             CardRevealProbeIntent intent,BingNavigationSnapshot.Shape shape){
@@ -97,7 +103,7 @@ final class CardRevealProbeRuntime {
             try{requireSession();if(!postOwner(this::run))cancel();}catch(RuntimeException rejected){cancel();}
         },this::cancel);}catch(RuntimeException rejected){cancel();}
     }
-    private boolean sessionCurrent(){return !canceled.get()&&root!=null&&root.current()&&intent.current(SystemClock.elapsedRealtime());}
+    private boolean sessionCurrent(){return !constructionUnknown&&!workerReturned&&!canceled.get()&&root!=null&&root.current()&&intent.current(SystemClock.elapsedRealtime());}
     private void requireSession(){if(!sessionCurrent())throw new SecurityException("Card reveal expired or revoked");}
     private boolean hiddenCurrent(){return sessionCurrent()&&activity.rootHiddenScalar()&&activity.hiddenWithSoleTask();}
     private boolean observationCurrent(CardRevealProbeIntent.UiPermit exact){
@@ -222,7 +228,7 @@ final class CardRevealProbeRuntime {
                 });
         cropMs=SystemClock.elapsedRealtime()-started;cropStatus=cropRead.status().name();
         helperStatus=cropRead.helperStatus()==null?"NONE":cropRead.helperStatus().name();
-        byte[] png=cropRead.png();boolean transferred=false;
+        byte[] png=cropRead.png(),nativePng=null;boolean transferred=false;
         try{
             if(!cropRead.knownClean()||cropRead.status()!=AndroidCardRegionCapture.FixedStatus.CAPTURED||png==null)
                 throw new SecurityException("Direct crop unavailable");
@@ -233,11 +239,33 @@ final class CardRevealProbeRuntime {
             if(!qualified.getAsBoolean())throw new SecurityException("Crop source-after rejected");
             stage=Stage.BOUNDARY;long checking=SystemClock.elapsedRealtime();
             boundaryConfirmed=checkBoundary(png,selected,()->!qualified.getAsBoolean());boundaryMs=SystemClock.elapsedRealtime()-checking;
+            cropWidth=selected.crop().width();cropHeight=selected.crop().height();captureSha=LocalCardMockFiles.sha(png);
+            if(boundaryConfirmed)nativePng=png.clone();
             stage=Stage.PUBLICATION;
-            // publish owns and wipes the byte array even if its queued callback outlives the wait.
+            // publish owns and wipes the original, including callbacks that outlive the wait.
             transferred=true;publish(png,selected,qualified);
-            stage=boundaryConfirmed?Stage.COMPLETE:Stage.HOLD;
-        }finally{if(!transferred&&png!=null)Arrays.fill(png,(byte)0);}
+            if(!boundaryConfirmed){stage=Stage.HOLD;return;}
+            if(qualifiedCrops!=1||savedImages!=1||nativePng==null||!nativeResourcesClosed()||!hiddenCurrent())
+                throw new SecurityException("Exact published complete crop required before OCR");
+            // The source bracket is sealed at capture. This image grants no live action authority.
+            var receipt=CardNativeMockReceipt.seal(this,captureSha,cropWidth,cropHeight);
+            CardRevealProbeScope.burnOcr(activity.getNoBackupFilesDir().toPath());
+            stage=Stage.OCR;mockProcessor=new CardNativeMockProcessor(activity,receipt,this,nativePng,this::hiddenCurrent);
+            mockProcessor.run();ocrReason=mockProcessor.reason();backendPhase=mockProcessor.backendPhase();
+            nativeOcrMs=mockProcessor.nativeMs();ocrQueries=mockProcessor.queries();
+            diagnostic=mockProcessor.diagnostic();mockOutcome=mockProcessor.outcome();
+            byte[] marked=mockProcessor.takeMarkedPng();mockProcessor.close();boolean markedTransferred=false;
+            try{
+                if(!mockProcessor.knownClean())throw new SecurityException("Native crop OCR cleanup unconfirmed");
+                requireSession();if(!hiddenCurrent())throw new SecurityException("Captured crop owner no longer current");
+                hypotheticalClicks=mockOutcome==null?0:mockOutcome.hypotheticalClicks();
+                if(hypotheticalClicks<0||hypotheticalClicks>1||mockOutcome!=null&&mockOutcome.realExecutions()!=0)
+                    throw new SecurityException("One fake receipt only");
+                if(diagnostic==null){stage=Stage.HOLD;return;}
+                stage=Stage.PUBLISH_OCR;markedTransferred=true;publishNative(marked);
+                stage=marks==1&&hypotheticalClicks==1?Stage.MOCK_COMPLETE:Stage.HOLD;
+            }finally{if(!markedTransferred&&marked!=null)Arrays.fill(marked,(byte)0);}
+        }finally{if(!transferred&&png!=null)Arrays.fill(png,(byte)0);if(nativePng!=null)Arrays.fill(nativePng,(byte)0);}
     }
     private boolean checkBoundary(byte[] png,CardRevealProbeTarget.Selection selected,BooleanSupplier stop){
         Bitmap bitmap=null;int[] argb=null;byte[] gray=null;
@@ -250,7 +278,7 @@ final class CardRevealProbeRuntime {
             if(bitmap==null||bitmap.getWidth()!=roi.width()||bitmap.getHeight()!=roi.height())throw new SecurityException("Crop decode rejected");
             argb=new int[roi.width()*roi.height()];gray=new byte[argb.length];bitmap.getPixels(argb,0,roi.width(),0,0,roi.width(),roi.height());
             for(int i=0;i<argb.length;i++){int p=argb[i];gray[i]=(byte)((77*((p>>>16)&255)+150*((p>>>8)&255)+29*(p&255)+128)>>>8);}
-            var key=new RewardRegionGate.Key(RewardRegionGate.Source.REAL_DISPLAY_NATIVE,"card-reveal-v2",1,"CHECK_IN");
+            var key=new RewardRegionGate.Key(RewardRegionGate.Source.REAL_DISPLAY_NATIVE,"card-native-chain-v1",1,"CHECK_IN");
             var geometry=DailyCheckInRegion.observeGray8(key,gray,roi.width(),roi.height(),stop);boundaryStatus=geometry.status().name();
             var heading=selected.region().heading();Box local=new Box(heading.left()-roi.left(),heading.top()-roi.top(),heading.right()-roi.left(),heading.bottom()-roi.top());
             int count=0;for(var surface:geometry.surfaces())if(surface.complete()&&surface.box().contains(local))count++;
@@ -270,7 +298,9 @@ final class CardRevealProbeRuntime {
                 AtomicBoolean written=new AtomicBoolean();
                 boolean outer=activity.cardRevealPublish(this,()->{
                     if(!qualified.getAsBoolean()||!nativeResourcesClosed()||!metadata.alignmentPublicationAuthorityMatches(shape))return;
-                    try{writeFile("CHECK_IN.png",png);writeFile("RESULT.json",manifest(selected).getBytes(StandardCharsets.UTF_8));written.set(true);}
+                    try{writeFile("CHECK_IN.png",png);
+                        if(!qualified.getAsBoolean()||!nativeResourcesClosed()||!metadata.alignmentPublicationAuthorityMatches(shape))return;
+                        writeFile("CAPTURE.json",manifest(selected).getBytes(StandardCharsets.UTF_8));written.set(true);}
                     catch(Exception failed){/* Partial files remain local and unqualified. */}
                 });
                 if(outer&&written.get()&&qualified.getAsBoolean()&&nativeResourcesClosed()&&metadata.alignmentPublicationAuthorityMatches(shape)){
@@ -279,15 +309,56 @@ final class CardRevealProbeRuntime {
             }finally{Arrays.fill(png,(byte)0);appendActive.set(false);done.countDown();if(workerReturned)postOwner(this::closeOnOwner);}
         })){appendActive.set(false);Arrays.fill(png,(byte)0);throw new SecurityException("Crop publication queue unavailable");}
         long left=Math.min(10000,intent.deadline()-SystemClock.elapsedRealtime());
-        if(left<=0||!done.await(left,TimeUnit.MILLISECONDS)){constructionUnknown=true;throw new SecurityException("Crop publication unresolved");}
+        if(left<=0||!done.await(left,TimeUnit.MILLISECONDS)){constructionUnknown=true;latchCancel();throw new SecurityException("Crop publication unresolved");}
         if(!published.get())throw new SecurityException("Crop publication rejected");
     }
-    private String manifest(CardRevealProbeTarget.Selection selected){
-        Box b=selected.crop();return "{\"profile\":\"CARD_REVEAL_V2\",\"region\":\"CHECK_IN\",\"roi\":["+b.left()+","+b.top()+","+b.right()+","+b.bottom()
-                +"],\"width\":"+b.width()+",\"height\":"+b.height()+",\"timingLabel\":\"UI_CONFIRMED_FULL_REVEAL\",\"revealMs\":"+revealMs
-                +",\"cropMs\":"+cropMs+",\"boundaryMs\":"+boundaryMs+",\"fullCardBoundaryConfirmed\":"+boundaryConfirmed
-                +",\"boundaryStatus\":\""+boundaryStatus+"\",\"sourceBracketQualified\":true,\"publicationRequiresTerminalQualifiedCrops\":1"
-                +",\"initialClipped\":"+initialClipped+",\"initialEvidence\":\"UI_GEOMETRY\",\"swipes\":"+swipes+",\"fullScreenCaptures\":0,\"taskTaps\":0,\"ocrQueries\":0,\"taskCompletion\":\"NOT_EVALUATED\"}\n";
+    private String manifest(CardRevealProbeTarget.Selection selected)throws org.json.JSONException{
+        Box b=selected.crop();return new org.json.JSONObject().put("profile","CARD_NATIVE_CHAIN_V1").put("region","CHECK_IN")
+                .put("roi",new org.json.JSONArray().put(b.left()).put(b.top()).put(b.right()).put(b.bottom()))
+                .put("width",b.width()).put("height",b.height()).put("inputSha256",captureSha).put("captureSource","REAL_DIRECT_CROP").put("freshDisplayAuthority",false)
+                .put("timingLabel","UI_CONFIRMED_FULL_REVEAL").put("revealMs",revealMs).put("cropMs",cropMs).put("boundaryMs",boundaryMs)
+                .put("fullCardBoundaryConfirmed",boundaryConfirmed).put("boundaryStatus",boundaryStatus).put("sourceBracketQualified",true)
+                .put("publicationRequiresTerminalQualifiedCrops",1).put("initialClipped",initialClipped).put("initialEvidence","UI_GEOMETRY")
+                .put("swipes",swipes).put("fullScreenCaptures",0).put("taskTaps",0).put("ocrQueries",0).put("taskCompletion","NOT_EVALUATED").toString();
+    }
+    private void publishNative(byte[] marked)throws Exception{
+        CountDownLatch done=new CountDownLatch(1);AtomicBoolean published=new AtomicBoolean(),pointWritten=new AtomicBoolean();appendActive.set(true);
+        if(!main.post(()->{
+            try{
+                AtomicBoolean written=new AtomicBoolean();
+                boolean outer=activity.cardRevealPublish(this,()->{
+                    if(!hiddenCurrent()||!nativeResourcesClosed()||qualifiedCrops!=1||!boundaryConfirmed||diagnostic==null)return;
+                    try{
+                        writeFile("DIAGNOSTICS.json",diagnosticManifest().getBytes(StandardCharsets.UTF_8));written.set(true);
+                        if(marked==null||mockOutcome==null||hypotheticalClicks!=1||!mockOutcome.status().equals("PREVIEW_ONLY"))return;
+                        if(!hiddenCurrent()||!nativeResourcesClosed())return;
+                        writeFile("MARKED.png",marked);
+                        if(!hiddenCurrent()||!nativeResourcesClosed())return;
+                        writeFile("RESULT.json",pointManifest().getBytes(StandardCharsets.UTF_8));pointWritten.set(true);
+                    }catch(Exception failed){/* Partial files remain local and are not qualified. */}
+                });
+                if(outer&&written.get()&&hiddenCurrent()&&nativeResourcesClosed()){
+                    diagSaved=1;if(pointWritten.get())marks=1;published.set(true);
+                }
+            }finally{if(marked!=null)Arrays.fill(marked,(byte)0);appendActive.set(false);done.countDown();if(workerReturned)postOwner(this::closeOnOwner);}
+        })){appendActive.set(false);if(marked!=null)Arrays.fill(marked,(byte)0);throw new SecurityException("Native publication queue unavailable");}
+        long left=Math.min(10000,intent.deadline()-SystemClock.elapsedRealtime());
+        if(left<=0||!done.await(left,TimeUnit.MILLISECONDS)){constructionUnknown=true;latchCancel();throw new SecurityException("Native publication unresolved");}
+        if(!published.get())throw new SecurityException("Native publication rejected");
+    }
+    private org.json.JSONObject nativeManifest()throws org.json.JSONException{
+        return new org.json.JSONObject().put("profile","CARD_NATIVE_CHAIN_V1").put("mode","ANDROID_NATIVE_OCR_ON_SEALED_CURRENT_RUN_CROP")
+                .put("inputSha256",captureSha).put("width",cropWidth).put("height",cropHeight).put("coordinateSpace","CROP_LOCAL_ONLY")
+                .put("captureSource","REAL_DIRECT_CROP").put("sourceBracketQualifiedAtCapture",true).put("freshDisplayAuthority",false)
+                .put("nativeMs",nativeOcrMs).put("hypotheticalClicks",hypotheticalClicks).put("realExecutions",0).put("captures",1).put("actionAuthority",false);
+    }
+    private String diagnosticManifest()throws org.json.JSONException{
+        return nativeManifest().put("reason",ocrReason).put("report",new org.json.JSONObject(diagnostic.json())).put("rawTextIncluded",false).toString();
+    }
+    private String pointManifest()throws org.json.JSONException{
+        return nativeManifest().put("status",mockOutcome.status()).put("reason",mockOutcome.reason())
+                .put("x",mockOutcome.x()).put("y",mockOutcome.y()).put("day",mockOutcome.day()).put("displayedPoints",mockOutcome.displayedPoints())
+                .put("confidence",mockOutcome.confidence()).put("ocrQueries",ocrQueries).put("creditVerified",false).toString();
     }
     private void writeFile(String name,byte[] bytes)throws Exception{
         var before=Files.readAttributes(artifacts,BasicFileAttributes.class,LinkOption.NOFOLLOW_LINKS);
@@ -307,9 +378,10 @@ final class CardRevealProbeRuntime {
     }
     private boolean nativeResourcesClosed(){return !constructionUnknown&&AndroidOverviewUiReader.processKnownClean()
             &&AndroidUiStructureReader.processKnownClean()&&ReviewBingNavigation.knownClean()&&AndroidCardRegionCapture.knownClean()
-            &&(uiRead==null||uiRead.knownClean())&&(cropRead==null||cropRead.knownClean());}
+            &&(uiRead==null||uiRead.knownClean())&&(cropRead==null||cropRead.knownClean())
+            &&(mockProcessor==null||mockProcessor.knownClean());}
     private boolean allResourcesClosed(){return nativeResourcesClosed()&&!appendActive.get();}
-    private void latchCancel(){canceled.set(true);intent.cancel();activity.clearPendingHandoff();}
+    private void latchCancel(){canceled.set(true);intent.cancel();var nativeRun=mockProcessor;if(nativeRun!=null)nativeRun.cancel();activity.clearPendingHandoff();}
     void cancel(){if(root!=null)root.request();else latchCancel();}
     private void closeOnOwner(){
         if(!workerStarted.get()&&canceled.get()){workerReturned=true;stage=Stage.CANCELED;}
@@ -319,11 +391,12 @@ final class CardRevealProbeRuntime {
     }
     private void notifyFinished(){if(notified)return;notified=true;String details=fixedSummary();activity.runOnUiThread(()->activity.cardRevealFinished(this,details));}
     boolean finishedAndReleased(){return workerReturned&&closed&&released;}
-    String fixedSummary(){return "profile=CARD_REVEAL_V2 stage="+stage+" failedAt="+failedAt+" terminal="+workerReturned+" released="+released
+    String fixedSummary(){return "profile=CARD_NATIVE_CHAIN_V1 stage="+stage+" failedAt="+failedAt+" terminal="+workerReturned+" released="+released
             +" cleanup="+(allResourcesClosed()?"CONFIRMED":"UNKNOWN")+" uiObservations="+intent.uiCount()+" scrollSlotsSpent="+intent.swipeCount()
             +" scrollDispatchAttempts="+dispatches+" swipes="+swipes+" cropAttempts="+(intent.cropSpent()?1:0)+" qualifiedCrops="+qualifiedCrops+" savedImages="+savedImages
             +" initialClipped="+initialClipped+" initialEvidence=UI_GEOMETRY revealMs="+revealMs+" cropMs="+cropMs+" boundaryMs="+boundaryMs+" fullCardBoundary="+boundaryConfirmed
             +" timingLabel=UI_CONFIRMED_FULL_REVEAL uiStatus="+uiStatus+" cropStatus="+cropStatus+" helperStatus="+helperStatus+" boundaryStatus="+boundaryStatus
-            +" lastScrollHint="+scrollHint+" maxUi=24 maxSwipes=8 maxCrops=1 fullScreenCaptures=0 taskTaps=0 back=0 textEntry=0 ocrQueries=0"
-            +" actionAuthority=false taskCompletion=NOT_EVALUATED rawDataUploaded=false artifacts="+(artifacts==null?"NONE":artifacts.getFileName().toString());}
+            +" lastScrollHint="+scrollHint+" maxUi=24 maxSwipes=8 maxCrops=1 fullScreenCaptures=0 taskTaps=0 back=0 textEntry=0"
+            +" ocrQueries="+ocrQueries+" nativeOcrMs="+nativeOcrMs+" ocrReason="+ocrReason+" backendPhase="+backendPhase+" diagSaved="+diagSaved+" marks="+marks+" hypotheticalClicks="+hypotheticalClicks+" realExecutions=0 captureSha256="+captureSha+" cropWidth="+cropWidth+" cropHeight="+cropHeight+" "+(diagnostic==null?"roiDiagnostic=UNAVAILABLE":diagnostic.summary())
+            +" captureSource=REAL_DIRECT_CROP coordinateSpace=CROP_LOCAL_ONLY freshDisplayAuthority=false actionAuthority=false taskCompletion=NOT_EVALUATED rawDataUploaded=false artifacts="+(artifacts==null?"NONE":artifacts.getFileName().toString());}
 }
