@@ -35,6 +35,25 @@ final class AndroidOverviewUiReader {
 
     static Result read(Context context, String nonce, long absoluteDeadline, BooleanSupplier current,
             DispatchGate finalGate, OverviewScanIntent.FramePermit permit) {
+        return readBound(context, nonce, absoluteDeadline, current, finalGate, permit == null ? null : new ReadPermit() {
+            @Override public boolean live() { return permit.live; }
+            @Override public boolean claim(long now) { return permit.claimUi(now); }
+        });
+    }
+    /** Separate UI-only probe authority. It cannot stand in for an overview image frame. */
+    static Result readCardReveal(Context context, String nonce, long absoluteDeadline, BooleanSupplier current,
+            DispatchGate finalGate, CardRevealProbeIntent.UiPermit permit) {
+        BooleanSupplier boundedCurrent = current == null || permit == null ? null
+                : () -> permit.current(SystemClock.elapsedRealtime()) && current.getAsBoolean();
+        return readBound(context, nonce, permit == null ? absoluteDeadline : Math.min(absoluteDeadline, permit.deadline),
+                boundedCurrent, finalGate, permit == null ? null : new ReadPermit() {
+            @Override public boolean live() { return permit.intent.live(); }
+            @Override public boolean claim(long now) { return permit.claimReader(now); }
+        });
+    }
+    private interface ReadPermit { boolean live(); boolean claim(long now); }
+    private static Result readBound(Context context, String nonce, long absoluteDeadline, BooleanSupplier current,
+            DispatchGate finalGate, ReadPermit permit) {
         byte[] bytes = new byte[OverviewUiProtocol.MAX_LINE + 1];
         IRemoteProcess process = null;
         InputStream input = null;
@@ -47,7 +66,7 @@ final class AndroidOverviewUiReader {
         long deadline = Math.min(absoluteDeadline, started + 9000);
         try {
             if (context == null || current == null || finalGate == null
-                    || !NativeUiStructureProtocol.validNonce(nonce) || deadline <= started || permit == null || !permit.live)
+                    || !NativeUiStructureProtocol.validNonce(nonce) || deadline <= started || permit == null || !permit.live())
                 throw new Stop(FixedStatus.INVALID_REQUEST);
             if (!authority(context) || !live(current, deadline)) throw new Stop(status);
             String apk = verifiedApk(context);
@@ -58,7 +77,7 @@ final class AndroidOverviewUiReader {
             if (service == null) throw new Stop(status);
             String[] command = {"/system/bin/app_process", "-cp", apk, "/system/bin", HELPER, nonce, Long.toString(deadline), "OVERVIEW_V5"};
             if (!authority(context) || !live(current, deadline)) throw new Stop(status);
-            if (!permit.claimUi(SystemClock.elapsedRealtime())) throw new Stop(FixedStatus.ALREADY_CLAIMED);
+            if (!permit.claim(SystemClock.elapsedRealtime())) throw new Stop(FixedStatus.ALREADY_CLAIMED);
             status = FixedStatus.GATE_REJECTED;
             // The root gate atomically persists the durable UI_READ burn and rechecks its epoch.
             // Only local freshness and cached binder checks follow this gate; no new authority read.

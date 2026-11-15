@@ -17,6 +17,55 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  private volatile RootReturnReadIntent returnReadIntent;
  private volatile UiImageAlignmentRuntime alignmentRuntime;
  private volatile OverviewScanRuntime overviewRuntime;
+ private volatile CardRevealProbeRuntime cardRevealRuntime;
+ private Object cardRevealOwner;
+ private boolean cardRevealSelected,cardRevealSpent;
+ private volatile boolean cardRevealFinished;
+ private volatile String cardRevealHistory;
+ boolean cardRevealSelected(){return cardRevealSelected;}
+ boolean cardRevealApprovalMatches(Object owner,LiveClick incoming){
+  return cardRevealSelected&&cardRevealSpent&&!cardRevealFinished&&owner!=null&&owner==cardRevealOwner
+    &&incoming!=null&&incoming==click&&isResumedForApproval();
+ }
+ private void openCardRevealChoice(){
+  if(consumed||cardRevealSpent||alignmentSpent||overviewSpent||!isResumedForApproval())return;
+  cardRevealSelected=true;alignmentSelected=false;overviewSelected=false;showCardRevealChoice();
+ }
+ private void showCardRevealChoice(){
+  if(destroyed||isFinishing()||isDestroyed())return;
+  CardRevealProbeUi.choice(this,NativeCheckInSession.permissionReady()&&!consumed&&!cardRevealSpent
+    &&isResumedForApproval(),this::confirmCardReveal,this::cancelAndFinish);
+ }
+ private void confirmCardReveal(){
+  if(consumed||cardRevealSpent||!cardRevealSelected||!isResumedForApproval())return;
+  cardRevealSpent=true;consumed=true;terminalShown=false;cardRevealOwner=new Object();click=new LiveClick(this);
+  terminalSnapshot=new TerminalSnapshot(false,false,"CURRENT_STATUS",false);
+  try{
+   if(!NativeCheckInSession.permissionReady())throw new SecurityException("Existing permission unavailable");
+   CardRevealProbeUi.running(this,this::cancelAndFinish);
+   cardRevealRuntime=CardRevealProbeRuntime.start(this,click,cardRevealOwner);
+  }catch(RuntimeException rejected){
+   if(cardRevealRuntime!=null)cardRevealRuntime.cancel();if(click!=null)click.invalidate();
+   cardRevealFinished=true;terminalShown=true;terminalSnapshot=new TerminalSnapshot(true,false,"CURRENT_STATUS",false);
+   cardRevealHistory="profile=CARD_REVEAL_V1 stage=START_REJECTED taskTaps=0 fullScreenCaptures=0 cleanup=NOT_CONFIRMED";
+   CardRevealProbeUi.status(this,cardRevealHistory,this::cancelAndFinish);
+  }
+ }
+ boolean cardRevealPublish(CardRevealProbeRuntime exact,Runnable append){
+  if(android.os.Looper.myLooper()!=android.os.Looper.getMainLooper()||exact==null||exact!=cardRevealRuntime
+    ||cardRevealFinished||destroyed||isFinishing()||isDestroyed()||append==null
+    ||!rootHiddenScalar()||!hiddenWithSoleTask())return false;
+  return ReviewVisibilityProvider.FENCE.publish(visibilityLease,append);
+ }
+ void cardRevealFinished(CardRevealProbeRuntime exact,String details){
+  if(exact==null)return;
+  if(!stageDeadlines.post(()->{
+   if(exact!=cardRevealRuntime||cardRevealFinished){exact.cancel();return;}
+   cardRevealHistory=CaptureSessionRuntime.boundedRootScalars(details==null?"cardReveal=UNQUALIFIED":details,8000);
+   cardRevealFinished=true;terminalShown=true;terminalSnapshot=new TerminalSnapshot(true,false,"CURRENT_STATUS",false);
+   if(!destroyed&&!isFinishing()&&!isDestroyed())CardRevealProbeUi.status(this,cardRevealHistory,this::cancelAndFinish);
+  }))exact.cancel();
+ }
  private Object overviewOwner;
  private boolean overviewSelected,overviewSpent;
  private volatile boolean overviewFinished;
@@ -44,7 +93,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
    OverviewReviewUi.running(this,this::cancelAndFinish);
    overviewRuntime=OverviewScanRuntime.start(this,click,overviewOwner);
   }catch(RuntimeException rejected){
-   if(overviewRuntime!=null)overviewRuntime.cancel();if(click!=null)click.invalidate();
+   if(cardRevealRuntime!=null)cardRevealRuntime.cancel();if(overviewRuntime!=null)overviewRuntime.cancel();if(click!=null)click.invalidate();
    overviewFinished=true;terminalShown=true;terminalSnapshot=new TerminalSnapshot(true,false,"CURRENT_STATUS",false);
    overviewHistory="overview=UNQUALIFIED stage=START_REJECTED taskTaps=0 actionAuthority=false";
    OverviewReviewUi.status(this,overviewHistory,this::cancelAndFinish);
@@ -527,6 +576,9 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
   NativeRewardCardRun card=cardRun;
   long remaining=run!=null&&run.finishedAndReleased()?(autonomousRun!=null?autonomousRun.remainingForAfterMillis():readOnlyRun!=null?readOnlyRun.remainingForAfterMillis():card!=null?card.remainingForAfterMillis():session!=null?session.remainingForAfterMillis():0):0;
   writer.println(value.line(remaining));
+  CardRevealProbeRuntime probe=cardRevealRuntime;
+  writer.println("RewardsCardRevealRelease present="+(probe!=null)+" released="+(probe!=null&&probe.finishedAndReleased()));
+  if(cardRevealFinished&&cardRevealHistory!=null)writer.println("RewardsCardRevealDiagnostic version=1 "+CaptureSessionRuntime.boundedRootScalars(cardRevealHistory.replace('\n',' '),8000));
   OverviewScanRuntime overview=overviewRuntime;
   writer.println("RewardsOverviewRelease present="+(overview!=null)+" released="+(overview!=null&&overview.finishedAndReleased()));
   if(overviewFinished&&overviewHistory!=null)writer.println("RewardsOverviewDiagnostic version=1 "+CaptureSessionRuntime.boundedRootScalars(overviewHistory.replace('\n',' '),8000));
@@ -600,7 +652,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  @Override protected void onCreate(Bundle state){
   super.onCreate(state);
   if(state!=null || android.os.Process.myUid()<10000 || !Application.getProcessName().equals(getPackageName()+":capture_once")) {finish();return;}
-  if(OwnStateSummaryUi.ACTIVE){OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.TITLE_TIMING),this::openOverviewChoice);return;}
+  if(OwnStateSummaryUi.ACTIVE){OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.TITLE_TIMING),this::openOverviewChoice,this::openCardRevealChoice);return;}
   installed=BingPackageMetadata.read(getPackageManager());
   if(!CaptureReleaseGate.configured()){showNavigation();return;}
   rikka.shizuku.Shizuku.addRequestPermissionResultListener(permissionListener);
@@ -627,7 +679,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  }
  private void summaryRejected(){terminalShown=true;terminalSnapshot=new TerminalSnapshot(true,false,"OWN_STATE",false);OwnStateSummaryUi.rejected(this,this::cancelAndFinish);}
  private void showCaptureChoices(){
-  if(OwnStateSummaryUi.ACTIVE){if(!consumed){if(overviewSelected)showOverviewChoice();else if(alignmentSelected)showAlignmentChoice();else OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.TITLE_TIMING),this::openOverviewChoice);}return;}
+  if(OwnStateSummaryUi.ACTIVE){if(!consumed){if(cardRevealSelected)showCardRevealChoice();else if(overviewSelected)showOverviewChoice();else if(alignmentSelected)showAlignmentChoice();else OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.TITLE_TIMING),this::openOverviewChoice,this::openCardRevealChoice);}return;}
   boolean ready=false;
   try{
    ready=rikka.shizuku.Shizuku.pingBinder()&&!rikka.shizuku.Shizuku.isPreV11()
@@ -821,7 +873,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
   showStatus("等待 Android 系统同意。授权窗口从本次明确确认起最长 90 秒；超时只请求取消，不证明清理完成。",false);
   try {runtime=CaptureSessionRuntime.start(this,click,purpose);}catch(RuntimeException denied){click.invalidate();showStatus("无法开始本次识别（系统版本、进程或显示尺寸不受支持）。未获得可用结果；不能重试或恢复本次授权。",true);}
  }
- private void cancelAndFinish(){if(overviewRuntime!=null)overviewRuntime.cancel();if(alignmentRuntime!=null)alignmentRuntime.cancel();if(returnReadIntent!=null)returnReadIntent.cancel();if(boundedIntent!=null)boundedIntent.cancel();if(seriesIntent!=null)seriesIntent.cancel();if(rootIntent!=null)rootIntent.cancel();if(autonomousRoute!=null)autonomousRoute.cancel();if(autonomousRun!=null)autonomousRun.cancel();stageDeadlines.removeCallbacksAndMessages(null);if(readOnlyRun!=null)readOnlyRun.cancel();if(cardRun!=null)cardRun.cancel();if(nativeSession!=null)nativeSession.cancel();if(click!=null)click.invalidate();if(runtime!=null)runtime.cancel();finish();}
+ private void cancelAndFinish(){if(cardRevealRuntime!=null)cardRevealRuntime.cancel();if(overviewRuntime!=null)overviewRuntime.cancel();if(alignmentRuntime!=null)alignmentRuntime.cancel();if(returnReadIntent!=null)returnReadIntent.cancel();if(boundedIntent!=null)boundedIntent.cancel();if(seriesIntent!=null)seriesIntent.cancel();if(rootIntent!=null)rootIntent.cancel();if(autonomousRoute!=null)autonomousRoute.cancel();if(autonomousRun!=null)autonomousRun.cancel();stageDeadlines.removeCallbacksAndMessages(null);if(readOnlyRun!=null)readOnlyRun.cancel();if(cardRun!=null)cardRun.cancel();if(nativeSession!=null)nativeSession.cancel();if(click!=null)click.invalidate();if(runtime!=null)runtime.cancel();finish();}
  /** Only ordinary superclass UI state may be saved. This route registers no
   * ActivityResultRegistry launcher: legacy request codes stay below 65536.
   * Never save the click, request, grant, pending consent Intent or runtime. */
@@ -834,10 +886,15 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  void clearPendingHandoff(){pendingHandoff.set(null);} // Scalar only, safe on deadline thread.
  private void tryHandoff(){if(isResumedForApproval()){
   Runnable action=pendingHandoff.getAndSet(null);if(action==null)return;
-  try{action.run();}catch(RuntimeException failure){if(overviewRuntime!=null)overviewRuntime.cancel();if(alignmentRuntime!=null)alignmentRuntime.cancel();if(runtime!=null)runtime.cancel();}
+  try{action.run();}catch(RuntimeException failure){if(cardRevealRuntime!=null)cardRevealRuntime.cancel();if(overviewRuntime!=null)overviewRuntime.cancel();if(alignmentRuntime!=null)alignmentRuntime.cancel();if(runtime!=null)runtime.cancel();}
  }}
  boolean hiddenWithSoleTask(){return handoff.hiddenWithSoleTask() && ReviewVisibilityProvider.FENCE.valid(visibilityLease);}
  @Override protected void onStart(){super.onStart();handoff.onStart();
+  if(cardRevealSpent){
+   if(cardRevealRuntime!=null&&!cardRevealFinished)cardRevealRuntime.cancel();
+   if(cardRevealFinished)CardRevealProbeUi.status(this,cardRevealHistory,this::cancelAndFinish);
+   return;
+  }
   if(overviewSpent){
    if(overviewRuntime!=null&&!overviewFinished)overviewRuntime.cancel();
    if(overviewFinished)OverviewReviewUi.status(this,overviewHistory,this::cancelAndFinish);
@@ -900,5 +957,5 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  @Override protected void onResume(){super.onResume();resumed=true;handoff.onResume();tryHandoff();tryAutomaticAfter();if(!CaptureReleaseGate.configured())showNavigation();else if(!consumed)showCaptureChoices();}
  @Override protected void onPause(){ownStateCancelled=true;resumed=false;handoff.onPause();super.onPause();}
  @Override protected void onActivityResult(int code,int result,Intent data){super.onActivityResult(code,result,data);if(runtime!=null)runtime.onActivityResult(code,result,data);}
- @Override protected void onDestroy(){if(overviewRuntime!=null)overviewRuntime.cancel();if(alignmentRuntime!=null)alignmentRuntime.cancel();if(returnReadIntent!=null)returnReadIntent.cancel();if(seriesIntent!=null)seriesIntent.cancel();if(rootIntent!=null)rootIntent.cancel();rikka.shizuku.Shizuku.removeRequestPermissionResultListener(permissionListener);if(autonomousRoute!=null)autonomousRoute.cancel();if(autonomousRun!=null)autonomousRun.cancel();stageDeadlines.removeCallbacksAndMessages(null);if(readOnlyRun!=null)readOnlyRun.cancel();if(cardRun!=null)cardRun.cancel();if(nativeSession!=null)nativeSession.cancel();destroyed=true;if(boundedIntent!=null)boundedIntent.cancel();resumed=false;clearPendingHandoff();handoff.onDestroy();if(click!=null)click.invalidate();if(runtime!=null)runtime.cancel();super.onDestroy();}
+ @Override protected void onDestroy(){if(cardRevealRuntime!=null)cardRevealRuntime.cancel();if(overviewRuntime!=null)overviewRuntime.cancel();if(alignmentRuntime!=null)alignmentRuntime.cancel();if(returnReadIntent!=null)returnReadIntent.cancel();if(seriesIntent!=null)seriesIntent.cancel();if(rootIntent!=null)rootIntent.cancel();rikka.shizuku.Shizuku.removeRequestPermissionResultListener(permissionListener);if(autonomousRoute!=null)autonomousRoute.cancel();if(autonomousRun!=null)autonomousRun.cancel();stageDeadlines.removeCallbacksAndMessages(null);if(readOnlyRun!=null)readOnlyRun.cancel();if(cardRun!=null)cardRun.cancel();if(nativeSession!=null)nativeSession.cancel();destroyed=true;if(boundedIntent!=null)boundedIntent.cancel();resumed=false;clearPendingHandoff();handoff.onDestroy();if(click!=null)click.invalidate();if(runtime!=null)runtime.cancel();super.onDestroy();}
 }
