@@ -125,15 +125,10 @@ final class LocalCardMockPlan {
         if(title.overlaps(ring))return denied("TITLE_RING_OVERLAP",width,height);
         int ix=Math.max(2,(int)Math.ceil(.20*ring.width())),iy=Math.max(2,(int)Math.ceil(.20*ring.height()));
         Box number=new Box(ring.left()+ix,ring.top()+iy,ring.right()-ix,ring.bottom()-iy);
+        var columns=CheckInCoinColumns.locate(argb,width,height,panel,ring,canceled);
+        if(!columns.ready())return denied(stopped(canceled)?"CANCELED":columns.status(),width,height);
         List<Box> rois=new ArrayList<>();rois.add(title);rois.add(number);
-        Box band=new Box(panel.left(),panel.top()+(int)Math.ceil(.72*panel.height()),panel.right(),panel.bottom());
-        int dy=(int)Math.ceil(.10*band.height());
-        for(int day=0;day<7;day++){
-            int left=band.left()+band.width()*day/7,right=band.left()+band.width()*(day+1)/7;
-            int dx=(int)Math.ceil(.15*(right-left));
-            rois.add(new Box(Math.max(band.left(),left-dx),Math.max(panel.top(),band.top()-dy),
-                    Math.min(band.right(),right+dx),band.bottom()));
-        }
+        rois.addAll(columns.dayRois());
         for(Box roi:rois)if(roi.width()<4||roi.height()<4||!panel.contains(roi))return denied("INVALID_ROI_GEOMETRY",width,height);
         if(stopped(canceled))return denied("CANCELED",width,height);
         return new Plan(geometry,panel,ring,rois,"READY",width,height,diagnosticOnly);

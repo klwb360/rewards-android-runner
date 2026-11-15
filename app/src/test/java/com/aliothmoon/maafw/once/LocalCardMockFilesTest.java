@@ -36,7 +36,7 @@ public class LocalCardMockFilesTest {
   }finally{Files.deleteIfExists(file);Files.delete(directory);}
  }
  @Test public void inputIsFixedHistoricalCropWithIndependentRecordDirectory(){
-  assertEquals("rewards-native-card-roi-diag-v2",LocalCardMockFiles.DIRECTORY);
+  assertEquals("rewards-native-card-mock-v3",LocalCardMockFiles.DIRECTORY);
   assertNotEquals(CardRevealProbeScope.DIRECTORY,LocalCardMockFiles.DIRECTORY);
   assertEquals(1336,LocalCardMockFiles.WIDTH);assertEquals(588,LocalCardMockFiles.HEIGHT);
   assertEquals(64,LocalCardMockFiles.IMAGE_SHA.length());assertNotEquals(LocalCardMockFiles.IMAGE_SHA,LocalCardMockFiles.MANIFEST_SHA);

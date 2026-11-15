@@ -14,10 +14,22 @@ public class LocalCardMockPlanTest {
     private Fixture fixture(){
         byte[] gray=DailyCheckInRegionTest.pixels();int[] argb=new int[gray.length];
         for(int i=0;i<gray.length;i++){
-            int g=gray[i]&255,p=g==190?0xffffaa14:0xff000000|(g<<16)|(g<<8)|g;
-            argb[i]=p;gray[i]=(byte)((77*((p>>>16)&255)+150*((p>>>8)&255)+29*(p&255)+128)>>>8);
+            int g=gray[i]&255;
+            argb[i]=g==190?0xffffaa14:g==200?0xffffc33c:0xff000000|(g<<16)|(g<<8)|g;
         }
+        // Seven visible gold coins are independent geometric evidence, including future days.
+        disk(argb,272,115,21,0xffffd778);
+        for(int day=4;day<7;day++)disk(argb,62+70*day,115,20,0xffffd778);
+        fill(argb,264,109,268,122,0xff5a5a5a);fill(argb,274,109,280,122,0xff5a5a5a);
+        for(int i=0;i<gray.length;i++){int p=argb[i];gray[i]=(byte)((77*((p>>>16)&255)+150*((p>>>8)&255)+29*(p&255)+128)>>>8);}
         return new Fixture(gray,argb);
+    }
+    private static void disk(int[] argb,int cx,int cy,int radius,int color){
+        for(int y=cy-radius;y<=cy+radius;y++)for(int x=cx-radius;x<=cx+radius;x++)
+            if((x-cx)*(x-cx)+(y-cy)*(y-cy)<=radius*radius)argb[y*W+x]=color;
+    }
+    private static void fill(int[] argb,int left,int top,int right,int bottom,int color){
+        for(int y=top;y<bottom;y++)Arrays.fill(argb,y*W+left,y*W+right,color);
     }
     private LocalCardMockPlan.Plan plan(){var f=fixture();return LocalCardMockPlan.prepare(f.gray(),f.argb(),W,H,()->false);}
     private List<List<FrameStructureEvidence.Line>> batches(){
@@ -35,6 +47,21 @@ public class LocalCardMockPlanTest {
         Box panel=new Box(10,17,536,193);
         for(var roi:p.rois()){assertTrue(panel.contains(roi));assertTrue(roi.width()>0&&roi.height()>0);assertNotEquals(new Box(0,0,W,H),roi);}
         assertEquals(new Box(256,99,289,132),p.rois().get(1));
+        for(int i=2;i<8;i++){
+            assertEquals(p.rois().get(i).right(),p.rois().get(i+1).left());
+            assertFalse(p.rois().get(i).overlaps(p.rois().get(i+1)));
+        }
+    }
+    @Test public void aSingleYellowCurrentRingCannotInventTheOtherSixCoins(){
+        byte[] gray=DailyCheckInRegionTest.pixels();int[] argb=new int[gray.length];
+        for(int i=0;i<gray.length;i++){
+            int g=gray[i]&255,p=g==190?0xffffaa14:0xff000000|(g<<16)|(g<<8)|g;
+            argb[i]=p;gray[i]=(byte)((77*((p>>>16)&255)+150*((p>>>8)&255)+29*(p&255)+128)>>>8);
+        }
+        var p=LocalCardMockPlan.prepare(gray,argb,W,H,()->false);
+        assertFalse(p.admitted());assertEquals("COIN_COLUMN_COUNT",p.reason());
+        assertTrue(p.rois().isEmpty());assertFalse(p.claimRecognition());
+        assertEquals(0,p.finish(batches(),()->false).hypotheticalClicks());
     }
     @Test public void exactlyOneFakeReceiptUsesTheNativeNumberWithoutHardcodingTen(){
         for(String points:List.of("5","10","15","30")){
@@ -101,6 +128,19 @@ public class LocalCardMockPlanTest {
             // 510 is one valid positive displayed number; neither it nor other values are rewritten.
             if(text.equals("510"))assertEquals(510,result.displayedPoints());else assertEquals("NUMBER_NOT_PLAIN",result.reason());
         }
+    }
+    @Test public void narrowerDayRoisStillRejectEveryAdditionalNativeRowWithoutFiltering(){
+        for(int day=0;day<7;day++){
+            var p=plan();var rows=batches();var nativeRow=rows.get(day+2).get(0);
+            rows.set(day+2,List.of(nativeRow,new FrameStructureEvidence.Line("",nativeRow.x(),nativeRow.y(),1,1,0)));
+            var result=p.finish(rows,()->false);
+            assertEquals("ROI_ROW_COUNT",result.reason());assertEquals(0,result.hypotheticalClicks());
+        }
+    }
+    @Test public void adjacentDayBoxCannotBeAcceptedInTheWrongDisjointRoi(){
+        var rows=batches();var neighbor=rows.get(3).get(0);
+        rows.set(2,List.of(new FrameStructureEvidence.Line("Day 1",neighbor.x(),neighbor.y(),neighbor.width(),neighbor.height(),.99)));
+        assertEquals("ROW_OUTSIDE_OWN_ROI",plan().finish(rows,()->false).reason());
     }
     @Test public void exactTitleAndEachOrderedDayMustBeIndependentlyRead(){
         var rows=batches();var title=rows.get(0).get(0);rows.set(0,List.of(new FrameStructureEvidence.Line("每日活动",title.x(),title.y(),title.width(),title.height(),.99)));
