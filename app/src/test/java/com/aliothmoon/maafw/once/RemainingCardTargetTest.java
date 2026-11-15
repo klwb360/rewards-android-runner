@@ -59,4 +59,66 @@ public class RemainingCardTargetTest {
         var r=RemainingCardTarget.select(report(1,-1,List.of(item(1,100,350,true)),List.of(),OverviewUiProtocol.ScrollHint.DECLARED_FORWARD),523,1000,new RemainingCardChoice(DAILY,1));
         assertEquals(CardRevealProbeTarget.State.NO_DIRECTION,r.selection().state());assertNull(r.selection().direction());
     }
+    private OverviewUiRegions.Region anchor(OverviewUiRegions.Role role,int top,int bottom){
+        return new OverviewUiRegions.Region(role,new Box(20,top,503,bottom),new Box(30,top+5,250,top+45),null,true,-1,-1);
+    }
+    private void direction(OverviewUiProtocol.Report page,RemainingCardChoice choice,ReviewShizukuSwipeActor.Direction previous,
+            ReviewShizukuSwipeActor.Direction wanted){
+        var r=RemainingCardTarget.select(page,523,1000,choice,previous);
+        assertEquals(CardRevealProbeTarget.State.SCROLL,r.selection().state());assertEquals(wanted,r.selection().direction());assertNull(r.selection().crop());
+    }
+    @Test public void dailyMissingAboveVisibleMoreHeadingSearchesBackward(){
+        var page=report(-1,-1,List.of(),List.of(anchor(MORE,300,600)),OverviewUiProtocol.ScrollHint.DECLARED_BOTH);
+        direction(page,new RemainingCardChoice(DAILY,1),null,ReviewShizukuSwipeActor.Direction.DOWN);
+    }
+    @Test public void dailyAndWeeklyMissingAboveVisibleMoreCardSearchBackward(){
+        var more=new RemainingCardUi.Item(MORE,3,new Box(30,300,493,550),null,null,true);
+        var page=report(-1,7,List.of(more),List.of(),OverviewUiProtocol.ScrollHint.DECLARED_BOTH);
+        direction(page,new RemainingCardChoice(DAILY,1),ReviewShizukuSwipeActor.Direction.UP,ReviewShizukuSwipeActor.Direction.DOWN);
+        direction(page,new RemainingCardChoice(OverviewUiRegions.Role.DAILY_PROGRESS,0),ReviewShizukuSwipeActor.Direction.UP,ReviewShizukuSwipeActor.Direction.DOWN);
+    }
+    @Test public void weeklyMissingAboveMoreHeadingAlsoSearchesBackward(){
+        var page=report(-1,-1,List.of(),List.of(anchor(MORE,300,600)),OverviewUiProtocol.ScrollHint.DECLARED_BOTH);
+        direction(page,new RemainingCardChoice(OverviewUiRegions.Role.DAILY_PROGRESS,0),null,ReviewShizukuSwipeActor.Direction.DOWN);
+    }
+    @Test public void bottomBackwardOnlyDoesNotKeepAnImpossibleForwardSearch(){
+        var page=report(-1,-1,List.of(),List.of(),OverviewUiProtocol.ScrollHint.DECLARED_BACKWARD);
+        direction(page,new RemainingCardChoice(DAILY,1),ReviewShizukuSwipeActor.Direction.UP,ReviewShizukuSwipeActor.Direction.DOWN);
+        direction(page,new RemainingCardChoice(OverviewUiRegions.Role.DAILY_PROGRESS,0),ReviewShizukuSwipeActor.Direction.UP,ReviewShizukuSwipeActor.Direction.DOWN);
+    }
+    @Test public void emptyGapWithBothDeclarationsContinuesItsLastSearch(){
+        var page=report(-1,-1,List.of(),List.of(),OverviewUiProtocol.ScrollHint.DECLARED_BOTH);
+        direction(page,new RemainingCardChoice(DAILY,1),ReviewShizukuSwipeActor.Direction.DOWN,ReviewShizukuSwipeActor.Direction.DOWN);
+        direction(page,new RemainingCardChoice(DAILY,1),ReviewShizukuSwipeActor.Direction.UP,ReviewShizukuSwipeActor.Direction.UP);
+        direction(page,new RemainingCardChoice(DAILY,1),null,ReviewShizukuSwipeActor.Direction.UP);
+    }
+    @Test public void earlierKnownRegionsLeadTowardLaterTarget(){
+        var page=report(-1,-1,List.of(),List.of(anchor(OverviewUiRegions.Role.CHECK_IN,250,400),anchor(OverviewUiRegions.Role.DAILY_PROGRESS,450,650)),OverviewUiProtocol.ScrollHint.DECLARED_BOTH);
+        direction(page,new RemainingCardChoice(DAILY,1),ReviewShizukuSwipeActor.Direction.DOWN,ReviewShizukuSwipeActor.Direction.UP);
+        var top=report(-1,-1,List.of(),List.of(anchor(OverviewUiRegions.Role.STREAK_SUMMARY,250,400)),OverviewUiProtocol.ScrollHint.DECLARED_BOTH);
+        direction(top,new RemainingCardChoice(OverviewUiRegions.Role.DAILY_PROGRESS,0),null,ReviewShizukuSwipeActor.Direction.UP);
+    }
+    @Test public void contradictoryKnownAnchorsDoNotGuessOrCapture(){
+        var page=report(-1,-1,List.of(),List.of(anchor(OverviewUiRegions.Role.CHECK_IN,250,400),anchor(MORE,600,800)),OverviewUiProtocol.ScrollHint.DECLARED_BOTH);
+        var r=RemainingCardTarget.select(page,523,1000,new RemainingCardChoice(DAILY,1),ReviewShizukuSwipeActor.Direction.DOWN);
+        assertEquals("CONFLICTING_SEARCH_ANCHORS",r.reason());assertEquals(CardRevealProbeTarget.State.UNQUALIFIED,r.selection().state());
+        assertNull(r.selection().direction());assertNull(r.selection().crop());
+    }
+    @Test public void ownVisibleHeadingEntersItsNotYetExpandedCardGroup(){
+        var page=report(3,-1,List.of(),List.of(anchor(DAILY,250,600)),OverviewUiProtocol.ScrollHint.DECLARED_BOTH);
+        direction(page,new RemainingCardChoice(DAILY,2),ReviewShizukuSwipeActor.Direction.DOWN,ReviewShizukuSwipeActor.Direction.UP);
+    }
+    @Test public void knownCorrectDirectionStillRequiresItsOwnDeclaration(){
+        var page=report(-1,-1,List.of(),List.of(anchor(MORE,300,600)),OverviewUiProtocol.ScrollHint.DECLARED_FORWARD);
+        var r=RemainingCardTarget.select(page,523,1000,new RemainingCardChoice(DAILY,1),null);
+        assertEquals(CardRevealProbeTarget.State.NO_DIRECTION,r.selection().state());assertNull(r.selection().direction());
+        var noDeclaration=report(-1,-1,List.of(),List.of(),OverviewUiProtocol.ScrollHint.DECLARED_NONE);
+        assertEquals(CardRevealProbeTarget.State.NO_DIRECTION,RemainingCardTarget.select(noDeclaration,523,1000,new RemainingCardChoice(DAILY,1),ReviewShizukuSwipeActor.Direction.DOWN).selection().state());
+    }
+    @Test public void aMissingSlotBetweenVisibleSameGroupCardsIsNotGuessed(){
+        var owner=new OverviewUiRegions.Region(DAILY,new Box(20,250,503,750),null,null,true,-1,-1);
+        var page=report(3,-1,List.of(item(1,300,450,true),item(3,550,700,true)),List.of(owner),OverviewUiProtocol.ScrollHint.DECLARED_BOTH);
+        var r=RemainingCardTarget.select(page,523,1000,new RemainingCardChoice(DAILY,2));
+        assertEquals("AMBIGUOUS_CARD_GAP",r.reason());assertNull(r.selection().direction());assertNull(r.selection().crop());
+    }
 }

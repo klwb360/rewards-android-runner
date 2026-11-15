@@ -63,6 +63,7 @@ final class CardRevealProbeRuntime {
     private int cropWidth,cropHeight,ocrQueries,diagSaved,marks,hypotheticalClicks;
     private long nativeOcrMs=-1;
     private volatile RemainingCardNativeProcessor remainingProcessor;
+    private ReviewShizukuSwipeActor.Direction lastRemainingSearch;
     private RemainingCardPlan.Outcome remainingOutcome;
     private String remainingDiagnosticJson,remainingDiagnosticSummary="roiDiagnostic=UNAVAILABLE",targetReason="NONE";
     private int candidatePoints,dailyCount=-1,moreCount=-1;
@@ -163,7 +164,7 @@ final class CardRevealProbeRuntime {
                 intent.finishUi(exact,true,true,SystemClock.elapsedRealtime());stage=Stage.TARGET;
                 var selected=CardRevealProbeTarget.select(report,shape.width(),shape.height());
                 if(remaining!=null){
-                    var target=RemainingCardTarget.select(report,shape.width(),shape.height(),remaining);
+                    var target=RemainingCardTarget.select(report,shape.width(),shape.height(),remaining,lastRemainingSearch);
                     selected=target.selection();targetReason=target.reason();dailyCount=target.dailyCount();moreCount=target.moreCount();
                     if(targetReason.equals("REGION_COMPLETE_SKIP")){ocrReason=targetReason;stage=Stage.COMPLETE;break;}
                 }
@@ -173,6 +174,7 @@ final class CardRevealProbeRuntime {
                     for(var region:report.overview().regions())if(region.role()==OverviewUiRegions.Role.CHECK_IN)initialCoarse=region.coarse();
                 }}
                 if(selected.state()==CardRevealProbeTarget.State.SCROLL){
+                    if(remaining!=null)lastRemainingSearch=selected.direction();
                     if(intent.swipeCount()>=CardRevealProbeScope.MAX_SWIPES){stage=Stage.BUDGET_STOP;break;}
                     scroll(exact,selected.direction());previous=null;settle();continue;
                 }

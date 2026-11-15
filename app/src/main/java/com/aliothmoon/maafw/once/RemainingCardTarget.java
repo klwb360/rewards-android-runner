@@ -6,6 +6,11 @@ import com.aliothmoon.maafw.rewards.RewardRegionLocator.Box;
 final class RemainingCardTarget {
     record Result(CardRevealProbeTarget.Selection selection,String reason,int dailyCount,int moreCount){}
     static Result select(OverviewUiProtocol.Report report,int width,int height,RemainingCardChoice choice){
+        return select(report,width,height,choice,null);
+    }
+    /** Search memory chooses travel only. It never supplies a source permit, crop or point. */
+    static Result select(OverviewUiProtocol.Report report,int width,int height,RemainingCardChoice choice,
+            ReviewShizukuSwipeActor.Direction previousSearch){
         if(choice==null||report==null||!report.qualified()||report.cards()==null
                 ||report.cards().status()!=RemainingCardUi.Status.OBSERVED||width<=0||height<=width)
             return held(CardRevealProbeTarget.State.UNQUALIFIED,"UNQUALIFIED_CARD_UI",-1,-1);
@@ -26,12 +31,16 @@ final class RemainingCardTarget {
                 if(item.index()==choice.index()){if(target!=null)return held(CardRevealProbeTarget.State.UNQUALIFIED,"AMBIGUOUS_CARD",daily,more);target=item;}
             }
             if(target==null){
-                var direction=last>0&&choice.index()<first?ReviewShizukuSwipeActor.Direction.DOWN:ReviewShizukuSwipeActor.Direction.UP;
-                return scroll(report,direction,daily,more);
+                if(last>0){
+                    if(choice.index()<first)return scroll(report,ReviewShizukuSwipeActor.Direction.DOWN,daily,more);
+                    if(choice.index()>last)return scroll(report,ReviewShizukuSwipeActor.Direction.UP,daily,more);
+                    return held(CardRevealProbeTarget.State.UNQUALIFIED,"AMBIGUOUS_CARD_GAP",daily,more);
+                }
+                return search(report,choice,parent,previousSearch,daily,more);
             }
             selected=new OverviewUiRegions.Region(choice.role(),target.coarse(),target.title(),null,target.completeVisible(),-1,-1);
         }
-        if(selected==null)return scroll(report,ReviewShizukuSwipeActor.Direction.UP,daily,more);
+        if(selected==null)return search(report,choice,parent,previousSearch,daily,more);
         var view=report.overview().viewport();Box coarse=selected.coarse();
         if(view==null||view.left()<0||view.top()<0||view.right()>width||view.bottom()>height)
             return held(CardRevealProbeTarget.State.UNQUALIFIED,"INVALID_VIEWPORT",daily,more);
@@ -46,6 +55,35 @@ final class RemainingCardTarget {
             return held(CardRevealProbeTarget.State.UNQUALIFIED,"INVALID_CARD_CROP",daily,more);
         return new Result(new CardRevealProbeTarget.Selection(CardRevealProbeTarget.State.CANDIDATE,selected,crop,null),"READY",daily,more);
     }
+    private static Result search(OverviewUiProtocol.Report report,RemainingCardChoice choice,OverviewUiRegions.Region parent,
+            ReviewShizukuSwipeActor.Direction previousSearch,int daily,int more){
+        // A current heading of this exact group locates its entrance even if card children
+        // have not expanded. Continue into the group, never borrow another group's card.
+        if(parent!=null&&parent.heading()!=null)return scroll(report,ReviewShizukuSwipeActor.Direction.UP,daily,more);
+        boolean before=false,after=false;int target=order(choice.role());
+        for(var region:report.overview().regions())if(region.heading()!=null){
+            int observed=order(region.role());before|=observed<target;after|=observed>target;
+        }
+        for(var item:report.cards().items()){
+            int observed=order(item.role());before|=observed<target;after|=observed>target;
+        }
+        if(before&&after)return held(CardRevealProbeTarget.State.UNQUALIFIED,"CONFLICTING_SEARCH_ANCHORS",daily,more);
+        if(after)return scroll(report,ReviewShizukuSwipeActor.Direction.DOWN,daily,more);
+        if(before)return scroll(report,ReviewShizukuSwipeActor.Direction.UP,daily,more);
+        var hint=report.scrollHint();
+        if(hint==OverviewUiProtocol.ScrollHint.DECLARED_BACKWARD)return scroll(report,ReviewShizukuSwipeActor.Direction.DOWN,daily,more);
+        if(hint==OverviewUiProtocol.ScrollHint.DECLARED_FORWARD)return scroll(report,ReviewShizukuSwipeActor.Direction.UP,daily,more);
+        if(hint==OverviewUiProtocol.ScrollHint.DECLARED_BOTH)return scroll(report,
+                previousSearch==null?ReviewShizukuSwipeActor.Direction.UP:previousSearch,daily,more);
+        return held(CardRevealProbeTarget.State.NO_DIRECTION,"NO_DECLARED_DIRECTION",daily,more);
+    }
+    private static int order(OverviewUiRegions.Role role){return switch(role){
+        case CHECK_IN,STREAK_SUMMARY->0;
+        case DAILY_PROGRESS->1;
+        case POINTS_SUMMARY->2;
+        case DAILY_ACTIVITIES->3;
+        case MORE_ACTIVITIES->4;
+    };}
     private static Result scroll(OverviewUiProtocol.Report report,ReviewShizukuSwipeActor.Direction direction,int daily,int more){
         var hint=report.scrollHint();boolean allowed=direction==ReviewShizukuSwipeActor.Direction.UP
                 ?hint==OverviewUiProtocol.ScrollHint.DECLARED_FORWARD||hint==OverviewUiProtocol.ScrollHint.DECLARED_BOTH
