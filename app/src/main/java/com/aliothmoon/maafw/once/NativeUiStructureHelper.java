@@ -29,7 +29,8 @@ public final class NativeUiStructureHelper {
         long start = SystemClock.elapsedRealtime(), deadline;
         if (args == null || !validReadyArguments(args) || !NativeUiStructureProtocol.validNonce(args[0])) return;
         boolean readyMode=args.length==3;
-        boolean overviewMode=readyMode&&"OVERVIEW_V5".equals(args[2]);
+        boolean cardsMode=readyMode&&"OVERVIEW_CARDS_V1".equals(args[2]);
+        boolean overviewMode=readyMode&&"OVERVIEW_V5".equals(args[2])||cardsMode;
         boolean regionMode=readyMode&&"BOUND_REGIONS".equals(args[2]);
         boolean boundMode=overviewMode||regionMode||readyMode&&"BOUND_POINTS_V53".equals(args[2]);
         boolean formatMode=readyMode&&"FORMAT_V50".equals(args[2]);
@@ -51,6 +52,7 @@ public final class NativeUiStructureHelper {
         NativeUiRegions.Pair regions = regionMode ? NativeUiRegions.Pair.empty() : null;
         OverviewUiRegions.Result overview=OverviewUiRegions.Result.rejected(OverviewUiRegions.Status.WRONG_STRUCTURE);
         OverviewUiProtocol.ScrollHint scrollHint=OverviewUiProtocol.ScrollHint.UNKNOWN;
+        RemainingCardUi.Result cards=cardsMode?RemainingCardUi.Result.rejected(RemainingCardUi.Status.WRONG_STRUCTURE):null;
         HandlerThread thread = null;
         UiAutomation automation = null;
         boolean attemptedConnect = false, clean = true;
@@ -173,6 +175,7 @@ public final class NativeUiStructureHelper {
                 NativeUiStructureParser.Result result;
                 if(overviewMode){
                     overview=OverviewUiParser.parse(boundRecords);
+                    if(cardsMode)cards=RemainingCardUiParser.parse(boundRecords,overview);
                     if(overview.status()==OverviewUiRegions.Status.OBSERVED)scrollHint=OverviewUiParser.scrollHint(boundRecords,overviewScroll);
                     result=new NativeUiStructureParser.Result(
                         new NativeUiStructureParser.TaskResult(NativeUiStructureParser.Status.UNKNOWN,0,0,0,NativeUiStructureParser.Unit.UNESTABLISHED),
@@ -227,6 +230,7 @@ public final class NativeUiStructureHelper {
             search = NativeUiStructureProtocol.Task.unknown(); reading = NativeUiStructureProtocol.Task.unknown();
             if(regionMode)regions=NativeUiRegions.Pair.empty();
             overview=OverviewUiRegions.Result.rejected(OverviewUiRegions.Status.WRONG_STRUCTURE);
+            if(cardsMode)cards=RemainingCardUi.Result.rejected(RemainingCardUi.Status.WRONG_STRUCTURE);
             scrollHint=OverviewUiProtocol.ScrollHint.UNKNOWN;
             acquired = Math.min(finished, Math.max(start, acquired));
             // Invalid geometry must not prevent a bounded failure receipt.
@@ -236,12 +240,13 @@ public final class NativeUiStructureHelper {
             NativeUiStructureProtocol.Report report = new NativeUiStructureProtocol.Report(args[0], start,
                     acquired, finished, reason, cleanup, nodeCount, chars, windowId, displayId,
                     bounds.left, bounds.top, bounds.right, bounds.bottom, -1, -1, search, reading,readyMode?diagnostics.result(idle):null,fieldMode?fieldDiagnostics.result():null,boundMode&&!overviewMode,regions);
-            if(overviewMode)System.out.println(OverviewUiProtocol.encode(new OverviewUiProtocol.Report(report,overview,scrollHint)));
+            if(cardsMode)System.out.println(OverviewUiProtocol.encode(new OverviewUiProtocol.Report(report,overview,scrollHint,cards)));
+            else if(overviewMode)System.out.println(OverviewUiProtocol.encode(new OverviewUiProtocol.Report(report,overview,scrollHint)));
             else System.out.println(NativeUiStructureProtocol.encode(report));
             System.out.flush();
         } catch (Throwable ignored) { /* No raw exception or partial report is published. */ }
     }
-    static boolean validReadyArguments(String[] args){return args!=null&&(args.length==2||args.length==3&&("READY_V49".equals(args[2])||"FORMAT_V50".equals(args[2])||"DIAGNOSTIC_V51".equals(args[2])||"DIAGNOSTIC_LOCATED_V52".equals(args[2])||"BOUND_POINTS_V53".equals(args[2])||"BOUND_REGIONS".equals(args[2])||"OVERVIEW_V5".equals(args[2])));}
+    static boolean validReadyArguments(String[] args){return args!=null&&(args.length==2||args.length==3&&("READY_V49".equals(args[2])||"FORMAT_V50".equals(args[2])||"DIAGNOSTIC_V51".equals(args[2])||"DIAGNOSTIC_LOCATED_V52".equals(args[2])||"BOUND_POINTS_V53".equals(args[2])||"BOUND_REGIONS".equals(args[2])||"OVERVIEW_V5".equals(args[2])||"OVERVIEW_CARDS_V1".equals(args[2])));}
     private static boolean packageMatches(CharSequence value) {
         return value != null && value.length() == BING.length() && BING.contentEquals(value);
     }

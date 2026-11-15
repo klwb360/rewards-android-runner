@@ -37,6 +37,13 @@ final class CardRevealProbeScope {
 
     static void burnOcr(Path files) throws IOException { burn(files, "OCR"); }
 
+    static String directory(RemainingCardChoice choice){return choice==null?DIRECTORY:choice.directory();}
+    static void burnRun(Path files,RemainingCardChoice choice)throws IOException{burn(files,"RUN",choice);}
+    static void burnUi(Path files,int index,RemainingCardChoice choice)throws IOException{if(!validUi(index))throw new SecurityException("UI budget");burn(files,"UI_"+index,choice);}
+    static void burnScroll(Path files,int index,RemainingCardChoice choice)throws IOException{if(index<1||index>MAX_SWIPES)throw new SecurityException("Scroll budget");burn(files,"SCROLL_"+index,choice);}
+    static void burnCrop(Path files,RemainingCardChoice choice)throws IOException{burn(files,"CROP",choice);}
+    static void burnOcr(Path files,RemainingCardChoice choice)throws IOException{burn(files,"OCR",choice);}
+
     private static Object directory(Path path) throws IOException {
         BasicFileAttributes a = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
         if (!a.isDirectory() || a.isSymbolicLink() || a.fileKey() == null)
@@ -47,10 +54,11 @@ final class CardRevealProbeScope {
         if (!parent.equals(directory(files)) || !child.equals(directory(dir)))
             throw new IOException("Card reveal directory changed");
     }
-    private static void burn(Path files, String slot) throws IOException {
+    private static void burn(Path files, String slot) throws IOException {burn(files,slot,null);}
+    private static void burn(Path files,String slot,RemainingCardChoice choice)throws IOException{
         if (files == null || !files.isAbsolute() || !files.equals(files.normalize()))
             throw new IOException("Exact private directory required");
-        Object parent = directory(files); Path dir = files.resolve(DIRECTORY);
+        Object parent = directory(files); Path dir = files.resolve(directory(choice));
         try { Files.createDirectory(dir); } catch (FileAlreadyExistsException exists) { /* Verify identity below. */ }
         Object child = directory(dir); same(files, parent, dir, child);
         try (FileChannel c = FileChannel.open(dir.resolve(slot + ".burned"), StandardOpenOption.CREATE_NEW,
