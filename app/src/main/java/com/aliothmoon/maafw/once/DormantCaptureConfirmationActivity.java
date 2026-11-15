@@ -17,6 +17,59 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  private volatile RootReturnReadIntent returnReadIntent;
  private volatile UiImageAlignmentRuntime alignmentRuntime;
  private volatile OverviewScanRuntime overviewRuntime;
+ private volatile LocalCardMockRuntime localMockRun;
+ private Object localMockOwner;
+ private boolean localMockSelected,localMockSpent;
+ private volatile boolean localMockFinished,localMockVisible;
+ private volatile String localMockHistory;
+ boolean localCardMockSelected(){return localMockSelected;}
+ boolean localCardMockApprovalMatches(Object owner,LiveClick incoming){
+  return localMockSelected&&localMockSpent&&!localMockFinished&&owner!=null&&owner==localMockOwner
+    &&incoming!=null&&incoming==click&&isResumedForApproval();
+ }
+ /** Cached visibility for the owner worker; only the UI thread performs fresh publication checks. */
+ boolean localCardMockCurrent(LocalCardMockRuntime exact){
+  return localMockVisible&&exact!=null&&exact==localMockRun&&localMockSelected&&localMockSpent
+    &&!localMockFinished&&!destroyed;
+ }
+ private void openLocalCardMockChoice(){
+  if(consumed||localMockSpent||cardRevealSpent||alignmentSpent||overviewSpent||!isResumedForApproval())return;
+  localMockSelected=true;cardRevealSelected=false;alignmentSelected=false;overviewSelected=false;showLocalCardMockChoice();
+ }
+ private void showLocalCardMockChoice(){
+  if(destroyed||isFinishing()||isDestroyed())return;
+  LocalCardMockUi.choice(this,!consumed&&!localMockSpent&&isResumedForApproval(),this::confirmLocalCardMock,this::cancelAndFinish);
+ }
+ private void confirmLocalCardMock(){
+  if(consumed||localMockSpent||!localMockSelected||!isResumedForApproval())return;
+  localMockSpent=true;consumed=true;terminalShown=false;localMockOwner=new Object();click=new LiveClick(this);
+  localMockVisible=true;terminalSnapshot=new TerminalSnapshot(false,false,"CURRENT_STATUS",false);
+  try{
+   LocalCardMockUi.running(this,this::cancelAndFinish);
+   localMockRun=LocalCardMockRuntime.start(this,click,localMockOwner);
+  }catch(RuntimeException rejected){
+   if(localMockRun!=null)localMockRun.cancel();if(click!=null)click.invalidate();
+   localMockFinished=true;terminalShown=true;terminalSnapshot=new TerminalSnapshot(true,false,"CURRENT_STATUS",false);
+   localMockHistory="profile=NATIVE_CARD_MOCK_V1 stage=START_REJECTED taskTaps=0 fullScreenCaptures=0 cleanup=NOT_CONFIRMED";
+   LocalCardMockUi.status(this,localMockHistory,this::cancelAndFinish);
+  }
+ }
+ /** Static local material only: no hidden-app lease or live capture authority is issued here. */
+ boolean localCardMockPublish(LocalCardMockRuntime exact,Runnable append){
+  if(android.os.Looper.myLooper()!=android.os.Looper.getMainLooper()||append==null
+    ||!localCardMockCurrent(exact)||!isResumedForApproval())return false;
+  append.run();
+  return localCardMockCurrent(exact)&&isResumedForApproval();
+ }
+ void localCardMockFinished(LocalCardMockRuntime exact,String details){
+  if(exact==null)return;
+  if(!stageDeadlines.post(()->{
+   if(exact!=localMockRun||localMockFinished){exact.cancel();return;}
+   localMockHistory=CaptureSessionRuntime.boundedRootScalars(details==null?"localCardMock=UNQUALIFIED":details,8000);
+   localMockFinished=true;terminalShown=true;terminalSnapshot=new TerminalSnapshot(true,false,"CURRENT_STATUS",false);
+   if(!destroyed&&!isFinishing()&&!isDestroyed())LocalCardMockUi.status(this,localMockHistory,this::cancelAndFinish);
+  }))exact.cancel();
+ }
  private volatile CardRevealProbeRuntime cardRevealRuntime;
  private Object cardRevealOwner;
  private boolean cardRevealSelected,cardRevealSpent;
@@ -576,6 +629,9 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
   NativeRewardCardRun card=cardRun;
   long remaining=run!=null&&run.finishedAndReleased()?(autonomousRun!=null?autonomousRun.remainingForAfterMillis():readOnlyRun!=null?readOnlyRun.remainingForAfterMillis():card!=null?card.remainingForAfterMillis():session!=null?session.remainingForAfterMillis():0):0;
   writer.println(value.line(remaining));
+  LocalCardMockRuntime localMock=localMockRun;
+  writer.println("RewardsLocalCardMockRelease present="+(localMock!=null)+" released="+(localMock!=null&&localMock.finishedAndReleased()));
+  if(localMockFinished&&localMockHistory!=null)writer.println("RewardsLocalCardMockDiagnostic version=1 "+CaptureSessionRuntime.boundedRootScalars(localMockHistory.replace('\n',' '),8000));
   CardRevealProbeRuntime probe=cardRevealRuntime;
   writer.println("RewardsCardRevealRelease present="+(probe!=null)+" released="+(probe!=null&&probe.finishedAndReleased()));
   if(cardRevealFinished&&cardRevealHistory!=null)writer.println("RewardsCardRevealDiagnostic version=1 "+CaptureSessionRuntime.boundedRootScalars(cardRevealHistory.replace('\n',' '),8000));
@@ -652,7 +708,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  @Override protected void onCreate(Bundle state){
   super.onCreate(state);
   if(state!=null || android.os.Process.myUid()<10000 || !Application.getProcessName().equals(getPackageName()+":capture_once")) {finish();return;}
-  if(OwnStateSummaryUi.ACTIVE){OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.TITLE_TIMING),this::openOverviewChoice,this::openCardRevealChoice);return;}
+  if(OwnStateSummaryUi.ACTIVE){OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.TITLE_TIMING),this::openOverviewChoice,this::openCardRevealChoice,this::openLocalCardMockChoice);return;}
   installed=BingPackageMetadata.read(getPackageManager());
   if(!CaptureReleaseGate.configured()){showNavigation();return;}
   rikka.shizuku.Shizuku.addRequestPermissionResultListener(permissionListener);
@@ -679,7 +735,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  }
  private void summaryRejected(){terminalShown=true;terminalSnapshot=new TerminalSnapshot(true,false,"OWN_STATE",false);OwnStateSummaryUi.rejected(this,this::cancelAndFinish);}
  private void showCaptureChoices(){
-  if(OwnStateSummaryUi.ACTIVE){if(!consumed){if(cardRevealSelected)showCardRevealChoice();else if(overviewSelected)showOverviewChoice();else if(alignmentSelected)showAlignmentChoice();else OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.TITLE_TIMING),this::openOverviewChoice,this::openCardRevealChoice);}return;}
+  if(OwnStateSummaryUi.ACTIVE){if(!consumed){if(localMockSelected)showLocalCardMockChoice();else if(cardRevealSelected)showCardRevealChoice();else if(overviewSelected)showOverviewChoice();else if(alignmentSelected)showAlignmentChoice();else OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.TITLE_TIMING),this::openOverviewChoice,this::openCardRevealChoice,this::openLocalCardMockChoice);}return;}
   boolean ready=false;
   try{
    ready=rikka.shizuku.Shizuku.pingBinder()&&!rikka.shizuku.Shizuku.isPreV11()
@@ -873,7 +929,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
   showStatus("等待 Android 系统同意。授权窗口从本次明确确认起最长 90 秒；超时只请求取消，不证明清理完成。",false);
   try {runtime=CaptureSessionRuntime.start(this,click,purpose);}catch(RuntimeException denied){click.invalidate();showStatus("无法开始本次识别（系统版本、进程或显示尺寸不受支持）。未获得可用结果；不能重试或恢复本次授权。",true);}
  }
- private void cancelAndFinish(){if(cardRevealRuntime!=null)cardRevealRuntime.cancel();if(overviewRuntime!=null)overviewRuntime.cancel();if(alignmentRuntime!=null)alignmentRuntime.cancel();if(returnReadIntent!=null)returnReadIntent.cancel();if(boundedIntent!=null)boundedIntent.cancel();if(seriesIntent!=null)seriesIntent.cancel();if(rootIntent!=null)rootIntent.cancel();if(autonomousRoute!=null)autonomousRoute.cancel();if(autonomousRun!=null)autonomousRun.cancel();stageDeadlines.removeCallbacksAndMessages(null);if(readOnlyRun!=null)readOnlyRun.cancel();if(cardRun!=null)cardRun.cancel();if(nativeSession!=null)nativeSession.cancel();if(click!=null)click.invalidate();if(runtime!=null)runtime.cancel();finish();}
+ private void cancelAndFinish(){localMockVisible=false;if(localMockRun!=null)localMockRun.cancel();if(cardRevealRuntime!=null)cardRevealRuntime.cancel();if(overviewRuntime!=null)overviewRuntime.cancel();if(alignmentRuntime!=null)alignmentRuntime.cancel();if(returnReadIntent!=null)returnReadIntent.cancel();if(boundedIntent!=null)boundedIntent.cancel();if(seriesIntent!=null)seriesIntent.cancel();if(rootIntent!=null)rootIntent.cancel();if(autonomousRoute!=null)autonomousRoute.cancel();if(autonomousRun!=null)autonomousRun.cancel();stageDeadlines.removeCallbacksAndMessages(null);if(readOnlyRun!=null)readOnlyRun.cancel();if(cardRun!=null)cardRun.cancel();if(nativeSession!=null)nativeSession.cancel();if(click!=null)click.invalidate();if(runtime!=null)runtime.cancel();finish();}
  /** Only ordinary superclass UI state may be saved. This route registers no
   * ActivityResultRegistry launcher: legacy request codes stay below 65536.
   * Never save the click, request, grant, pending consent Intent or runtime. */
@@ -890,6 +946,11 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  }}
  boolean hiddenWithSoleTask(){return handoff.hiddenWithSoleTask() && ReviewVisibilityProvider.FENCE.valid(visibilityLease);}
  @Override protected void onStart(){super.onStart();handoff.onStart();
+  if(localMockSpent){
+   if(localMockFinished)LocalCardMockUi.status(this,localMockHistory,this::cancelAndFinish);
+   else LocalCardMockUi.running(this,this::cancelAndFinish);
+   return;
+  }
   if(cardRevealSpent){
    if(cardRevealRuntime!=null&&!cardRevealFinished)cardRevealRuntime.cancel();
    if(cardRevealFinished)CardRevealProbeUi.status(this,cardRevealHistory,this::cancelAndFinish);
@@ -953,9 +1014,9 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  }
  @Override protected void onStop(){super.onStop();}
  void visibilityStopped(){handoff.onStop();}
- @Override public void onWindowFocusChanged(boolean focus){super.onWindowFocusChanged(focus);if(focus){tryHandoff();tryAutomaticAfter();}}
- @Override protected void onResume(){super.onResume();resumed=true;handoff.onResume();tryHandoff();tryAutomaticAfter();if(!CaptureReleaseGate.configured())showNavigation();else if(!consumed)showCaptureChoices();}
- @Override protected void onPause(){ownStateCancelled=true;resumed=false;handoff.onPause();super.onPause();}
+ @Override public void onWindowFocusChanged(boolean focus){super.onWindowFocusChanged(focus);localMockVisible=focus&&resumed&&!destroyed;if(!focus&&localMockRun!=null&&!localMockFinished)localMockRun.cancel();if(focus){tryHandoff();tryAutomaticAfter();}}
+ @Override protected void onResume(){super.onResume();resumed=true;localMockVisible=hasWindowFocus()&&!destroyed;handoff.onResume();tryHandoff();tryAutomaticAfter();if(!CaptureReleaseGate.configured())showNavigation();else if(!consumed)showCaptureChoices();}
+ @Override protected void onPause(){ownStateCancelled=true;localMockVisible=false;if(localMockRun!=null&&!localMockFinished)localMockRun.cancel();resumed=false;handoff.onPause();super.onPause();}
  @Override protected void onActivityResult(int code,int result,Intent data){super.onActivityResult(code,result,data);if(runtime!=null)runtime.onActivityResult(code,result,data);}
- @Override protected void onDestroy(){if(cardRevealRuntime!=null)cardRevealRuntime.cancel();if(overviewRuntime!=null)overviewRuntime.cancel();if(alignmentRuntime!=null)alignmentRuntime.cancel();if(returnReadIntent!=null)returnReadIntent.cancel();if(seriesIntent!=null)seriesIntent.cancel();if(rootIntent!=null)rootIntent.cancel();rikka.shizuku.Shizuku.removeRequestPermissionResultListener(permissionListener);if(autonomousRoute!=null)autonomousRoute.cancel();if(autonomousRun!=null)autonomousRun.cancel();stageDeadlines.removeCallbacksAndMessages(null);if(readOnlyRun!=null)readOnlyRun.cancel();if(cardRun!=null)cardRun.cancel();if(nativeSession!=null)nativeSession.cancel();destroyed=true;if(boundedIntent!=null)boundedIntent.cancel();resumed=false;clearPendingHandoff();handoff.onDestroy();if(click!=null)click.invalidate();if(runtime!=null)runtime.cancel();super.onDestroy();}
+ @Override protected void onDestroy(){localMockVisible=false;if(localMockRun!=null)localMockRun.cancel();if(cardRevealRuntime!=null)cardRevealRuntime.cancel();if(overviewRuntime!=null)overviewRuntime.cancel();if(alignmentRuntime!=null)alignmentRuntime.cancel();if(returnReadIntent!=null)returnReadIntent.cancel();if(seriesIntent!=null)seriesIntent.cancel();if(rootIntent!=null)rootIntent.cancel();rikka.shizuku.Shizuku.removeRequestPermissionResultListener(permissionListener);if(autonomousRoute!=null)autonomousRoute.cancel();if(autonomousRun!=null)autonomousRun.cancel();stageDeadlines.removeCallbacksAndMessages(null);if(readOnlyRun!=null)readOnlyRun.cancel();if(cardRun!=null)cardRun.cancel();if(nativeSession!=null)nativeSession.cancel();destroyed=true;if(boundedIntent!=null)boundedIntent.cancel();resumed=false;clearPendingHandoff();handoff.onDestroy();if(click!=null)click.invalidate();if(runtime!=null)runtime.cancel();super.onDestroy();}
 }

@@ -198,6 +198,16 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
     }
     static MaaRecognizer liveCheckIn(Context context){MaaRecognizer r=new MaaRecognizer(context);r.liveCheckin=true;return r;}
     synchronized String liveCheckInSummary(OnceBackend.Owner expected){return expected==owner && observation()!=null?liveSummary:null;}
+    private LocalCardMockPlan.Plan localCardMockPlan;
+    private LocalCardMockPlan.Outcome localCardMockResult;
+    /** One owned historical crop, nine bounded ROI queries, no capture or input capability. */
+    static MaaRecognizer localCardMock(Context context,LocalCardMockPlan.Plan plan){
+        if(plan==null||!plan.claimRecognition())throw new IllegalArgumentException("One admitted local mock plan required");
+        MaaRecognizer recognizer=new MaaRecognizer(context);recognizer.localCardMockPlan=plan;return recognizer;
+    }
+    synchronized LocalCardMockPlan.Outcome localCardMockOutcome(OnceBackend.Owner expected){
+        return expected!=null&&expected==owner&&returned&&observation()!=null?localCardMockResult:null;
+    }
     private BackendPorts.FrameView materialFrame;
     private MaterialReplayObservation materialObservation;
     private java.util.List<FrameStructureEvidence.Line> materialRows, roiRows;
@@ -311,6 +321,13 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             frameWidth=frame.width();frameHeight=frame.height();perception.frame(frameWidth,frameHeight);
             if (materialKind != null || liveCheckin) materialFrame = frame;
             structureBinding=new FrameStructureEvidence.Binding(this,own,structureEpoch,structureFrame);
+            if(localCardMockPlan!=null){
+                refineLocalCardMock(frame,stop);
+                provisional=RewardsObservation.classify(false,false,false,false);
+                checkStop(stop);recognized=true;
+                return new BackendPorts.Recognition(own,localCardMockResult!=null
+                        &&(localCardMockResult.status().equals("PREVIEW_ONLY")||localCardMockResult.status().equals("VISUAL_PREVIEW_ONLY")));
+            }
             boolean[] hits = new boolean[RewardsQuery.values().length];
             boolean hit = false;
             for (RewardsQuery query : RewardsQuery.values()) {
@@ -362,6 +379,7 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             materialFrame = null;
             materialRows = null; roiRows = null; readingLabelRoi = false;
             if (!recognized || stop.requested()) provisional=null;
+            if (!recognized || stop.requested()) localCardMockResult=null;
             if (!recognized || stop.requested()) materialObservation=null;
             if (!recognized || stop.requested()) nativeCardObservation=null;
             if (!recognized || stop.requested()) nativePreparedObservation=null;
@@ -518,6 +536,29 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             }
             liveSummary=LiveCheckInObservation.observe(gray,frameWidth,frameHeight,rows,observationStop::requested);
         } finally {Arrays.fill(gray,(byte)0);}
+    }
+    /** Cropped-image-only OCR: all returned boxes already include the ROI origin.
+     * No text, score or box is rewritten, and no full-image query is posted in this mode. */
+    private void refineLocalCardMock(BackendPorts.FrameView frame,BackendPorts.StopSignal stop)throws Exception{
+        checkStop(stop);need(localCardMockPlan!=null&&localCardMockPlan.admitted());
+        byte[] gray=new byte[frameWidth*frameHeight];
+        var batches=new java.util.ArrayList<java.util.List<FrameStructureEvidence.Line>>();
+        try{
+            for(int at=0;at<gray.length;at+=4096){checkStop(stop);frame.copyGrayRange(at,gray,at,Math.min(4096,gray.length-at));}
+            need(localCardMockPlan.matchesGray8(gray,frameWidth,frameHeight,stop::requested));
+            for(var roi:localCardMockPlan.rois()){
+                checkStop(stop);need(roi.left()>=0&&roi.top()>=0&&roi.right()<=frameWidth&&roi.bottom()<=frameHeight
+                        &&roi.width()>0&&roi.height()>0);
+                taskQuiet=false;waiting(CleanupEvidence.Item.TASKER_RUNNING_FALSE);lastTaskStatus=0;taskId=0;
+                String params="{\"expected\":[\".+\"],\"threshold\":0.3,\"only_rec\":false,\"roi\":["
+                        +roi.left()+","+roi.top()+","+roi.width()+","+roi.height()+"]}";
+                taskId=api.MaaTaskerPostRecognition(tasker,"OCR",params,image);need(taskId>0);stage=Stage.TASK_POSTED;
+                int status=awaitTask(stop);checkStop(stop);roiRows=null;readingLabelRoi=true;
+                try{detail(status,true);}finally{readingLabelRoi=false;}
+                batches.add(roiRows==null?java.util.List.of():roiRows);roiRows=null;checkStop(stop);
+            }
+            localCardMockResult=localCardMockPlan.finish(batches,stop::requested);checkStop(stop);
+        }finally{Arrays.fill(gray,(byte)0);batches.clear();roiRows=null;readingLabelRoi=false;localCardMockPlan=null;}
     }
     /** Run only after readStructure cleared/destroyed its Maa detail buffer. The retained rows
      * and GRAY8 copy still refer to this one OwnedFrame; no second OCR or recapture is used. */
