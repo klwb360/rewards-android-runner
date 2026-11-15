@@ -1,0 +1,116 @@
+package com.aliothmoon.maafw.once;
+
+import com.aliothmoon.maafw.rewards.RewardRegionLocator.Box;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import org.junit.Test;
+import static org.junit.Assert.*;
+
+/** Synthetic pixels and synthetic native-shaped OCR batches only; no Android or device operation. */
+public class LocalCardMockPlanTest {
+    private static final int W=DailyCheckInRegionTest.W,H=DailyCheckInRegionTest.H;
+    private record Fixture(byte[] gray,int[] argb){}
+    private Fixture fixture(){
+        byte[] gray=DailyCheckInRegionTest.pixels();int[] argb=new int[gray.length];
+        for(int i=0;i<gray.length;i++){
+            int g=gray[i]&255,p=g==190?0xffffaa14:0xff000000|(g<<16)|(g<<8)|g;
+            argb[i]=p;gray[i]=(byte)((77*((p>>>16)&255)+150*((p>>>8)&255)+29*(p&255)+128)>>>8);
+        }
+        return new Fixture(gray,argb);
+    }
+    private LocalCardMockPlan.Plan plan(){var f=fixture();return LocalCardMockPlan.prepare(f.gray(),f.argb(),W,H,()->false);}
+    private List<List<FrameStructureEvidence.Line>> batches(){
+        var original=DailyCheckInRegionTest.rows();List<List<FrameStructureEvidence.Line>> result=new ArrayList<>();
+        var title=original.get(0);var number=original.get(8);
+        result.add(List.of(line(title.text(),title.box(),.97)));result.add(List.of(line(number.text(),number.box(),.96)));
+        for(int day=0;day<7;day++){var row=original.get(day+1);result.add(List.of(line(row.text(),row.box(),.95)));}
+        return result;
+    }
+    private FrameStructureEvidence.Line line(String text,Box box,double score){
+        return new FrameStructureEvidence.Line(text,box.left(),box.top(),box.width(),box.height(),score);
+    }
+    @Test public void prepareProducesOnlyNinePanelContainedQueries(){
+        var p=plan();assertTrue(p.reason(),p.admitted());assertEquals(9,p.rois().size());assertEquals(W,p.width());assertEquals(H,p.height());
+        Box panel=new Box(10,17,536,193);
+        for(var roi:p.rois()){assertTrue(panel.contains(roi));assertTrue(roi.width()>0&&roi.height()>0);assertNotEquals(new Box(0,0,W,H),roi);}
+        assertEquals(new Box(256,99,289,132),p.rois().get(1));
+    }
+    @Test public void exactlyOneFakeReceiptUsesTheNativeNumberWithoutHardcodingTen(){
+        for(String points:List.of("5","10","15","30")){
+            var rows=batches();var nativeNumber=rows.get(1).get(0);rows.set(1,List.of(new FrameStructureEvidence.Line(points,nativeNumber.x(),nativeNumber.y(),nativeNumber.width(),nativeNumber.height(),nativeNumber.score())));
+            var result=plan().finish(rows,()->false);assertEquals("PREVIEW_ONLY",result.status());assertEquals(1,result.hypotheticalClicks());
+            assertEquals(0,result.realExecutions());assertEquals(4,result.day());assertEquals(Integer.parseInt(points),result.displayedPoints());
+            assertEquals(272,result.x());assertEquals(115,result.y());assertEquals(9,result.ocrQueries());assertEquals(.95,result.confidence(),0);
+        }
+    }
+    @Test public void repeatedFinishCannotMintAnotherFakeReceipt(){
+        var p=plan();assertEquals(1,p.finish(batches(),()->false).hypotheticalClicks());
+        var again=p.finish(batches(),()->false);assertEquals("ALREADY_CONSUMED",again.reason());assertEquals(0,again.hypotheticalClicks());assertEquals(-1,again.x());
+    }
+    @Test public void failedBatchConsumesThePlanAndDoesNotRetry(){
+        var p=plan();var rows=batches();rows.remove(8);assertEquals("MISSING_BATCHES",p.finish(rows,()->false).reason());
+        assertEquals("ALREADY_CONSUMED",p.finish(batches(),()->false).reason());
+    }
+    @Test public void batchEvidenceCannotMoveAcrossRoiOrBeOffsetAgain(){
+        var rows=batches();var nativeNumber=rows.get(1).get(0);
+        rows.set(1,List.of(new FrameStructureEvidence.Line("10",nativeNumber.x()+256,nativeNumber.y(),nativeNumber.width(),nativeNumber.height(),.99)));
+        assertEquals("ROW_OUTSIDE_OWN_ROI",plan().finish(rows,()->false).reason());
+        rows=batches();rows.set(1,List.of(line("10",new Box(2,2,18,15),.99)));
+        assertEquals("ROW_OUTSIDE_OWN_ROI",plan().finish(rows,()->false).reason());
+    }
+    @Test public void lowNonfiniteAndMissingConfidenceAreNotPromoted(){
+        for(double score:new double[]{.849,Double.NaN,Double.POSITIVE_INFINITY,-1,1.01}){
+            var rows=batches();var row=rows.get(1).get(0);rows.set(1,List.of(new FrameStructureEvidence.Line(row.text(),row.x(),row.y(),row.width(),row.height(),score)));
+            var outcome=plan().finish(rows,()->false);assertEquals("ROI_ROW_SHAPE_OR_CONFIDENCE",outcome.reason());assertEquals(0,outcome.hypotheticalClicks());
+        }
+    }
+    @Test public void wholeSearchFallbackDoesNotBecomeLocalizedDigitEvidence(){
+        var p=plan();var rows=batches();rows.set(1,List.of(line("10",p.rois().get(1),.99)));
+        assertEquals("ROW_TOUCHES_ROI",p.finish(rows,()->false).reason());
+    }
+    @Test public void extraRowsOrMergedNumbersDoNotGetDiscardedOrSplit(){
+        var rows=batches();var row=rows.get(1).get(0);rows.set(1,List.of(row,row));
+        assertEquals("ROI_ROW_COUNT",plan().finish(rows,()->false).reason());
+        for(String text:List.of("5 10","510","10积分","+10","0","１０")){
+            rows=batches();rows.set(1,List.of(new FrameStructureEvidence.Line(text,row.x(),row.y(),row.width(),row.height(),.99)));
+            var result=plan().finish(rows,()->false);
+            // 510 is one valid positive displayed number; neither it nor other values are rewritten.
+            if(text.equals("510"))assertEquals(510,result.displayedPoints());else assertEquals("NUMBER_NOT_PLAIN",result.reason());
+        }
+    }
+    @Test public void exactTitleAndEachOrderedDayMustBeIndependentlyRead(){
+        var rows=batches();var title=rows.get(0).get(0);rows.set(0,List.of(new FrameStructureEvidence.Line("每日活动",title.x(),title.y(),title.width(),title.height(),.99)));
+        assertEquals("TITLE_NOT_EXACT",plan().finish(rows,()->false).reason());
+        rows=batches();var first=rows.get(2).get(0);rows.set(2,List.of(new FrameStructureEvidence.Line("Day 2",first.x(),first.y(),first.width(),first.height(),.99)));
+        assertEquals("WRONG_DAY",plan().finish(rows,()->false).reason());
+    }
+    @Test public void colorsMustDescribeTheSameGrayBytesAndObservedRingMustBeYellow(){
+        var f=fixture();f.argb()[0]=0xff000000;assertEquals("COLOR_GRAY_MISMATCH",LocalCardMockPlan.prepare(f.gray(),f.argb(),W,H,()->false).reason());
+        byte[] gray=DailyCheckInRegionTest.pixels();int[] argb=new int[gray.length];
+        for(int i=0;i<gray.length;i++){int g=gray[i]&255;argb[i]=0xff000000|(g<<16)|(g<<8)|g;}
+        assertEquals("RING_NOT_YELLOW",LocalCardMockPlan.prepare(gray,argb,W,H,()->false).reason());
+    }
+    @Test public void planBindsTheExactHistoricalGrayImageAndCanReserveRecognitionOnce(){
+        var f=fixture();var p=LocalCardMockPlan.prepare(f.gray(),f.argb(),W,H,()->false);
+        assertTrue(p.matchesGray8(f.gray(),W,H,()->false));f.gray()[0]^=1;
+        assertFalse(p.matchesGray8(f.gray(),W,H,()->false));assertFalse(p.matchesGray8(f.gray(),W-1,H,()->false));
+        assertTrue(p.claimRecognition());assertFalse(p.claimRecognition());
+    }
+    @Test public void visualFallbackCannotInventADayOrFakeClick(){
+        var rows=batches();var first=rows.get(2).get(0);rows.set(2,List.of(new FrameStructureEvidence.Line(first.text(),15,first.y(),40,first.height(),.95)));
+        var result=plan().finish(rows,()->false);assertEquals("VISUAL_PREVIEW_ONLY",result.status());assertEquals(0,result.hypotheticalClicks());
+        assertEquals(0,result.realExecutions());assertEquals(-1,result.day());assertEquals(272,result.x());
+    }
+    @Test public void cancelOrMalformedImageCannotProduceAFakeReceipt(){
+        var f=fixture();assertEquals("CANCELED",LocalCardMockPlan.prepare(f.gray(),f.argb(),W,H,()->true).reason());
+        assertEquals("INVALID_LOCAL_CROP",LocalCardMockPlan.prepare(new byte[1],new int[1],W,H,()->false).reason());
+        var p=plan();assertEquals("CANCELED",p.finish(batches(),()->true).reason());assertEquals("ALREADY_CONSUMED",p.finish(batches(),()->false).reason());
+    }
+    @Test public void originalRowsAndRasterRemainUnchanged(){
+        var f=fixture();var original=f.gray().clone();var colors=f.argb().clone();var p=LocalCardMockPlan.prepare(f.gray(),f.argb(),W,H,()->false);
+        assertArrayEquals(original,f.gray());assertArrayEquals(colors,f.argb());
+        var rows=batches();var snapshot=new ArrayList<>(rows);p.finish(rows,()->false);assertEquals(snapshot,rows);
+        for(int i=0;i<rows.size();i++)assertSame(snapshot.get(i).get(0),rows.get(i).get(0));Arrays.fill(original,(byte)0);Arrays.fill(colors,0);
+    }
+}
