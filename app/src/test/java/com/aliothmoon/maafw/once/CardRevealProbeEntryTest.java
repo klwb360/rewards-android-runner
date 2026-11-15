@@ -83,6 +83,23 @@ public class CardRevealProbeEntryTest {
         ordered(boundary,"bounds.inJustDecodeBounds=true","bounds.outWidth!=roi.width()",
                 "BitmapFactory.decodeByteArray(png,0,png.length,options)","DailyCheckInRegion.observeGray8(");
     }
+    @Test public void followUpRequiresClippedStartAndConfirmedMovementBeforeRegionCapture()throws Exception{
+        String runtime=source("CardRevealProbeRuntime");
+        String start=between(runtime,"static CardRevealProbeRuntime start(","private boolean postOwner(");
+        ordered(start,"bounds.width()!=1440||bounds.height()!=2560","new CardRevealProbeRuntime(");
+        String run=between(runtime,"private void run()","private void settle()");
+        ordered(run,"if(exact.index==1)","CardRevealProbeTarget.initialClipped(",
+                "if(!initialClipped){stage=Stage.START_NOT_CLIPPED;break;}","scroll(exact,selected.direction())",
+                "if(!selected.sameCandidate(previous))", "if(!initialClipped||swipes<1||dispatches<1||firstScrollRequest<0||selected.region().coarse().equals(initialCoarse))",
+                "stage=Stage.NO_SCROLL_MOVEMENT;break;", "capture(exact,");
+        String scroll=between(runtime,"private void scroll(","private void capture(");
+        ordered(scroll,"if(result.invocationAttempted()){dispatches++", "if(result.commandExitZero())swipes++",
+                "intent.finishScroll(permit,result,actor.knownClean(),SystemClock.elapsedRealtime())");
+        String capture=between(runtime,"private void capture(","private boolean checkBoundary(");
+        ordered(capture,"if(!initialClipped||swipes<1||dispatches<1||firstScrollRequest<0||revealMs<=0)throw",
+                "AndroidCardRegionCapture.capture(");
+        assertEquals("rewards-card-reveal-v2",CardRevealProbeScope.DIRECTORY);
+    }
     @Test public void publicationOwnsPixelsUntilFinallyWipeAndCannotResetOrOverwriteRecords()throws Exception{
         String runtime=source("CardRevealProbeRuntime");
         String capture=between(runtime,"private void capture(","private boolean checkBoundary(");

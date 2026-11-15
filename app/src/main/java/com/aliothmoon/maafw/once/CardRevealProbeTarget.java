@@ -9,6 +9,21 @@ final class CardRevealProbeTarget {
         boolean sameCandidate(Selection other){return state==State.CANDIDATE&&other!=null
                 &&other.state==State.CANDIDATE&&region.equals(other.region)&&crop.equals(other.crop);}
     }
+    /** UI geometry evidence only; pixel boundaries are checked after the single crop.
+     * The top-band case is limited to the verified portrait probe layout: browser chrome
+     * ends at one eighth of the display height. The broader capture safety band is not
+     * evidence that a card was initially clipped. */
+    static boolean initialClipped(OverviewUiProtocol.Report report,int width,int height) {
+        var selected=select(report,width,height);
+        if(selected.state()!=State.SCROLL||selected.direction()==null)return false;
+        OverviewUiRegions.Region target=null;
+        for(var region:report.overview().regions())if(region.role()==OverviewUiRegions.Role.CHECK_IN){
+            if(target!=null)return false;target=region;
+        }
+        if(target==null||target.heading()==null||!target.coarse().contains(target.heading()))return false;
+        int chromeBottom=height/8;
+        return !target.completeVisible()||target.coarse().top()<chromeBottom&&target.heading().top()>=chromeBottom;
+    }
     static Selection select(OverviewUiProtocol.Report report,int width,int height) {
         if(report==null||!report.qualified()||width<=0||height<=width)return held(State.UNQUALIFIED);
         var view=report.overview().viewport();
