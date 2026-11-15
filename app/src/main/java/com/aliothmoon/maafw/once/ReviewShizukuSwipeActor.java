@@ -77,8 +77,10 @@ final class ReviewShizukuSwipeActor {
     private final Direction allowedDirection;
     private final ProcessFence processFence;
     private OverviewScanIntent.ScrollPermit overviewPermit;
+    private CardRevealProbeIntent.ScrollPermit cardRevealPermit;
     private boolean quarantined(){return processFence!=null&&processFence.quarantine!=null;}
     private boolean scopeCurrent(){
+        if(cardRevealPermit!=null)return cardRevealPermit.intent.live()&&cardRevealPermit.current(android.os.SystemClock.elapsedRealtime());
         if(overviewPermit!=null)return overviewPermit.intent.live()&&overviewPermit.current(android.os.SystemClock.elapsedRealtime());
         if(!production)return true;
         if(ReadOnlyCheckpoint.blocksLiveInput())return false;
@@ -93,6 +95,15 @@ final class ReviewShizukuSwipeActor {
         var actor=new ReviewShizukuSwipeActor(new AndroidReviewShizukuSwipeBackend(context),
                 new AtomicBoolean(),true,PROCESS,permit.direction);
         actor.overviewPermit=permit;return actor;
+    }
+    /** UI-only locate authority; never creates or borrows an overview frame proof. */
+    static ReviewShizukuSwipeActor forCardReveal(Context context,CardRevealProbeIntent.ScrollPermit permit){
+        if(permit==null||!permit.intent.live()||PROCESS.quarantine!=null
+                ||!permit.claimActor(android.os.SystemClock.elapsedRealtime()))
+            throw new SecurityException("Fresh card reveal scroll permit required");
+        var actor=new ReviewShizukuSwipeActor(new AndroidReviewShizukuSwipeBackend(context),
+                new AtomicBoolean(),true,PROCESS,permit.direction);
+        actor.cardRevealPermit=permit;return actor;
     }
     /** Exact already-consented root profile, isolated ordinary app process only. */
     static ReviewShizukuSwipeActor forProgressScan(Context context) {

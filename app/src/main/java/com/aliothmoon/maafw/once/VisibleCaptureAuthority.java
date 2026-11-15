@@ -45,6 +45,33 @@ final class VisibleCaptureAuthority {
         }
         long deadline(){return deadline;}
     }
+    static final class CardRevealApproval {
+        final RealCaptureClaim.ProcessEpoch epoch;
+        final Object owner,visible,request;
+        final long issued,deadline;
+        final boolean live;
+        private boolean used;
+        private CardRevealApproval(RealCaptureClaim.ProcessEpoch epoch,Object owner,Object visible,Object request,
+                long issued,long deadline,boolean live){
+            this.epoch=epoch;this.owner=owner;this.visible=visible;this.request=request;
+            this.issued=issued;this.deadline=deadline;this.live=live;
+        }
+        synchronized boolean consume(long now){boolean first=!used;used=true;
+            return first&&epoch!=null&&owner!=null&&visible!=null&&request!=null&&now>=issued&&now<deadline;}
+    }
+    static CardRevealProbeIntent issueCardRevealIntent(DormantCaptureConfirmationActivity activity,
+            DormantCaptureConfirmationActivity.LiveClick click,RealCaptureClaim.ProcessEpoch epoch,Object owner,long now){
+        CaptureReleaseGate.requireConfigured();long deadline=CardRevealProbeScope.sessionDeadline(now);
+        if(activity==null||click==null||epoch!=CaptureSessionRuntime.alignmentEpoch()||owner==null
+                ||!NativeCheckInSession.permissionReady()||!activity.cardRevealApprovalMatches(owner,click)
+                ||!click.consume(activity,activity.requestIdentity(),owner,epoch))
+            throw new SecurityException("Fresh visible card reveal approval required");
+        return new CardRevealProbeIntent(new CardRevealApproval(epoch,owner,activity,activity.requestIdentity(),now,deadline,true),now);
+    }
+    static CardRevealProbeIntent fixtureCardRevealIntent(RealCaptureClaim.ProcessEpoch epoch,Object owner,long now){
+        return new CardRevealProbeIntent(new CardRevealApproval(epoch,owner,new Object(),new Object(),now,
+                CardRevealProbeScope.sessionDeadline(now),false),now);
+    }
     static final class OverviewApproval {
         final RealCaptureClaim.ProcessEpoch epoch;
         final Object owner, visible, request;
