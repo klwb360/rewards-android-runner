@@ -13,7 +13,7 @@ import java.util.UUID;
 
 /** Exact historical local crop. No caller path, capture, live source proof or input capability. */
 final class LocalCardMockFiles {
-    static final String DIRECTORY="rewards-native-card-mock-v1";
+    static final String DIRECTORY="rewards-native-card-roi-diag-v2";
     static final String IMAGE_SHA="375e41a92ecb00751832ddcd4f2ea1dd31e04033ba18be7b34ebb0a53db573ec";
     static final String MANIFEST_SHA="9cd4b198b1d5e18170ad859f64ddd8753b081c9c0c11d54ed46e257143ab8378";
     static final int WIDTH=1336,HEIGHT=588;
@@ -70,7 +70,7 @@ final class LocalCardMockFiles {
         Object parent=directory(files);Path scope=files.resolve(DIRECTORY);
         try{Files.createDirectory(scope);}catch(FileAlreadyExistsException exists){/* Verify exact path. */}
         Object child=directory(scope);
-        write(scope,"RUN.burned","NATIVE_CARD_MOCK_V1 historicalLocalCrop=true maxMock=1 realClicks=0 captures=0\n".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+        write(scope,"RUN.burned","NATIVE_CARD_ROI_DIAG_V2 historicalLocalCrop=true maxMock=0 diagnosticOnly=true realClicks=0 captures=0\n".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
         try(var file=FileChannel.open(scope,StandardOpenOption.READ,LinkOption.NOFOLLOW_LINKS)){file.force(true);}
         try(var file=FileChannel.open(files,StandardOpenOption.READ,LinkOption.NOFOLLOW_LINKS)){file.force(true);}
         if(!parent.equals(directory(files))||!child.equals(directory(scope)))throw new SecurityException("Mock record directory changed");
@@ -82,7 +82,7 @@ final class LocalCardMockFiles {
         if(!cacheId.equals(directory(cache)))throw new SecurityException("Local cache changed");return out;
     }
     static void write(Path parent,String name,byte[] bytes)throws Exception{
-        if(!name.equals("RUN.burned")&&!name.equals("MARKED.png")&&!name.equals("RESULT.json"))throw new SecurityException("Fixed local output required");
+        if(!name.equals("DIAGNOSTICS.json")&&!name.equals("RUN.burned")&&!name.equals("MARKED.png")&&!name.equals("RESULT.json"))throw new SecurityException("Fixed local output required");
         Object identity=directory(parent);
         try(var file=FileChannel.open(parent.resolve(name),StandardOpenOption.WRITE,StandardOpenOption.CREATE_NEW,LinkOption.NOFOLLOW_LINKS)){
             ByteBuffer data=ByteBuffer.wrap(bytes);while(data.hasRemaining())if(file.write(data)<=0)throw new SecurityException("Local output incomplete");file.force(true);
