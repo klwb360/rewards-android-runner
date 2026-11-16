@@ -29,7 +29,9 @@ public final class NativeUiStructureHelper {
         long start = SystemClock.elapsedRealtime(), deadline;
         if (args == null || !validReadyArguments(args) || !NativeUiStructureProtocol.validNonce(args[0])) return;
         boolean readyMode=args.length==3;
-        boolean cardsMode=readyMode&&"OVERVIEW_CARDS_V1".equals(args[2]);
+        boolean liveMode=readyMode&&"LIVE_REWARDS_UI_V1".equals(args[2]);
+        boolean visitMode=readyMode&&"LIVE_VISIT_V1".equals(args[2]);
+        boolean cardsMode=readyMode&&"OVERVIEW_CARDS_V1".equals(args[2])||liveMode||visitMode;
         boolean overviewMode=readyMode&&"OVERVIEW_V5".equals(args[2])||cardsMode;
         boolean regionMode=readyMode&&"BOUND_REGIONS".equals(args[2]);
         boolean boundMode=overviewMode||regionMode||readyMode&&"BOUND_POINTS_V53".equals(args[2]);
@@ -52,6 +54,9 @@ public final class NativeUiStructureHelper {
         NativeUiRegions.Pair regions = regionMode ? NativeUiRegions.Pair.empty() : null;
         OverviewUiRegions.Result overview=OverviewUiRegions.Result.rejected(OverviewUiRegions.Status.WRONG_STRUCTURE);
         OverviewUiProtocol.ScrollHint scrollHint=OverviewUiProtocol.ScrollHint.UNKNOWN;
+        java.util.List<LiveUiProtocol.Item> liveItems=java.util.List.of();
+        LiveVisitGuard.Accumulator liveGuard=new LiveVisitGuard.Accumulator();
+        LiveVisitGuard.Hint visitHint=LiveVisitGuard.Hint.UNKNOWN;
         RemainingCardUi.Result cards=cardsMode?RemainingCardUi.Result.rejected(RemainingCardUi.Status.WRONG_STRUCTURE):null;
         HandlerThread thread = null;
         UiAutomation automation = null;
@@ -140,6 +145,7 @@ public final class NativeUiStructureHelper {
                         throw new Stop(NativeUiStructureProtocol.Reason.TREE_OVERFLOW);
                     chars += text.length() + description.length();
                     if(readyMode)diagnostics.node(node.getClassName(),text,description);
+                    if(liveMode||visitMode)liveGuard.node(node.getClassName(),text,description,visible);
                     if(fieldMode){Rect originalBounds=new Rect();node.getBoundsInScreen(originalBounds);
                         fieldDiagnostics.node(current.index(),current.parent(),current.depth(),originalBounds.left,originalBounds.top,originalBounds.right,originalBounds.bottom,visible,node.isEnabled(),node.isClickable(),node.getClassName(),node.getViewIdResourceName(),text,description);
                     }
@@ -174,8 +180,10 @@ public final class NativeUiStructureHelper {
             if(!fieldMode){if(!readyMode||!diagnostics.blocked()){
                 NativeUiStructureParser.Result result;
                 if(overviewMode){
+                    if(liveMode||visitMode){var fixed=LiveUiParser.labels(boundRecords);boundRecords.clear();boundRecords.addAll(fixed);}
                     overview=OverviewUiParser.parse(boundRecords);
                     if(cardsMode)cards=RemainingCardUiParser.parse(boundRecords,overview);
+                    if(visitMode)visitHint=LiveVisitGuard.classify(boundRecords,liveGuard,overview.status()==OverviewUiRegions.Status.OBSERVED&&cards.status()==RemainingCardUi.Status.OBSERVED);
                     if(overview.status()==OverviewUiRegions.Status.OBSERVED)scrollHint=OverviewUiParser.scrollHint(boundRecords,overviewScroll);
                     result=new NativeUiStructureParser.Result(
                         new NativeUiStructureParser.TaskResult(NativeUiStructureParser.Status.UNKNOWN,0,0,0,NativeUiStructureParser.Unit.UNESTABLISHED),
@@ -186,6 +194,7 @@ public final class NativeUiStructureHelper {
                 }else result = boundMode?NativeUiBoundPointsParser.parse(boundRecords):formatMode?NativeUiStructureV50Parser.parse(records):NativeUiStructureParser.parse(records);
                 search = task(result.search()); reading = task(result.reading());
             }} // A valid tree with a fixed sign-in/error label retains UNKNOWN tasks; not page-ready proof.
+            if(liveMode&&(liveGuard.challenges>0||liveGuard.dialogs>0))throw new Stop(NativeUiStructureProtocol.Reason.UI_BLOCKER);
             acquired = SystemClock.elapsedRealtime();
             checkTime(readEnd);
             reason = NativeUiStructureProtocol.Reason.OK;
@@ -201,6 +210,11 @@ public final class NativeUiStructureHelper {
         } finally {
             while (!pending.isEmpty()) {
                 try { pending.removeFirst().node().recycle(); } catch (Throwable ignored) { clean = false; }
+            }
+            if(liveMode&&reason==NativeUiStructureProtocol.Reason.OK&&overview.status()==OverviewUiRegions.Status.OBSERVED&&cards.status()==RemainingCardUi.Status.OBSERVED){
+                try{
+                    liveItems=LiveUiParser.identities(boundRecords,overview,cards);
+                }catch(RuntimeException invalid){reason=NativeUiStructureProtocol.Reason.TREE_FAILED;liveItems=java.util.List.of();}
             }
             nodeCount = records.size();
             records.clear();
@@ -240,13 +254,15 @@ public final class NativeUiStructureHelper {
             NativeUiStructureProtocol.Report report = new NativeUiStructureProtocol.Report(args[0], start,
                     acquired, finished, reason, cleanup, nodeCount, chars, windowId, displayId,
                     bounds.left, bounds.top, bounds.right, bounds.bottom, -1, -1, search, reading,readyMode?diagnostics.result(idle):null,fieldMode?fieldDiagnostics.result():null,boundMode&&!overviewMode,regions);
-            if(cardsMode)System.out.println(OverviewUiProtocol.encode(new OverviewUiProtocol.Report(report,overview,scrollHint,cards)));
+            if(visitMode)System.out.println(LiveVisitGuard.encode(new LiveVisitGuard.Report(report,visitHint,liveGuard.webViews,liveGuard.challenges,liveGuard.dialogs)));
+            else if(liveMode)System.out.println(LiveUiProtocol.encode(new LiveUiProtocol.Report(new OverviewUiProtocol.Report(report,overview,scrollHint,cards),reason==NativeUiStructureProtocol.Reason.OK?liveItems:java.util.List.of())));
+            else if(cardsMode)System.out.println(OverviewUiProtocol.encode(new OverviewUiProtocol.Report(report,overview,scrollHint,cards)));
             else if(overviewMode)System.out.println(OverviewUiProtocol.encode(new OverviewUiProtocol.Report(report,overview,scrollHint)));
             else System.out.println(NativeUiStructureProtocol.encode(report));
             System.out.flush();
         } catch (Throwable ignored) { /* No raw exception or partial report is published. */ }
     }
-    static boolean validReadyArguments(String[] args){return args!=null&&(args.length==2||args.length==3&&("READY_V49".equals(args[2])||"FORMAT_V50".equals(args[2])||"DIAGNOSTIC_V51".equals(args[2])||"DIAGNOSTIC_LOCATED_V52".equals(args[2])||"BOUND_POINTS_V53".equals(args[2])||"BOUND_REGIONS".equals(args[2])||"OVERVIEW_V5".equals(args[2])||"OVERVIEW_CARDS_V1".equals(args[2])));}
+    static boolean validReadyArguments(String[] args){return args!=null&&(args.length==2||args.length==3&&("READY_V49".equals(args[2])||"FORMAT_V50".equals(args[2])||"DIAGNOSTIC_V51".equals(args[2])||"DIAGNOSTIC_LOCATED_V52".equals(args[2])||"BOUND_POINTS_V53".equals(args[2])||"BOUND_REGIONS".equals(args[2])||"OVERVIEW_V5".equals(args[2])||"OVERVIEW_CARDS_V1".equals(args[2])||"LIVE_REWARDS_UI_V1".equals(args[2])||"LIVE_VISIT_V1".equals(args[2])));}
     private static boolean packageMatches(CharSequence value) {
         return value != null && value.length() == BING.length() && BING.contentEquals(value);
     }

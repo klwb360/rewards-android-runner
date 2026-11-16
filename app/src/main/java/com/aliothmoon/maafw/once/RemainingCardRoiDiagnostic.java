@@ -167,6 +167,7 @@ final class RemainingCardRoiDiagnostic {
         if(row==null||row.text()==null||row.text().length()>128)return TokenClass.INVALID;
         String text=row.text();if(blank(text))return TokenClass.BLANK;
         if(role==Role.WEEKLY_TITLE&&text.equals("每日活动"))return TokenClass.EXPECTED_TITLE;
+        if(role==Role.CHECK_IN_TITLE&&(text.equals("签入")||text.equals("签到")))return TokenClass.EXPECTED_TITLE;
         if(role==Role.ACTIVITY_TITLE&&RemainingCardPlan.token(role,text))return TokenClass.ACTIVITY_TITLE;
         if(role.ordinal()>=2&&role.ordinal()<=8&&day(text,role.ordinal()-1))return TokenClass.EXPECTED_DAY;
         for(int day=1;day<=7;day++)if(day(text,day))return TokenClass.OTHER_DAY;
@@ -175,7 +176,7 @@ final class RemainingCardRoiDiagnostic {
         return TokenClass.OTHER_TEXT;
     }
     private static boolean expected(Role role,TokenClass token){return switch(role){
-        case WEEKLY_TITLE->token==TokenClass.EXPECTED_TITLE;
+        case WEEKLY_TITLE,CHECK_IN_TITLE->token==TokenClass.EXPECTED_TITLE;
         case ACTIVITY_TITLE->token==TokenClass.ACTIVITY_TITLE;
         case NUMBER->token==TokenClass.POSITIVE_NUMBER;
         case POINTS->token==TokenClass.POSITIVE_NUMBER||token==TokenClass.PLUS_NUMBER;

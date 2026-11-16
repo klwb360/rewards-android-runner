@@ -13,6 +13,7 @@ public class UiStructureCheckpointWiringTest {
   while(m.find()){if(m.group(1).equals("startCheckpointRead"))continue;assertTrue(m.group(1),m.group(2).contains("if(ReadOnlyCheckpoint.blocksLiveInput())throw"));count++;}assertTrue(count>=17);
   count=0;int alignment=0,overviewIntent=0,overviewFrame=0,cardReveal=0;m=Pattern.compile("static [\\w.<>]+ (issue\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(s("VisibleCaptureAuthority"));
   while(m.find()){
+   if(m.group(1).equals("issueLiveRewardsApproval"))continue; // New explicit live authority is covered by LiveRewardsEntryTest.
    if(m.group(1).equals("issueAlignment")){alignment++;continue;} // Independently checked by UiImageAlignmentEntryTest.
    if(m.group(1).equals("issueOverviewIntent")){overviewIntent++;continue;} // Independently checked by OverviewEntryWiringTest.
    if(m.group(1).equals("issueOverviewFrame")){overviewFrame++;continue;}

@@ -29,6 +29,9 @@ final class ReviewBingNavigation {
     private final CaptureSessionRuntime.RootRecoveryReadPermit rootRecoveryPermit;
     private final CaptureSessionRuntime.RootCurrentReadPermit rootCurrentPermit;
     private UiImageAlignmentRuntime.MetadataPermit alignmentPermit;
+    private LiveRunAuthority liveRunAuthority;
+    private java.util.function.BooleanSupplier liveRunHidden;
+    private int liveRunPairs;
     enum FixedStatus { NOT_INVOKED, AUTHORITY_REJECTED, PROCESS_NULL, STREAM_MISSING, BUFFER_LIMIT, READ_TIMEOUT, EXIT_NONZERO, IO_UNKNOWN, READ_COMPLETE, CLEANUP_UNKNOWN }
     enum PairGate { NOT_INVOKED, PERMIT_REJECTED, AUTHORITY_REJECTED, BUDGET_REJECTED, WINDOWS_READ, ACTIVITIES_READ, POST_AUTHORITY, PARSED }
     record FixedRead(FixedStatus status,int bytes,boolean invoked,boolean exitObserved,int exitCode,boolean quiet,boolean knownClean) {
@@ -140,6 +143,41 @@ final class ReviewBingNavigation {
         this.context=context.getApplicationContext();this.installed=installed;this.bingUid=bingUid;this.systemUiUid=systemUiUid;
     }
     static boolean knownClean(){return quarantine==null;}
+    /** Explicit new visible-run reader; it neither consumes nor refills old reader quotas. */
+    static ReviewBingNavigation forLiveRun(Context context,BingIdentityEvidence.Installed installed,int bingUid,int systemUiUid,
+            BingNavigationSnapshot.ReadOnlyGuard guard,LiveRunAuthority authority,java.util.function.BooleanSupplier hidden){
+        if(authority==null||!authority.live()||guard==null||!guard.valid()||hidden==null)
+            throw new SecurityException("Visible live run metadata capability required");
+        var reader=new ReviewBingNavigation(context,installed,bingUid,systemUiUid,false,guard);
+        reader.liveRunAuthority=authority;reader.liveRunHidden=hidden;return reader;
+    }
+    private boolean liveRunCurrent(){
+        if(liveRunAuthority==null)return true;
+        try{return liveRunAuthority.live()&&liveRunAuthority.current()&&liveRunHidden!=null&&liveRunHidden.getAsBoolean();}
+        catch(RuntimeException unknown){return false;}
+    }
+    record LiveRead(BingNavigationSnapshot.Result template,BingNavigationSnapshot.LiveVisitResult visit,boolean clean){ }
+    LiveRead readLiveRun(BingNavigationSnapshot.Shape shape,BingNavigationSnapshot.Ready original){
+        byte[] windows=null,activities=null;
+        BingNavigationSnapshot.Result template=BingNavigationSnapshot.Result.unknown();
+        BingNavigationSnapshot.LiveVisitResult visit=BingNavigationSnapshot.LiveVisitResult.unknown(BingNavigationSnapshot.LiveVisitGate.INPUT);
+        try{
+            if(liveRunAuthority==null||!liveRunCurrent()||++liveRunPairs>4096||!authorityMatches(shape))return new LiveRead(template,visit,knownClean());
+            long lower=SystemClock.elapsedRealtime();windows=readFixed(true);
+            if(windows==null||!liveRunCurrent()||!authorityMatches(shape))return new LiveRead(template,visit,knownClean());
+            activities=readFixed(false);
+            if(activities==null||!liveRunCurrent()||!authorityMatches(shape)||!knownClean())return new LiveRead(template,visit,knownClean());
+            String w=new String(windows,java.nio.charset.StandardCharsets.UTF_8),a=new String(activities,java.nio.charset.StandardCharsets.UTF_8);
+            long observed=SystemClock.elapsedRealtime();var profile=new BingNavigationSnapshot.Profile(bingUid,systemUiUid,shape);
+            if(original==null){
+                var parsed=BingNavigationSnapshot.parseCurrentTemplate(w,a,profile,readOnlyGuard,lower,observed);
+                template=new BingNavigationSnapshot.Result(parsed.status(),parsed.source()==null?null:parsed.source().ready(),parsed.readOnlyGate(),parsed.firstGate());
+            }else visit=BingNavigationSnapshot.parseLiveVisit(w,a,profile,readOnlyGuard,original,lower,observed);
+            if(!liveRunCurrent()||!authorityMatches(shape))return new LiveRead(BingNavigationSnapshot.Result.unknown(),
+                    BingNavigationSnapshot.LiveVisitResult.unknown(BingNavigationSnapshot.LiveVisitGate.STRICT_SOURCE),knownClean());
+            return new LiveRead(template,visit,knownClean());
+        }finally{if(windows!=null)Arrays.fill(windows,(byte)0);if(activities!=null)Arrays.fill(activities,(byte)0);}
+    }
     private boolean process(){return Looper.myLooper()!=Looper.getMainLooper()&&android.os.Process.myUid()>=10000
         &&"com.aliothmoon.maafw.productrewardsworking.capturereview".equals(context.getPackageName())
         &&(context.getPackageName()+":capture_once").equals(Application.getProcessName());}
@@ -356,17 +394,20 @@ final class ReviewBingNavigation {
         ParcelFileDescriptor stdout=null,stdin=null,stderr=null;boolean invoked=false,quiet=false,clean=false,exitObserved=false;
         int count=0,exit=-1;FixedStatus status=FixedStatus.AUTHORITY_REJECTED;
         try{
+            if(!liveRunCurrent())return null;
             if(alignmentPermit!=null&&!alignmentPermit.current())return null;
             var binder=Shizuku.getBinder();if(binder==null||!binder.isBinderAlive()||!Shizuku.pingBinder()||Shizuku.isPreV11()
                 ||Shizuku.getUid()!=0||Shizuku.checkSelfPermission()!=PackageManager.PERMISSION_GRANTED)return null;
             var service=IShizukuService.Stub.asInterface(binder);if(service==null)return null;
             if(alignmentPermit!=null&&!alignmentPermit.current())return null;
+            if(!liveRunCurrent())return null;
             invoked=true;status=FixedStatus.PROCESS_NULL;process=service.newProcess(command,null,null);
             if(process==null)throw new IllegalStateException();
             status=FixedStatus.STREAM_MISSING;stdout=process.getInputStream();stdin=process.getOutputStream();stderr=process.getErrorStream();
             if(stdout==null)throw new IllegalStateException();input=new ParcelFileDescriptor.AutoCloseInputStream(stdout);stdout=null;status=FixedStatus.IO_UNKNOWN;
             long end=SystemClock.elapsedRealtime()+2000;
             for(;;){
+                if(!liveRunCurrent()){status=FixedStatus.READ_TIMEOUT;throw new IllegalStateException();}
                 if(alignmentPermit!=null&&!alignmentPermit.current()){status=FixedStatus.READ_TIMEOUT;throw new IllegalStateException();}
                 int available=input.available();
                 if(available>0){if(count==bytes.length){status=FixedStatus.BUFFER_LIMIT;throw new IllegalStateException();}
@@ -376,6 +417,7 @@ final class ReviewBingNavigation {
             }
             exit=process.exitValue();exitObserved=true;if(exit!=0){status=FixedStatus.EXIT_NONZERO;return null;}
             if(alignmentPermit!=null&&!alignmentPermit.current()){status=FixedStatus.READ_TIMEOUT;throw new IllegalStateException();}
+            if(!liveRunCurrent()){status=FixedStatus.READ_TIMEOUT;throw new IllegalStateException();}
             input.close();input=null;if(stdin!=null){stdin.close();stdin=null;}if(stderr!=null){stderr.close();stderr=null;}clean=true;
             status=FixedStatus.READ_COMPLETE;return Arrays.copyOf(bytes,count);
         }catch(Exception failure){if(failure instanceof InterruptedException)Thread.currentThread().interrupt();

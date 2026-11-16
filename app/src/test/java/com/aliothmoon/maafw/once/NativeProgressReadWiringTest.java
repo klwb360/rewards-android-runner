@@ -15,6 +15,7 @@ public class NativeProgressReadWiringTest {
  @Test public void allLegacyLiveIssuersIncludingUniqueAreProgressBlocked()throws Exception{
   var m=java.util.regex.Pattern.compile("static [\\w.<>]+ (issue\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(source("VisibleCaptureAuthority.java"));int count=0,alignment=0,overviewIntent=0,overviewFrame=0,cardReveal=0;boolean unique=false;
   while(m.find()){String name=m.group(1);
+   if(name.equals("issueLiveRewardsApproval"))continue; // New explicit live authority is covered by LiveRewardsEntryTest.
    if(name.equals("issueAlignment")){alignment++;continue;} // Independently checked by UiImageAlignmentEntryTest.
    if(name.equals("issueOverviewIntent")){overviewIntent++;continue;} // Independently checked by OverviewEntryWiringTest.
    if(name.equals("issueOverviewFrame")){overviewFrame++;continue;}

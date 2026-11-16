@@ -56,7 +56,9 @@ public class CardRevealProbeEntryTest {
         String transport=source("AndroidCardRegionCapture");
         ordered(transport,"!permit.intent.live()","permit.intent.cropSpent()","gate.consume()",
                 "permit.intent.claimCropDispatch(","process=service.newProcess(");
-        assertEquals(1,transport.split("service\\.newProcess\\(",-1).length-1);
+        String legacy=transport.substring(0,transport.indexOf("/** Independent live-run crop authority"));
+        assertEquals(1,legacy.split("service\\.newProcess\\(",-1).length-1);
+        assertEquals(2,transport.split("service\\.newProcess\\(",-1).length-1);
         String run=between(source("CardRevealProbeRuntime"),"private void run()","private void settle()");
         assertTrue(Pattern.compile("capture\\(exact,[^;]+;\\s*break;").matcher(run).find());
     }

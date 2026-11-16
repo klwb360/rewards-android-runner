@@ -215,6 +215,8 @@ final class BingNavigationSnapshot {
             &&profile.equals(other.profile)&&focus.equals(other.focus);}
         boolean sameEntrySource(Ready other){return other!=null&&(kind==Kind.MAIN||kind==Kind.TEMPLATE)&&kind==other.kind&&profile.equals(other.profile)&&focus.equals(other.focus);}
         boolean sameTask(Ready other){return other!=null&&profile.equals(other.profile)&&task().equals(other.task());}
+        /** Exact live visit window identity; unlike sameTask this is not page-completion evidence. */
+        boolean sameLiveWindow(Ready other){return other!=null&&kind==other.kind&&profile.equals(other.profile)&&focus.equals(other.focus);}
         boolean fresh(long now){return lower>=0&&observed>=lower&&now>=observed&&now-lower<=5_000;}
         // No generated toString(): do not export tokens/window/Activity metadata.
     }
@@ -353,6 +355,64 @@ final class BingNavigationSnapshot {
         if(guard==null||!guard.valid()||original==null||original.kind()!=Kind.TEMPLATE||!original.profile().equals(profile)
             ||!original.task().equals(Integer.toString(RootSelectedPendingScope.SOURCE_TASK_ID)))return unknown(FirstGate.TIMED_RETURN_ANCHOR);
         return parseInternal(windows,activities,profile,guard,lower,observed,original);
+    }
+    enum LiveVisitKind { ORIGINAL_REWARDS, BOUND_CHILD, TRANSITION, UNKNOWN }
+    enum LiveVisitGate { INPUT, STRICT_SOURCE, TASK_CHANGED, ORIGINAL_CHANGED, ANCHOR_MISSING, ORIGINAL_READY, CHILD_BOUND }
+    static final class LiveVisitSource {
+        private final Ready original,current;
+        private final LiveVisitKind kind;
+        private LiveVisitSource(Ready original,Ready current,LiveVisitKind kind){this.original=original;this.current=current;this.kind=kind;}
+        Ready ready(){return current;}
+        LiveVisitKind kind(){return kind;}
+        boolean matchesOriginal(Ready exact){return original.sameSource(exact);}
+        boolean sameSource(LiveVisitSource other){return other!=null&&kind==other.kind
+                &&original.sameSource(other.original)&&current.sameLiveWindow(other.current);}
+        boolean fresh(long now){return current.fresh(now);}
+    }
+    record LiveVisitResult(LiveVisitKind kind,LiveVisitSource source,LiveVisitGate gate){
+        static LiveVisitResult unknown(LiveVisitGate gate){return new LiveVisitResult(LiveVisitKind.UNKNOWN,null,gate);}
+    }
+    /** New run only: dynamically bind the original task, never a historical task number. */
+    static LiveVisitResult parseLiveVisit(String windows,String activities,Profile profile,ReadOnlyGuard guard,
+            Ready original,long lower,long observed){
+        if(guard==null||!guard.valid()||original==null||original.kind()!=Kind.TEMPLATE
+                ||profile==null||!original.profile().equals(profile))return LiveVisitResult.unknown(LiveVisitGate.INPUT);
+        Result parsed=parseRootReadOnly(windows,activities,profile,guard,lower,observed);
+        if(parsed.status()==Status.UNKNOWN){
+            var focus=windows==null?null:BingForegroundSnapshot.parse(windows);
+            if(focus!=null&&MAIN.equals(focus.component()))parsed=parseEntrySource(windows,activities,profile,guard,lower,observed);
+        }
+        if(parsed.status()==Status.BING_TRANSITION)return new LiveVisitResult(LiveVisitKind.TRANSITION,null,LiveVisitGate.STRICT_SOURCE);
+        Ready current=parsed.ready();
+        if(parsed.status()!=Status.READY||current==null)return LiveVisitResult.unknown(LiveVisitGate.STRICT_SOURCE);
+        if(!original.sameTask(current))return LiveVisitResult.unknown(LiveVisitGate.TASK_CHANGED);
+        if(current.kind()==Kind.TEMPLATE){
+            if(!original.sameSource(current))return LiveVisitResult.unknown(LiveVisitGate.ORIGINAL_CHANGED);
+            return new LiveVisitResult(LiveVisitKind.ORIGINAL_REWARDS,
+                    new LiveVisitSource(original,current,LiveVisitKind.ORIGINAL_REWARDS),LiveVisitGate.ORIGINAL_READY);
+        }
+        if(current.kind()!=Kind.BROWSER&&current.kind()!=Kind.MAIN||!liveOriginalAnchor(windows,activities,profile,original))
+            return LiveVisitResult.unknown(LiveVisitGate.ANCHOR_MISSING);
+        return new LiveVisitResult(LiveVisitKind.BOUND_CHILD,
+                new LiveVisitSource(original,current,LiveVisitKind.BOUND_CHILD),LiveVisitGate.CHILD_BOUND);
+    }
+    private static boolean liveOriginalAnchor(String windows,String activities,Profile profile,Ready original){
+        Block template=null;
+        for(Block b:blocks(activities,HIST,true))if(TEMPLATE.equals(b.name)){
+            if(template!=null||!original.task().equals(b.task))return false;template=b;
+        }
+        if(template==null||!template.token.equals(original.focus.activity()))return false;
+        String[] linked=one(template.text,"^\\s*rootOfTask=(?:true|false)\\s+task=Task\\{[a-fA-F0-9]+ #(\\d+) type=standard A=(\\d+):com\\.microsoft\\.bing\\}\\s*$",2);
+        if(linked==null||!linked[0].equals(original.task())||!linked[1].equals(Integer.toString(profile.bingUid)))return false;
+        if(!token(template.text,"state","STOPPED")||token(template.text,"finishing","true")||!token(template.text,"finishing","false")
+                ||!exactTrue(template.text,"inHistory"))return false;
+        for(String field:List.of("mVisibleRequested","mVisible","mClientVisible","reportedVisible"))
+            if(!token(template.text,field,"false")||token(template.text,field,"true"))return false;
+        Block hidden=null;
+        for(Block b:blocks(windows,WINDOW,false))if(TEMPLATE.equals(b.name)){if(hidden!=null)return false;hidden=b;}
+        if(hidden==null||!hidden.token.equals(original.focus.window())||!appWindow(hidden,profile,original.task())||!safelyInvisible(hidden))return false;
+        String[] binding=one(hidden.text,"^\\s*mActivityRecord=ActivityRecord\\{([a-fA-F0-9]+) u0 ([^\\s}]+) t([0-9]+)(?:[^}]*)\\}\\s*$",3);
+        return binding!=null&&binding[0].equals(template.token)&&binding[1].equals(TEMPLATE)&&binding[2].equals(original.task());
     }
     private static Result parseInternal(String windows,String activities,Profile profile,ReadOnlyGuard guard,long lower,long observed){
         return parseInternal(windows,activities,profile,guard,lower,observed,null);
