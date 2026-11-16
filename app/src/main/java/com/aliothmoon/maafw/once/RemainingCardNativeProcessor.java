@@ -19,6 +19,7 @@ final class RemainingCardNativeProcessor implements AutoCloseable {
     private final CardNativeMockReceipt receipt;
     private final Object expectedOwner;
     private final RemainingCardChoice choice;
+    private final CardRecognitionSpec spec;
     private final BooleanSupplier allowed;
     private final AtomicBoolean started=new AtomicBoolean(),canceled=new AtomicBoolean();
     private volatile OnceBackend backend;
@@ -32,15 +33,24 @@ final class RemainingCardNativeProcessor implements AutoCloseable {
     private long nativeMs=-1;
     private int queries;
     private boolean diagramProduced;
+    private String titleHash="";
 
     /** Takes ownership of png even on an invalid constructor argument. */
     RemainingCardNativeProcessor(Context context,CardNativeMockReceipt receipt,Object expectedOwner,
             byte[] png,RemainingCardChoice choice,BooleanSupplier current){
-        if(context==null||receipt==null||expectedOwner==null||png==null||choice==null||current==null){
+        this(context,receipt,expectedOwner,png,choice,CardRecognitionSpec.historical(choice),current);
+    }
+    static RemainingCardNativeProcessor forSpec(Context context,CardNativeMockReceipt receipt,Object expectedOwner,
+            byte[] png,CardRecognitionSpec spec,BooleanSupplier current){
+        return new RemainingCardNativeProcessor(context,receipt,expectedOwner,png,null,spec,current);
+    }
+    private RemainingCardNativeProcessor(Context context,CardNativeMockReceipt receipt,Object expectedOwner,
+            byte[] png,RemainingCardChoice choice,CardRecognitionSpec spec,BooleanSupplier current){
+        if(context==null||receipt==null||expectedOwner==null||png==null||spec==null||current==null){
             if(png!=null)Arrays.fill(png,(byte)0);
             throw new IllegalArgumentException("Exact owned committed crop required");
         }
-        this.context=context;this.receipt=receipt;this.expectedOwner=expectedOwner;this.png=png;this.allowed=current;this.choice=choice;
+        this.context=context;this.receipt=receipt;this.expectedOwner=expectedOwner;this.png=png;this.allowed=current;this.choice=choice;this.spec=spec;
     }
     private boolean current(){
         if(canceled.get()||unknown)return false;
@@ -73,7 +83,8 @@ final class RemainingCardNativeProcessor implements AutoCloseable {
                 if((i&4095)==0)requireCurrent();
                 int pixel=argb[i];gray[i]=(byte)((77*((pixel>>>16)&255)+150*((pixel>>>8)&255)+29*(pixel&255)+128)>>>8);
             }
-            var plan=RemainingCardPlan.prepare(gray,argb,width,height,receipt,expectedOwner,choice,()->!current());
+            var plan=choice==null?RemainingCardPlan.prepareSpec(gray,argb,width,height,receipt,expectedOwner,spec,()->!current())
+                    :RemainingCardPlan.prepare(gray,argb,width,height,receipt,expectedOwner,choice,()->!current());
             if(!plan.admitted()){
                 reason=plan.reason();outcome=plan.hold(reason,0);diagnostic=RemainingCardRoiDiagnostic.empty(width,height);
                 if(reviewReady(plan)){requireCurrent();drawPoint();requireCurrent();}return;
@@ -101,7 +112,7 @@ final class RemainingCardNativeProcessor implements AutoCloseable {
             }
             outcome=recognizer.remainingCardOutcome(result.owner());
             if(outcome==null){reason="NATIVE_OUTCOME_UNAVAILABLE";return;}
-            reason=outcome.reason();
+            reason=outcome.reason();titleHash=plan.titleHash();
             if(outcome.realExecutions()!=0||outcome.hypotheticalClicks()<0||outcome.hypotheticalClicks()>1){
                 reason="MOCK_BUDGET_REJECTED";outcome=null;return;
             }
@@ -117,10 +128,11 @@ final class RemainingCardNativeProcessor implements AutoCloseable {
         if(outcome==null||outcome.boundary()==null||outcome.realExecutions()!=0||outcome.hypotheticalClicks()<0||outcome.hypotheticalClicks()>1)return false;
         var box=outcome.boundary();if(box.left()<1||box.top()<1||box.right()>=receipt.width()||box.bottom()>=receipt.height())return false;
         if(outcome.status().equals("HOLD"))return outcome.hypotheticalClicks()==0&&outcome.target()==null;
+        if(outcome.status().equals("CHECK_IN_COMPLETE_SKIP"))return spec.checkIn()&&outcome.hypotheticalClicks()==0&&outcome.day()>=1&&outcome.day()<=7&&outcome.target()==null&&queries==8;
         if(outcome.status().equals("ITEM_COMPLETE_SKIP"))return outcome.hypotheticalClicks()==0&&outcome.displayedPoints()>0&&outcome.target()==null;
         if(!Double.isFinite(outcome.confidence())||outcome.confidence()<.85||outcome.confidence()>1||outcome.displayedPoints()<1)return false;
-        if(outcome.status().equals("VISUAL_PREVIEW_ONLY"))return choice.weekly()&&outcome.hypotheticalClicks()==0&&queries==9;
-        if(!outcome.status().equals("PREVIEW_ONLY")||choice.weekly()||outcome.hypotheticalClicks()!=1||queries!=2)return false;
+        if(outcome.status().equals("VISUAL_PREVIEW_ONLY"))return spec.weekly()&&outcome.hypotheticalClicks()==0&&queries==9;
+        if(!outcome.status().equals("PREVIEW_ONLY")||spec.weekly()||outcome.hypotheticalClicks()!=1||queries!=(spec.checkIn()?9:2))return false;
         var target=outcome.target();return target!=null&&box.contains(target)&&outcome.x()>target.left()&&outcome.x()<target.right()
                 &&outcome.y()>target.top()&&outcome.y()<target.bottom();
     }
@@ -128,7 +140,7 @@ final class RemainingCardNativeProcessor implements AutoCloseable {
         var encoded=new WipingOutput();byte[] bytes=null;
         try{
             Canvas canvas=new Canvas(image);Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG);
-            boolean candidate=outcome.status().equals("PREVIEW_ONLY"),weekly=outcome.status().equals("VISUAL_PREVIEW_ONLY"),skip=outcome.status().equals("ITEM_COMPLETE_SKIP");
+            boolean candidate=outcome.status().equals("PREVIEW_ONLY"),weekly=outcome.status().equals("VISUAL_PREVIEW_ONLY"),skip=outcome.status().equals("ITEM_COMPLETE_SKIP")||outcome.status().equals("CHECK_IN_COMPLETE_SKIP");
             paint.setColor(candidate?Color.RED:skip?Color.GREEN:weekly?0xffff9800:Color.GRAY);
             paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(5);
             var boundary=outcome.boundary();canvas.drawRect(boundary.left(),boundary.top(),boundary.right(),boundary.bottom(),paint);
@@ -161,6 +173,7 @@ final class RemainingCardNativeProcessor implements AutoCloseable {
     synchronized String diagJson(){return resultAvailable()&&diagnostic!=null?diagnostic.json():null;}
     synchronized int candidatePoints(){return resultAvailable()&&diagramProduced&&outcome!=null&&outcome.status().equals("PREVIEW_ONLY")?1:0;}
     RemainingCardChoice choice(){return choice;}
+    synchronized String titleHash(){return resultAvailable()?titleHash:"";}
     synchronized RemainingCardRoiDiagnostic.Report diagnostic(){return resultAvailable()?diagnostic:null;}
     String reason(){return reason;}
     String backendPhase(){return backendPhase;}

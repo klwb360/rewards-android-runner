@@ -62,6 +62,25 @@ final class ReviewShizukuTapActor {
 
     private final Backend backend;
     private final AtomicBoolean spent;
+    private static volatile Object liveQuarantine;
+    private LiveActionPermit livePermit;
+    private java.util.function.LongSupplier liveClock;
+    private volatile boolean resourcesKnownClean=true;
+    boolean knownClean(){return resourcesKnownClean&&(livePermit==null||!livePermit.live()||liveQuarantine==null);}
+    /** New visibly issued run capability. Historical process-wide budgets are not reset. */
+    static ReviewShizukuTapActor forLiveRun(Context context,LiveActionPermit permit){
+        if(permit==null||!permit.live()||liveQuarantine!=null
+                ||!permit.claimTapActor(android.os.SystemClock.elapsedRealtime()))
+            throw new SecurityException("Exact live card tap capability required");
+        var actor=new ReviewShizukuTapActor(new AndroidReviewShizukuTapBackend(context,
+                ServerMode.REWARDS_BUSINESS_ROOT_20261111),new AtomicBoolean());
+        actor.livePermit=permit;actor.liveClock=android.os.SystemClock::elapsedRealtime;return actor;
+    }
+    static ReviewShizukuTapActor liveFixture(Backend backend,LiveActionPermit permit,java.util.function.LongSupplier clock){
+        if(backend==null||backend instanceof AndroidReviewShizukuTapBackend||permit==null||permit.live()||clock==null
+                ||!permit.claimTapActor(clock.getAsLong()))throw new SecurityException("Synthetic live tap fixture required");
+        var actor=new ReviewShizukuTapActor(backend,new AtomicBoolean());actor.livePermit=permit;actor.liveClock=clock;return actor;
+    }
     /** Default remains shell-only. A root server must not silently satisfy this call. */
     static ReviewShizukuTapActor forCaptureReview(Context context) {
         if(ReadOnlyCheckpoint.blocksLiveInput())throw new SecurityException("Read-only checkpoint has no input actor");
@@ -85,6 +104,8 @@ final class ReviewShizukuTapActor {
     }
     Result tap(TapTarget target, DispatchGate gate) {
         if (!valid(target) || gate == null) return rejected(false, Reason.INVALID_INPUT);
+        if(livePermit!=null&&(target!=livePermit.target()||livePermit.live()&&liveQuarantine!=null
+                ||!livePermit.current(liveClock.getAsLong())))return rejected(false,Reason.AUTHORITY_REJECTED);
         // Never restore this budget, even for preflight failure or an uncertain gate.
         if (!spent.compareAndSet(false, true)) return rejected(false, Reason.ALREADY_SPENT);
         final Session session;
@@ -94,7 +115,7 @@ final class ReviewShizukuTapActor {
             if (!matches(target, session.display())) return rejected(false, Reason.DISPLAY_CHANGED);
         } catch (Exception unavailable) { return rejected(false, Reason.PREFLIGHT_UNAVAILABLE); }
         try {
-            if (!gate.consume(target)) return rejected(true, Reason.AUTHORITY_REJECTED);
+            if (!gate.consume(target)||livePermit!=null&&!livePermit.tapValid(liveClock.getAsLong())) return rejected(true, Reason.AUTHORITY_REJECTED);
         } catch (Exception unknown) { return rejected(true, Reason.AUTHORITY_UNKNOWN); }
         // Permission, binder and geometry can change while the durable gate is running.
         try {
@@ -105,7 +126,7 @@ final class ReviewShizukuTapActor {
         try {
             process = session.dispatch(target, () -> {
                 try {
-                    if (!gate.stillValid(target)) throw new DispatchBlocked(Reason.AUTHORITY_STALE);
+                    if (!gate.stillValid(target)||livePermit!=null&&!livePermit.tapValid(liveClock.getAsLong())) throw new DispatchBlocked(Reason.AUTHORITY_STALE);
                 } catch (DispatchBlocked rejected) { throw rejected; }
                 catch (Exception unknown) { throw new DispatchBlocked(Reason.AUTHORITY_RECHECK_UNKNOWN); }
             });
@@ -146,7 +167,9 @@ final class ReviewShizukuTapActor {
     private static Result rejected(boolean consumed, Reason reason) {
         return new Result(Kind.REJECTED, NO_EXIT, false, consumed, reason);
     }
-    private static Result unknown(Reason reason) {
+    private Result unknown(Reason reason) {
+        resourcesKnownClean=false;
+        if(livePermit!=null&&livePermit.live())liveQuarantine=new Object();
         return new Result(Kind.DISPATCH_UNKNOWN, NO_EXIT, true, true, reason);
     }
 }

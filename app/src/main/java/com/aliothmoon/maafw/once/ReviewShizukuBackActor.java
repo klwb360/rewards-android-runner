@@ -57,6 +57,20 @@ final class ReviewShizukuBackActor {
 
     private final Backend backend;
     private final AtomicBoolean spent;
+    private LiveActionPermit livePermit;
+    private java.util.function.LongSupplier liveClock;
+    static ReviewShizukuBackActor forLiveRun(Context context,LiveActionPermit permit){
+        if(permit==null||!permit.live()||quarantine!=null
+                ||!permit.claimBackActor(android.os.SystemClock.elapsedRealtime()))
+            throw new SecurityException("Exact live card return capability required");
+        var actor=new ReviewShizukuBackActor(new AndroidReviewShizukuBackBackend(context),new AtomicBoolean());
+        actor.livePermit=permit;actor.liveClock=android.os.SystemClock::elapsedRealtime;return actor;
+    }
+    static ReviewShizukuBackActor liveFixture(Backend backend,LiveActionPermit permit,java.util.function.LongSupplier clock){
+        if(backend==null||backend instanceof AndroidReviewShizukuBackBackend||permit==null||permit.live()||clock==null
+                ||!permit.claimBackActor(clock.getAsLong()))throw new SecurityException("Synthetic live return fixture required");
+        var actor=new ReviewShizukuBackActor(backend,new AtomicBoolean());actor.livePermit=permit;actor.liveClock=clock;return actor;
+    }
     /** Exact already-consented root profile, isolated ordinary app process only. */
     static ReviewShizukuBackActor forApprovedBusiness20261111(Context context) {
         if(ReadOnlyCheckpoint.blocksLiveInput())throw new SecurityException("Read-only checkpoint has no input actor");
@@ -71,6 +85,9 @@ final class ReviewShizukuBackActor {
     }
     Result back(BackTarget target, DispatchGate gate) {
         if (!valid(target) || gate == null) return rejected(false, Reason.INVALID_INPUT);
+        if(livePermit!=null&&(livePermit.live()&&quarantine!=null||!livePermit.current(liveClock.getAsLong())
+                ||target.fullDisplayWidth()!=livePermit.shape().width()||target.fullDisplayHeight()!=livePermit.shape().height()
+                ||target.rotation()!=livePermit.shape().rotation()))return rejected(false,Reason.AUTHORITY_REJECTED);
         // Never restore this budget, even for preflight failure or an uncertain gate.
         if (!spent.compareAndSet(false, true)) return rejected(false, Reason.ALREADY_SPENT);
         final Session session;
@@ -80,7 +97,7 @@ final class ReviewShizukuBackActor {
             if (!matches(target, session.display())) return rejected(false, Reason.DISPLAY_CHANGED);
         } catch (Exception unavailable) { return rejected(false, Reason.PREFLIGHT_UNAVAILABLE); }
         try {
-            if (!gate.consume(target)) return rejected(true, Reason.AUTHORITY_REJECTED);
+            if (!gate.consume(target)||livePermit!=null&&!livePermit.backValid(liveClock.getAsLong())) return rejected(true, Reason.AUTHORITY_REJECTED);
         } catch (Exception unknown) { return rejected(true, Reason.AUTHORITY_UNKNOWN); }
         // Permission, binder and geometry can change while the durable gate is running.
         try {
@@ -91,7 +108,7 @@ final class ReviewShizukuBackActor {
         try {
             process = session.dispatch(target, () -> {
                 try {
-                    if (!gate.stillValid(target)) throw new DispatchBlocked(Reason.AUTHORITY_STALE);
+                    if (!gate.stillValid(target)||livePermit!=null&&!livePermit.backValid(liveClock.getAsLong())) throw new DispatchBlocked(Reason.AUTHORITY_STALE);
                 } catch (DispatchBlocked rejected) { throw rejected; }
                 catch (Exception unknown) { throw new DispatchBlocked(Reason.AUTHORITY_RECHECK_UNKNOWN); }
             });
@@ -115,7 +132,7 @@ final class ReviewShizukuBackActor {
         } catch (Exception cleanupUnknown) { result = unknown(Reason.CLEANUP_UNKNOWN); }
         try { process.close(); }
         catch (Exception cleanupUnknown) { result = unknown(Reason.CLEANUP_UNKNOWN); }
-        if(result.kind()==Kind.DISPATCH_UNKNOWN)quarantine=process;
+        if(result.kind()==Kind.DISPATCH_UNKNOWN&&(livePermit==null||livePermit.live()))quarantine=process;
         return result;
     }
     private static boolean valid(BackTarget t) {
@@ -132,7 +149,7 @@ final class ReviewShizukuBackActor {
         return new Result(Kind.REJECTED, NO_EXIT, false, consumed, reason);
     }
     private Result unknown(Reason reason) {
-        resourcesKnownClean=false;quarantine=new Object();
+        resourcesKnownClean=false;if(livePermit==null||livePermit.live())quarantine=new Object();
         return new Result(Kind.DISPATCH_UNKNOWN, NO_EXIT, true, true, reason);
     }
 }

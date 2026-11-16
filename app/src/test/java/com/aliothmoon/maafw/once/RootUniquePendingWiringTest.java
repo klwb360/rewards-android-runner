@@ -10,6 +10,7 @@ public class RootUniquePendingWiringTest {
  @Test public void allPriorLiveIssuersAreHardBlocked()throws Exception{
   String v=source("VisibleCaptureAuthority");Matcher m=Pattern.compile("static [\\w.<>]+ (issue\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(v);int count=0,alignment=0,overviewIntent=0,overviewFrame=0,cardReveal=0;
   while(m.find()){
+   if(m.group(1).equals("issueLiveRewardsApproval"))continue; // New explicit live authority is covered by LiveRewardsEntryTest.
    if(m.group(1).equals("issueAlignment")){alignment++;continue;} // Independently checked by UiImageAlignmentEntryTest.
    if(m.group(1).equals("issueOverviewIntent")){overviewIntent++;continue;} // Independently checked by OverviewEntryWiringTest.
    if(m.group(1).equals("issueOverviewFrame")){overviewFrame++;continue;}

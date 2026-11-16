@@ -13,11 +13,13 @@ import java.util.function.BooleanSupplier;
 
 /** Pixel-planned bounded OCR for an exact same-run crop. No device input capability. */
 final class RemainingCardPlan {
-    enum Role { WEEKLY_TITLE, NUMBER, DAY1, DAY2, DAY3, DAY4, DAY5, DAY6, DAY7, ACTIVITY_TITLE, POINTS }
+    enum Role { WEEKLY_TITLE, NUMBER, DAY1, DAY2, DAY3, DAY4, DAY5, DAY6, DAY7, ACTIVITY_TITLE, POINTS, CHECK_IN_TITLE }
     record Outcome(String status,String reason,int hypotheticalClicks,int realExecutions,int x,int y,
             int day,int displayedPoints,int ocrQueries,double confidence,Box boundary,Box target) { }
     static final class Plan {
         private final RemainingCardChoice choice;
+        private final CardRecognitionSpec spec;
+        private final int selectedDay;
         private final int width,height;
         private final String hash,reason;
         private final Box boundary,indicator;
@@ -27,9 +29,10 @@ final class RemainingCardPlan {
         private final boolean completedIndicator;
         private final BooleanSupplier provenance;
         private final AtomicBoolean claimed=new AtomicBoolean(),finished=new AtomicBoolean();
-        private Plan(RemainingCardChoice choice,int width,int height,String hash,String reason,Box boundary,Box indicator,
+        private String titleHash="";
+        private Plan(RemainingCardChoice choice,CardRecognitionSpec spec,int selectedDay,int width,int height,String hash,String reason,Box boundary,Box indicator,
                 List<Box> rois,List<Role> roles,RewardRegionLocator.Geometry geometry,boolean complete,BooleanSupplier provenance){
-            this.choice=choice;this.width=width;this.height=height;this.hash=hash;this.reason=reason;this.boundary=boundary;
+            this.choice=choice;this.spec=spec;this.selectedDay=selectedDay;this.width=width;this.height=height;this.hash=hash;this.reason=reason;this.boundary=boundary;
             this.indicator=indicator;this.rois=List.copyOf(rois);this.roles=List.copyOf(roles);activityGeometry=geometry;
             completedIndicator=complete;this.provenance=provenance;
         }
@@ -37,6 +40,9 @@ final class RemainingCardPlan {
         String reason(){return reason;}int width(){return width;}int height(){return height;}
         List<Box> rois(){return rois;}List<Role> roles(){return roles;}Box boundary(){return boundary;}
         RemainingCardChoice choice(){return choice;}
+        CardRecognitionSpec spec(){return spec;}
+        int selectedDay(){return selectedDay;}
+        String titleHash(){return titleHash;}
         RewardRegionGate.Source source(){return admitted()?RewardRegionGate.Source.REAL_DISPLAY_NATIVE:null;}
         boolean claimRecognition(){return admitted()&&claimed.compareAndSet(false,true);}
         boolean matchesGray8(byte[] gray,int w,int h,BooleanSupplier stop){return admitted()&&!stopped(stop)
@@ -67,11 +73,24 @@ final class RemainingCardPlan {
                 }
             }
             if(stopped(stop)||!provenance.getAsBoolean())return hold("CANCELED",count);
-            if(choice.weekly()){
+            if(spec.checkIn()){
+                titleHash=LiveCardIdentity.hashText("CHECK_IN");
+                if(completedIndicator)return new Outcome("CHECK_IN_COMPLETE_SKIP","CURRENT_DAY_TICK",0,0,-1,-1,
+                        selectedDay,-1,count,minimum,boundary,null);
+                var line=batches.get(1).get(0);Box number=box(line);
+                return new Outcome("PREVIEW_ONLY","CURRENT_DAY_NUMBER",1,0,(int)number.centerX(),(int)number.centerY(),
+                        selectedDay,Integer.parseInt(line.text()),count,minimum,boundary,number);
+            }
+            if(spec.weekly()){
                 var line=batches.get(1).get(0);Box number=box(line);
                 return new Outcome("VISUAL_PREVIEW_ONLY","READ_ONLY_WEEK_PROGRESS",0,0,
                         (int)number.centerX(),(int)number.centerY(),-1,Integer.parseInt(line.text()),count,minimum,boundary,number);
             }
+            var titleRows=new ArrayList<>(batches.get(0));
+            titleRows.sort(java.util.Comparator.comparingInt(FrameStructureEvidence.Line::y).thenComparingInt(FrameStructureEvidence.Line::x));
+            StringBuilder titleText=new StringBuilder();
+            for(var line:titleRows){if(titleText.length()>0)titleText.append(' ');titleText.append(line.text());}
+            titleHash=LiveCardIdentity.hashText(titleText.toString());
             var points=batches.get(1).get(0);
             if(completedIndicator){
                 var skipped=RewardRegionLocator.observeCompletedItems(activityGeometry,rows);
@@ -89,9 +108,17 @@ final class RemainingCardPlan {
     }
     static Plan prepare(byte[] gray,int[] argb,int width,int height,CardNativeMockReceipt receipt,Object owner,
             RemainingCardChoice choice,BooleanSupplier stop){
+        return prepareInternal(gray,argb,width,height,receipt,owner,choice,CardRecognitionSpec.historical(choice),stop);
+    }
+    static Plan prepareSpec(byte[] gray,int[] argb,int width,int height,CardNativeMockReceipt receipt,Object owner,
+            CardRecognitionSpec spec,BooleanSupplier stop){
+        return prepareInternal(gray,argb,width,height,receipt,owner,null,spec,stop);
+    }
+    private static Plan prepareInternal(byte[] gray,int[] argb,int width,int height,CardNativeMockReceipt receipt,Object owner,
+            RemainingCardChoice choice,CardRecognitionSpec spec,BooleanSupplier stop){
         BooleanSupplier proof=()->receipt!=null&&receipt.claimedBy(owner);
         if(stopped(stop))return denied(choice,width,height,"CANCELED",null,proof);
-        if(choice==null||owner==null||receipt==null||receipt.width()!=width||receipt.height()!=height
+        if(spec==null||owner==null||receipt==null||receipt.width()!=width||receipt.height()!=height
                 ||!receipt.claimedBy(owner)||!receipt.claimPlan(owner))return denied(choice,width,height,"CAPTURE_RECEIPT_UNAVAILABLE",null,proof);
         if(width<32||height<32||width>4096||height>4096||(long)width*height>LocalCardMockPlan.MAX_PIXELS
                 ||gray==null||argb==null||gray.length!=(long)width*height||argb.length!=gray.length)
@@ -101,9 +128,9 @@ final class RemainingCardPlan {
             int p=argb[i],g=(77*((p>>>16)&255)+150*((p>>>8)&255)+29*(p&255)+128)>>>8;
             if((p>>>24)!=255||g!=(gray[i]&255))return denied(choice,width,height,"COLOR_GRAY_MISMATCH",null,proof);
         }
-        var key=new RewardRegionGate.Key(RewardRegionGate.Source.REAL_DISPLAY_NATIVE,"remaining-card-v1",1,choice.key());
-        if(choice.weekly())return weekly(gray,argb,width,height,choice,key,proof,stop);
-        var geometry=choice.repair()?RewardRegionLocator.observeSingleCardGray8(key,gray,width,height,stop)
+        var key=new RewardRegionGate.Key(RewardRegionGate.Source.REAL_DISPLAY_NATIVE,"remaining-card-v1",1,spec.key());
+        if(spec.coinPanel())return weekly(gray,argb,width,height,choice,spec,key,proof,stop);
+        var geometry=spec.refined()?RewardRegionLocator.observeSingleCardGray8(key,gray,width,height,stop)
                 :RewardRegionLocator.observeVisibleMoreGray8(key,gray,width,height,stop);
         if(geometry.status()!=RewardRegionLocator.Status.OBSERVED||geometry.cards().size()!=1)
             return denied(choice,width,height,"NO_UNIQUE_CARD",null,proof);
@@ -126,15 +153,15 @@ final class RemainingCardPlan {
                 return denied(choice,width,height,"BADGE_GEOMETRY",b,proof);
             points=new Box(indicator.left()+2,indicator.top()+2,indicator.right()-2,indicator.bottom()-2);
         }
-        Box title=titleRoi(gray,width,b,complete?points:indicator,complete,choice.repair(),stop);
+        Box title=titleRoi(gray,width,b,complete?points:indicator,complete,spec.refined(),stop);
         if(title==null)return denied(choice,width,height,"TITLE_PIXEL_GEOMETRY",b,proof);
         List<Box> rois=List.of(title,points);
         for(Box roi:rois)if(roi.width()<4||roi.height()<4||!strict(b,roi))return denied(choice,width,height,"INVALID_ROI_GEOMETRY",b,proof);
         if(title.overlaps(points)||stopped(stop)||!proof.getAsBoolean())return denied(choice,width,height,"CANCELED_OR_ROI_OVERLAP",b,proof);
-        return new Plan(choice,width,height,CardNativeMockReceipt.digest(gray),"READY",b,indicator,rois,
+        return new Plan(choice,spec,-1,width,height,CardNativeMockReceipt.digest(gray),"READY",b,indicator,rois,
                 List.of(Role.ACTIVITY_TITLE,Role.POINTS),geometry,complete,proof);
     }
-    private static Plan weekly(byte[] gray,int[] argb,int w,int h,RemainingCardChoice choice,
+    private static Plan weekly(byte[] gray,int[] argb,int w,int h,RemainingCardChoice choice,CardRecognitionSpec spec,
             RewardRegionGate.Key key,BooleanSupplier proof,BooleanSupplier stop){
         var geometry=DailyCheckInRegion.observeGray8(key,gray,w,h,stop);
         if(geometry.status()!=DailyCheckInRegion.Status.OBSERVED||geometry.surfaces().size()!=1||!geometry.surfaces().get(0).complete())
@@ -144,23 +171,39 @@ final class RemainingCardPlan {
             if(!panel.contains(observed)||ring!=null)return denied(choice,w,h,"AMBIGUOUS_RING",panel,proof);ring=observed;
         }
         if(ring==null)return denied(choice,w,h,"NO_CURRENT_RING",panel,proof);
-        for(var tick:geometry.ticks())if(ring.overlaps(tick.disk()))return denied(choice,w,h,"CURRENT_RING_HAS_TICK",panel,proof);
+        if(!spec.checkIn())for(var tick:geometry.ticks())if(ring.overlaps(tick.disk()))return denied(choice,w,h,"CURRENT_RING_HAS_TICK",panel,proof);
         if(!yellow(argb,w,ring,stop))return denied(choice,w,h,"RING_NOT_YELLOW",panel,proof);
-        var columns=choice.coinRepair()?CheckInCoinColumns.locateSeparatedCoins(argb,w,h,panel,ring,stop)
+        var columns=spec.separatedCoins()?CheckInCoinColumns.locateSeparatedCoins(argb,w,h,panel,ring,stop)
                 :CheckInCoinColumns.locate(argb,w,h,panel,ring,stop);
         if(!columns.ready())return denied(choice,w,h,columns.status(),panel,proof);
+        int selectedDay=spec.expectedDay()==0?columns.currentDay():spec.expectedDay();
+        boolean completed=false;
+        if(spec.checkIn()){
+            int matches=0;Box column=columns.columns().get(selectedDay-1);
+            for(var tick:geometry.ticks()){
+                Box disk=tick.disk();
+                if(panel.contains(disk)&&Math.abs(disk.centerX()-column.centerX())<=.30*ring.width()
+                        &&Math.abs(disk.centerY()-ring.centerY())<=.20*ring.height()
+                        &&disk.width()>=.60*ring.width()&&disk.width()<=1.25*ring.width())matches++;
+            }
+            if(matches>1)return denied(choice,w,h,"AMBIGUOUS_SELECTED_DAY_TICK",panel,proof);
+            completed=matches==1;
+            if(!completed&&selectedDay!=columns.currentDay())return denied(choice,w,h,"SELECTED_DAY_NOT_CURRENT",panel,proof);
+        }
         Box title=new Box(panel.left(),panel.top(),panel.left()+(int)(.35*panel.width()),panel.top()+(int)(.40*panel.height()));
         if(title.overlaps(ring))return denied(choice,w,h,"TITLE_RING_OVERLAP",panel,proof);
         // Add detector context to the actual query, not merely to the validation box. Native
         // whole-query or edge-touching boxes are still rejected by the unchanged strict check.
-        double inset=choice.repair()?.12:.20;
+        double inset=spec.refined()?.12:.20;
         int ix=Math.max(2,(int)Math.ceil(inset*ring.width())),iy=Math.max(2,(int)Math.ceil(inset*ring.height()));
         Box number=new Box(ring.left()+ix,ring.top()+iy,ring.right()-ix,ring.bottom()-iy);
-        List<Box> rois=new ArrayList<>();rois.add(title);rois.add(number);rois.addAll(columns.dayRois());
-        List<Role> roles=List.of(Role.WEEKLY_TITLE,Role.NUMBER,Role.DAY1,Role.DAY2,Role.DAY3,Role.DAY4,Role.DAY5,Role.DAY6,Role.DAY7);
+        List<Box> rois=new ArrayList<>();rois.add(title);if(!completed)rois.add(number);rois.addAll(columns.dayRois());
+        List<Role> roles=new ArrayList<>();roles.add(spec.checkIn()?Role.CHECK_IN_TITLE:Role.WEEKLY_TITLE);
+        if(!completed)roles.add(Role.NUMBER);
+        roles.addAll(List.of(Role.DAY1,Role.DAY2,Role.DAY3,Role.DAY4,Role.DAY5,Role.DAY6,Role.DAY7));
         for(Box roi:rois)if(roi.width()<4||roi.height()<4||!panel.contains(roi))return denied(choice,w,h,"INVALID_ROI_GEOMETRY",panel,proof);
         if(stopped(stop)||!proof.getAsBoolean())return denied(choice,w,h,"CANCELED",panel,proof);
-        return new Plan(choice,w,h,CardNativeMockReceipt.digest(gray),"READY",panel,ring,rois,roles,null,false,proof);
+        return new Plan(choice,spec,selectedDay,w,h,CardNativeMockReceipt.digest(gray),"READY",panel,ring,rois,roles,null,completed,proof);
     }
     private static Box titleRoi(byte[] gray,int width,Box card,Box indicator,boolean completed,boolean repair,BooleanSupplier stop){
         int left=card.left()+(int)Math.ceil((completed?.02:.18)*card.width());
@@ -184,7 +227,7 @@ final class RemainingCardPlan {
                 Math.min(indicator.left()-2,maxX+px),Math.min(card.bottom()-2,maxY+py));
     }
     private static Plan denied(RemainingCardChoice choice,int w,int h,String why,Box boundary,BooleanSupplier proof){
-        return new Plan(choice,w,h,"",why,boundary,null,List.of(),List.of(),null,false,proof);
+        return new Plan(choice,CardRecognitionSpec.historical(choice),-1,w,h,"",why,boundary,null,List.of(),List.of(),null,false,proof);
     }
     static boolean valid(FrameStructureEvidence.Line row,int w,int h){return row!=null&&row.text()!=null&&row.text().length()<=128
             &&Double.isFinite(row.score())&&row.score()>=0&&row.score()<=1&&row.x()>=0&&row.y()>=0
@@ -192,6 +235,7 @@ final class RemainingCardPlan {
     static boolean token(Role role,String value){
         if(value==null||value.length()>128)return false;
         if(role==Role.WEEKLY_TITLE)return value.equals("每日活动");
+        if(role==Role.CHECK_IN_TITLE)return value.equals("签入")||value.equals("签到");
         if(role==Role.ACTIVITY_TITLE)return value.codePointCount(0,value.length())>=2&&value.codePoints().anyMatch(Character::isLetter);
         if(role==Role.NUMBER)return number(value)!=null;
         if(role==Role.POINTS)return number(value)!=null||plus(value)!=null;

@@ -78,8 +78,10 @@ final class ReviewShizukuSwipeActor {
     private final ProcessFence processFence;
     private OverviewScanIntent.ScrollPermit overviewPermit;
     private CardRevealProbeIntent.ScrollPermit cardRevealPermit;
+    private LiveRunAuthority.ScrollPermit liveRunPermit;
     private boolean quarantined(){return processFence!=null&&processFence.quarantine!=null;}
     private boolean scopeCurrent(){
+        if(liveRunPermit!=null)return liveRunPermit.live()&&liveRunPermit.current(android.os.SystemClock.elapsedRealtime());
         if(cardRevealPermit!=null)return cardRevealPermit.intent.live()&&cardRevealPermit.current(android.os.SystemClock.elapsedRealtime());
         if(overviewPermit!=null)return overviewPermit.intent.live()&&overviewPermit.current(android.os.SystemClock.elapsedRealtime());
         if(!production)return true;
@@ -104,6 +106,14 @@ final class ReviewShizukuSwipeActor {
         var actor=new ReviewShizukuSwipeActor(new AndroidReviewShizukuSwipeBackend(context),
                 new AtomicBoolean(),true,PROCESS,permit.direction);
         actor.cardRevealPermit=permit;return actor;
+    }
+    /** Separate bounded run permit; it cannot refill any historical process quota. */
+    static ReviewShizukuSwipeActor forLiveRun(Context context,LiveRunAuthority.ScrollPermit permit){
+        if(permit==null||!permit.live()||PROCESS.quarantine!=null
+                ||!permit.claimActor(android.os.SystemClock.elapsedRealtime()))
+            throw new SecurityException("Exact live run scroll capability required");
+        var actor=new ReviewShizukuSwipeActor(new AndroidReviewShizukuSwipeBackend(context),new AtomicBoolean(),
+                true,PROCESS,permit.direction());actor.liveRunPermit=permit;return actor;
     }
     /** Exact already-consented root profile, isolated ordinary app process only. */
     static ReviewShizukuSwipeActor forProgressScan(Context context) {
@@ -147,7 +157,7 @@ final class ReviewShizukuSwipeActor {
             if (!matches(target, session.display())) return rejected(false, Reason.DISPLAY_CHANGED);
         } catch (Exception unavailable) { return rejected(false, Reason.PREFLIGHT_UNAVAILABLE); }
         try {
-            if (!gate.consume(target)) return rejected(true, Reason.AUTHORITY_REJECTED);
+            if (!gate.consume(target)||liveRunPermit!=null&&!liveRunPermit.dispatchValid(android.os.SystemClock.elapsedRealtime())) return rejected(true, Reason.AUTHORITY_REJECTED);
         } catch (Exception unknown) { return rejected(true, Reason.AUTHORITY_UNKNOWN); }
         // Permission, binder and geometry can change while the durable gate is running.
         try {
@@ -159,7 +169,7 @@ final class ReviewShizukuSwipeActor {
             process = session.dispatch(target, () -> {
                 try {
                     if(quarantined()||!scopeCurrent())throw new DispatchBlocked(Reason.AUTHORITY_STALE);
-                    if (!gate.stillValid(target)) throw new DispatchBlocked(Reason.AUTHORITY_STALE);
+                    if (!gate.stillValid(target)||liveRunPermit!=null&&!liveRunPermit.dispatchValid(android.os.SystemClock.elapsedRealtime())) throw new DispatchBlocked(Reason.AUTHORITY_STALE);
                     if(quarantined()||!scopeCurrent())throw new DispatchBlocked(Reason.AUTHORITY_STALE);
                 } catch (DispatchBlocked rejected) { throw rejected; }
                 catch (Exception unknown) { throw new DispatchBlocked(Reason.AUTHORITY_RECHECK_UNKNOWN); }
