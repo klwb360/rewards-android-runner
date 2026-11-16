@@ -103,7 +103,8 @@ final class RemainingCardPlan {
         }
         var key=new RewardRegionGate.Key(RewardRegionGate.Source.REAL_DISPLAY_NATIVE,"remaining-card-v1",1,choice.key());
         if(choice.weekly())return weekly(gray,argb,width,height,choice,key,proof,stop);
-        var geometry=RewardRegionLocator.observeVisibleMoreGray8(key,gray,width,height,stop);
+        var geometry=choice.repair()?RewardRegionLocator.observeSingleCardGray8(key,gray,width,height,stop)
+                :RewardRegionLocator.observeVisibleMoreGray8(key,gray,width,height,stop);
         if(geometry.status()!=RewardRegionLocator.Status.OBSERVED||geometry.cards().size()!=1)
             return denied(choice,width,height,"NO_UNIQUE_CARD",null,proof);
         var card=geometry.cards().get(0);Box b=card.box();
@@ -125,7 +126,7 @@ final class RemainingCardPlan {
                 return denied(choice,width,height,"BADGE_GEOMETRY",b,proof);
             points=new Box(indicator.left()+2,indicator.top()+2,indicator.right()-2,indicator.bottom()-2);
         }
-        Box title=titleRoi(gray,width,b,complete?points:indicator,complete,stop);
+        Box title=titleRoi(gray,width,b,complete?points:indicator,complete,choice.repair(),stop);
         if(title==null)return denied(choice,width,height,"TITLE_PIXEL_GEOMETRY",b,proof);
         List<Box> rois=List.of(title,points);
         for(Box roi:rois)if(roi.width()<4||roi.height()<4||!strict(b,roi))return denied(choice,width,height,"INVALID_ROI_GEOMETRY",b,proof);
@@ -149,7 +150,10 @@ final class RemainingCardPlan {
         if(!columns.ready())return denied(choice,w,h,columns.status(),panel,proof);
         Box title=new Box(panel.left(),panel.top(),panel.left()+(int)(.35*panel.width()),panel.top()+(int)(.40*panel.height()));
         if(title.overlaps(ring))return denied(choice,w,h,"TITLE_RING_OVERLAP",panel,proof);
-        int ix=Math.max(2,(int)Math.ceil(.20*ring.width())),iy=Math.max(2,(int)Math.ceil(.20*ring.height()));
+        // Add detector context to the actual query, not merely to the validation box. Native
+        // whole-query or edge-touching boxes are still rejected by the unchanged strict check.
+        double inset=choice.repair()?.12:.20;
+        int ix=Math.max(2,(int)Math.ceil(inset*ring.width())),iy=Math.max(2,(int)Math.ceil(inset*ring.height()));
         Box number=new Box(ring.left()+ix,ring.top()+iy,ring.right()-ix,ring.bottom()-iy);
         List<Box> rois=new ArrayList<>();rois.add(title);rois.add(number);rois.addAll(columns.dayRois());
         List<Role> roles=List.of(Role.WEEKLY_TITLE,Role.NUMBER,Role.DAY1,Role.DAY2,Role.DAY3,Role.DAY4,Role.DAY5,Role.DAY6,Role.DAY7);
@@ -157,7 +161,7 @@ final class RemainingCardPlan {
         if(stopped(stop)||!proof.getAsBoolean())return denied(choice,w,h,"CANCELED",panel,proof);
         return new Plan(choice,w,h,CardNativeMockReceipt.digest(gray),"READY",panel,ring,rois,roles,null,false,proof);
     }
-    private static Box titleRoi(byte[] gray,int width,Box card,Box indicator,boolean completed,BooleanSupplier stop){
+    private static Box titleRoi(byte[] gray,int width,Box card,Box indicator,boolean completed,boolean repair,BooleanSupplier stop){
         int left=card.left()+(int)Math.ceil((completed?.02:.18)*card.width());
         int right=indicator.left()-Math.max(4,(int)Math.ceil(.015*card.width()));
         int top=card.top()+Math.max(2,(int)Math.ceil(.04*card.height()));
@@ -172,7 +176,10 @@ final class RemainingCardPlan {
         }
         if(pixels<20||maxX-minX<8||maxY-minY<8)return null;
         int px=Math.max(6,(int)Math.ceil(.02*card.width())),py=Math.max(5,(int)Math.ceil(.025*card.height()));
-        return new Box(Math.max(card.left()+2,minX-px),Math.max(card.top()+2,minY-py),
+        // Only the observed top-edge failure needs extra context. Keep the lower limit so a
+        // description below the title is not brought into the query by symmetric expansion.
+        int topPadding=repair?Math.max(py,(int)Math.ceil(.07*card.height())):py;
+        return new Box(Math.max(card.left()+2,minX-px),Math.max(card.top()+2,minY-topPadding),
                 Math.min(indicator.left()-2,maxX+px),Math.min(card.bottom()-2,maxY+py));
     }
     private static Plan denied(RemainingCardChoice choice,int w,int h,String why,Box boundary,BooleanSupplier proof){
