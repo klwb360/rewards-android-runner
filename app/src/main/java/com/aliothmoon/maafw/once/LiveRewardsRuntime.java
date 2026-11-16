@@ -109,7 +109,7 @@ final class LiveRewardsRuntime {
             ledger=new LiveRewardsLedger(activity.getNoBackupFilesDir().toPath(),authority.day(),runId);
             navigation=new LiveRewardsNavigation(activity.getApplicationContext(),authority,activity.getTaskId(),
                     activity.getComponentName().flattenToString(),shape,this::hiddenCurrent);
-            perception=new LiveRewardsPerception(activity.getApplicationContext(),authority,navigation,this::hiddenCurrent,this::publishArtifact);
+            perception=new LiveRewardsPerception(activity.getApplicationContext(),authority,navigation,this::hiddenCurrent,this::publishArtifact,ledger);
             input=new LiveRewardsInput(activity.getApplicationContext(),authority,navigation,perception::visitGuard,perception::rebind);
             coordinator=new LiveRewardsCoordinator(authority,ledger,new LiveRewardsCoordinator.Ports(){
                 public LiveRewardsTypes.Preflight preflight(LiveRunAuthority exact)throws Exception{
@@ -198,8 +198,10 @@ final class LiveRewardsRuntime {
         JSONArray outcomes=new JSONArray();for(JSONObject row:rows)outcomes.put(row);
         JSONArray artifactsIndex=new JSONArray();for(JSONObject file:files)artifactsIndex.put(file);
         JSONArray actionIndex=new JSONArray();for(JSONObject action:actions)actionIndex.put(action);
+        JSONObject uiDiagnostic=perception==null?null:perception.lastUiDiagnostic();
         JSONObject value=new JSONObject().put("profile",PROFILE).put("runId",runId).put("day",authority==null?"UNKNOWN":authority.day())
-                .put("stage",stage).put("failure",safeEnum(failure)).put("perceptionState",perceptionState()).put("terminal",workerReturned)
+                .put("stage",stage).put("failure",safeEnum(failure)).put("perceptionState",perceptionState())
+                .put("lastUiDiagnostic",uiDiagnostic==null?JSONObject.NULL:uiDiagnostic).put("terminal",workerReturned)
                 .put("cleanup",allResourcesClosed()?"CONFIRMED":"UNKNOWN").put("fullScreenCaptures",0)
                 .put("tapCalls",tapCalls).put("tapCommandSuccesses",tapSuccesses).put("returnCalls",returnCalls)
                 .put("tapDispatchAttempts",tapDispatches).put("backDispatchAttempts",backDispatches).put("backCommandSuccesses",backSuccesses)

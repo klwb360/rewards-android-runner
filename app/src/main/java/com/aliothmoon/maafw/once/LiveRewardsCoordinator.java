@@ -75,9 +75,9 @@ final class LiveRewardsCoordinator {
                 requireCurrent();activeTask=task;activeBefore=null;activeAfter=null;
                 if(completeRegions.contains(task.kind())){emit(task,LiveRewardsTypes.Outcome.REGION_COMPLETE_SKIP,"REGION_COMPLETE",null,null);continue;}
                 if(duplicates.get(task.key())>1){emit(task,LiveRewardsTypes.Outcome.DUPLICATE_SKIP,"DUPLICATE_IDENTITY",null,null);continue;}
+                if(ledger.attempted(task)){emit(task,LiveRewardsTypes.Outcome.ALREADY_ATTEMPTED_SKIP,"DAY_ALREADY_ATTEMPTED",null,null);continue;}
                 if(task.complete()){emit(task,LiveRewardsTypes.Outcome.COMPLETE_SKIP,"PREFLIGHT_COMPLETE",null,null);continue;}
                 if(!task.readable()){emit(task,LiveRewardsTypes.Outcome.UNREADABLE_SKIP,"PREFLIGHT_UNREADABLE",null,null);continue;}
-                if(ledger.attempted(task)){emit(task,LiveRewardsTypes.Outcome.ALREADY_ATTEMPTED_SKIP,"DAY_ALREADY_ATTEMPTED",null,null);continue;}
                 var scope=authority.cardScope(task);
                 var before=ports.observe(scope,LiveRewardsTypes.Phase.BEFORE,task);activeBefore=before;
                 checkObservation(scope,before,LiveRewardsTypes.Phase.BEFORE);

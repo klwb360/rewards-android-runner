@@ -10,22 +10,51 @@ import static org.junit.Assert.*;
 public class LiveRewardsCoordinatorTest {
     private static final class Rig implements LiveRewardsCoordinator.Ports {
         final LiveCoreFixture f;
+        final LiveRewardsLedger ledger;
         final List<LiveRewardsTypes.Task> tasks;
         final List<LiveRewardsTypes.Kind> reports=new ArrayList<>();
+        final List<LiveRewardsTypes.Kind> observedKinds=new ArrayList<>(),tappedKinds=new ArrayList<>();
         boolean completeAfter=true,progress,autoReturned,unknownBefore,unknownAfter,tapFailure,returnFailure,
                 lateAfter,compact,ambiguousAfter,regionComplete,cancelAfterTap;
+        boolean cleanUiTimeout,cleanCropTimeout;
+        LiveRunAuthority.CardScope expiredScope;
+        LiveRunAuthority.UiPermit retiredUi;
+        LiveRunAuthority.CropPermit retiredCrop;
         int tapCalls,returnCalls,observeCalls,afterCalls,pauses;
-        Rig(List<LiveRewardsTypes.Task> tasks)throws Exception{f=new LiveCoreFixture();this.tasks=tasks;}
+        Rig(List<LiveRewardsTypes.Task> tasks)throws Exception{this(tasks,null);}
+        Rig(List<LiveRewardsTypes.Task> tasks,LiveRewardsLedger resumed)throws Exception{
+            f=new LiveCoreFixture();this.tasks=tasks;ledger=resumed==null?f.ledger:resumed;
+        }
         public LiveRewardsTypes.Preflight preflight(LiveRunAuthority authority){return new LiveRewardsTypes.Preflight(tasks,true,true,true);}
         public boolean knownClean(){return true;}
         public void pause(long millis){assertTrue(millis>=0);f.clock.now+=millis;pauses++;}
         public LiveRewardsTypes.Observation observe(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Phase phase,LiveRewardsTypes.Task expected)throws Exception{
-            observeCalls++;
+            observeCalls++;observedKinds.add(expected.kind());
             if(phase==LiveRewardsTypes.Phase.BEFORE){
                 if(unknownBefore)return null;
+                if(expiredScope!=null){
+                    assertNotSame(expiredScope,scope);assertNotSame(expiredScope.owner(),scope.owner());
+                    assertTrue(f.authority.current());
+                    if(retiredUi!=null){assertFalse(retiredUi.current(f.clock.now));assertFalse(retiredUi.dispatchValid(f.clock.now));}
+                    if(retiredCrop!=null){assertFalse(retiredCrop.current(f.clock.now));assertFalse(retiredCrop.dispatchValid(f.clock.now));}
+                }
                 return f.seal(scope,phase,expected,regionComplete?100:0,100);
             }
             afterCalls++;if(unknownAfter)return null;
+            if(afterCalls==1&&(cleanUiTimeout||cleanCropTimeout)){
+                expiredScope=scope;
+                if(cleanUiTimeout){
+                    retiredUi=scope.claimUi(new Object(),f.clock.now);
+                    assertTrue(retiredUi.claimReader(f.clock.now));assertTrue(retiredUi.consume(f.clock.now));
+                }else{
+                    var ui=f.ui(scope);retiredCrop=scope.claimCrop(ui,phase,f.clock.now);
+                    assertTrue(retiredCrop.bindRequest(new Box(20,100,420,500),523,1000,0,f.clock.now));
+                    assertTrue(retiredCrop.consume(f.clock.now));assertTrue(retiredCrop.claimDispatch(f.clock.now));
+                }
+                f.clock.now+=5_001;
+                if(cleanUiTimeout)scope.discardUi(retiredUi,true);else scope.discardCrop(retiredCrop,true);
+                return scope.unreadable(phase,expected,f.source(),f.clock.now,"AFTER_WINDOW_EXPIRED");
+            }
             if(lateAfter){f.clock.now+=5_001;return scope.unreadable(phase,expected,f.source(),f.clock.now,"AFTER_WINDOW_EXPIRED");}
             var actual=completeAfter?LiveCoreFixture.completed(expected):expected;
             if(compact)actual=new LiveRewardsTypes.Task(actual.kind(),LiveRewardsTypes.hash("COMPACT_"+expected.key()),
@@ -33,7 +62,7 @@ public class LiveRewardsCoordinatorTest {
             return f.seal(scope,phase,actual,progress?10:0,100,!ambiguousAfter);
         }
         public LiveRewardsInput.TapReceipt tap(LiveActionPermit permit)throws Exception{
-            tapCalls++;assertFalse(permit.live());assertTrue(permit.claimTapActor(f.clock.now));assertTrue(permit.consumeTap(f.clock.now));
+            tapCalls++;tappedKinds.add(permit.kind());assertFalse(permit.live());assertTrue(permit.claimTapActor(f.clock.now));assertTrue(permit.consumeTap(f.clock.now));
             f.clock.now+=250;
             var receipt=LiveRewardsInput.TapReceipt.synthetic(permit,!tapFailure,true,f.clock.now);
             if(cancelAfterTap)f.authority.cancel();return receipt;
@@ -49,10 +78,16 @@ public class LiveRewardsCoordinatorTest {
                 LiveRewardsTypes.Observation before,LiveRewardsTypes.Observation after){
             assertTrue(reason.matches("[A-Z][A-Z0-9_]{0,79}"));reports.add(task.kind());
         }
-        LiveRewardsCoordinator.Summary run(){return new LiveRewardsCoordinator(f.authority,f.ledger,this).run();}
+        LiveRewardsCoordinator.Summary run(){return new LiveRewardsCoordinator(f.authority,ledger,this).run();}
     }
     private static LiveRewardsTypes.Task daily(String name){return LiveCoreFixture.task(LiveRewardsTypes.Kind.DAILY,1,name);}
     private static LiveRewardsTypes.Task more(String name){return LiveCoreFixture.task(LiveRewardsTypes.Kind.MORE,1,name);}
+    @SuppressWarnings("unchecked")
+    private static java.util.Map<String,String> journalSnapshot(LiveRewardsLedger ledger)throws ReflectiveOperationException{
+        var field=LiveRewardsLedger.class.getDeclaredField("store");field.setAccessible(true);var store=field.get(ledger);
+        var entries=store.getClass().getDeclaredField("entries");entries.setAccessible(true);
+        return java.util.Map.copyOf((java.util.Map<String,String>)entries.get(store));
+    }
     @Test public void checkInDailyMoreOrderAndCheckInHasNoReturn()throws Exception{
         var sign=LiveCoreFixture.task(LiveRewardsTypes.Kind.CHECK_IN,0,"SIGN");
         var rig=new Rig(List.of(more("M"),daily("D"),sign));var result=rig.run();
@@ -140,5 +175,41 @@ public class LiveRewardsCoordinatorTest {
         var task=daily("SYNTHETIC_SECRET_TITLE");var rig=new Rig(List.of(task));rig.f.ledger.begin(task);
         var result=rig.run();assertEquals(0,rig.tapCalls);assertEquals(Integer.valueOf(1),result.counts().get(LiveRewardsTypes.Outcome.ALREADY_ATTEMPTED_SKIP));
         assertFalse(result.fixedSummary().contains("SECRET"));
+    }
+    @Test public void resumedUnreadableCheckInSkipsEveryPriorAttemptStateAndContinuesOtherRegions()throws Exception{
+        for(int records=1;records<=3;records++){
+            var descriptor=LiveCardIdentity.hashText("CHECK_IN");
+            var sign=new LiveRewardsTypes.Task(LiveRewardsTypes.Kind.CHECK_IN,descriptor,0,LiveRewardsTypes.hash("SIGN_TITLE"),5,true,false,2);
+            var prior=LiveRewardsLedger.synthetic(LiveCoreFixture.DAY,LiveCoreFixture.RUN);
+            prior.begin(sign);
+            if(records>=2)prior.burnTap(sign);
+            if(records==3)prior.finish(sign,LiveRewardsTypes.Outcome.UNCONFIRMED);
+            var previousRecords=journalSnapshot(prior);
+            var fresh=prior.syntheticNextRun("00000000-0000-4000-8000-000000000002");
+            var seed=new LiveRewardsTypes.Task(LiveRewardsTypes.Kind.CHECK_IN,descriptor,0,"",0,false,false,-1);
+            assertTrue(sign.sameKey(seed));assertTrue(fresh.attempted(seed));
+            var rig=new Rig(List.of(more("M"),seed,daily("D")),fresh);var result=rig.run();
+            assertFalse(result.reason(),result.stopped());assertTrue(result.preflightPassed());
+            assertEquals(Integer.valueOf(1),result.counts().get(LiveRewardsTypes.Outcome.ALREADY_ATTEMPTED_SKIP));
+            assertEquals(Integer.valueOf(0),result.counts().get(LiveRewardsTypes.Outcome.UNREADABLE_SKIP));
+            assertEquals(Integer.valueOf(2),result.counts().get(LiveRewardsTypes.Outcome.OBSERVED_COMPLETE));
+            assertEquals(List.of(LiveRewardsTypes.Kind.DAILY,LiveRewardsTypes.Kind.MORE),rig.tappedKinds);
+            assertFalse(rig.observedKinds.contains(LiveRewardsTypes.Kind.CHECK_IN));
+            assertEquals(4,rig.observeCalls);assertEquals(2,rig.returnCalls);assertEquals(2,result.taps());assertEquals(2,result.backs());
+            assertTrue(prior.attempted(sign));assertTrue(fresh.attempted(seed));
+            try{fresh.begin(seed);fail("A new run cannot replace the previous pending record");}
+            catch(java.nio.file.FileAlreadyExistsException expected){assertNotNull(expected.getMessage());}
+            assertTrue("Prior pending, tap and result records must remain byte-for-byte",journalSnapshot(prior).entrySet().containsAll(previousRecords.entrySet()));
+        }
+    }
+    @Test public void cleanAfterTimeoutRetiresOldReadCapabilityAndNextScopeCompletes()throws Exception{
+        for(boolean crop:new boolean[]{false,true}){
+            var rig=new Rig(List.of(daily("D"),more("M")));rig.cleanCropTimeout=crop;rig.cleanUiTimeout=!crop;
+            var result=rig.run();assertFalse(result.reason(),result.stopped());assertTrue(rig.f.authority.current());
+            assertEquals(Integer.valueOf(1),result.counts().get(LiveRewardsTypes.Outcome.UNCONFIRMED));
+            assertEquals(Integer.valueOf(1),result.counts().get(LiveRewardsTypes.Outcome.OBSERVED_COMPLETE));
+            assertEquals(List.of(LiveRewardsTypes.Kind.DAILY,LiveRewardsTypes.Kind.MORE),rig.reports);
+            assertEquals(2,rig.tapCalls);assertEquals(2,rig.returnCalls);assertEquals(2,rig.afterCalls);
+        }
     }
 }

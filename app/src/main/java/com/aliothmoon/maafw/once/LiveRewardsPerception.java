@@ -27,19 +27,25 @@ final class LiveRewardsPerception {
     private final LiveRewardsNavigation navigation;
     private final BooleanSupplier hiddenCurrent;
     private final ArtifactSink sink;
+    private final LivePreflightHistory history;
     private List<LiveRewardsTypes.Task> cohort=List.of();
     private boolean nativeClean=true,swipeClean=true;
     private volatile String safeState="NEW";
+    private volatile LiveUiDiagnostic lastUiDiagnostic;
     LiveRewardsPerception(Context context,LiveRunAuthority authority,LiveRewardsNavigation navigation,
-            BooleanSupplier hiddenCurrent,ArtifactSink sink){
-        if(context==null||authority==null||!authority.live()||navigation==null||hiddenCurrent==null||sink==null)
+            BooleanSupplier hiddenCurrent,ArtifactSink sink,LiveRewardsLedger ledger){
+        if(context==null||authority==null||!authority.live()||navigation==null||hiddenCurrent==null||sink==null||ledger==null||!ledger.production()
+                ||!authority.day().equals(ledger.day()))
             throw new IllegalArgumentException("Exact live perception owner required");
         this.context=context.getApplicationContext();this.authority=authority;this.navigation=navigation;
-        this.hiddenCurrent=hiddenCurrent;this.sink=sink;
+        this.hiddenCurrent=hiddenCurrent;this.sink=sink;history=new LivePreflightHistory(ledger,authority.day());
     }
     boolean knownClean(){return nativeClean&&AndroidLiveUiReader.knownClean()&&AndroidCardRegionCapture.knownClean()
             &&swipeClean&&navigation.knownClean();}
     String safeState(){return safeState;}
+    JSONObject lastUiDiagnostic()throws org.json.JSONException{
+        var exact=lastUiDiagnostic;return exact==null?null:new JSONObject(exact.json());
+    }
     private void state(String fixed){safeState=fixed!=null&&fixed.matches("[A-Z0-9_]{1,128}")?fixed:"INVALID_FIXED_STATE";}
     private static String safeNativeReason(String reason){return reason!=null&&reason.matches("[A-Z][A-Z0-9_]{0,79}")?reason:"INVALID_NATIVE_REASON";}
     private boolean current(LiveRunAuthority.CardScope scope){return scope!=null&&scope.run()==authority
@@ -59,9 +65,19 @@ final class LiveRewardsPerception {
         if(exact!=authority)throw new SecurityException("Exact preflight run required");
         List<LiveRewardsTypes.Task> result=new ArrayList<>();boolean complete=true;
         for(var kind:LiveRewardsTypes.Kind.values()){
+            if(kind==LiveRewardsTypes.Kind.CHECK_IN){
+                var seed=LivePreflightHistory.checkInSeed();
+                if(attemptedHistory(seed)){
+                    // A prior attempt supplies no UI/image authority. Still require one fresh qualified
+                    // typed UI/source bracket, without searching for a possibly collapsed check-in card.
+                    readUi(authority.scanScope(kind),LiveRewardsTypes.Phase.BEFORE);
+                    result.add(seed);state("PREFLIGHT_CHECK_IN_ALREADY_ATTEMPTED");continue;
+                }
+            }
             Roster roster=scan(kind);complete&=roster.known();
             Map<String,Integer> duplicates=new HashMap<>();for(var task:roster.tasks())duplicates.merge(task.key(),1,Integer::sum);
             for(var seed:roster.tasks()){
+                if(attemptedHistory(seed)){result.add(LivePreflightHistory.unreadable(seed));continue;}
                 if(seed.complete()){result.add(seed);continue;}
                 if(duplicates.get(seed.key())!=1){result.add(seed);continue;}
                 var observed=observe(authority.preflightScope(seed),LiveRewardsTypes.Phase.BEFORE,seed);
@@ -71,6 +87,12 @@ final class LiveRewardsPerception {
         cohort=List.copyOf(result);
         state(complete?"PREFLIGHT_COMPLETE":"PREFLIGHT_INCOMPLETE");
         return new LiveRewardsTypes.Preflight(cohort,complete,knownClean(),authority.current()&&navigation.current());
+    }
+    private boolean attemptedHistory(LiveRewardsTypes.Task seed)throws java.io.IOException{
+        state("PREFLIGHT_HISTORY_QUERY_"+seed.kind().name());
+        boolean attempted=history.attempted(seed);
+        state("PREFLIGHT_HISTORY_"+(attempted?"ALREADY_ATTEMPTED_":"NO_PRIOR_ATTEMPT_")+seed.kind().name());
+        return attempted;
     }
     private Roster scan(LiveRewardsTypes.Kind kind)throws Exception{
         var scope=authority.scanScope(kind);ReviewShizukuSwipeActor.Direction previous=null;
@@ -171,7 +193,7 @@ final class LiveRewardsPerception {
                     return permit.consume(now())&&permit.current(now())&&current(scope);
                 },permit);
         var report=read.protocolReport();
-        state("UI_"+read.fixedStatus().name()+"_"+(report==null?"NONE":report.base().source().reason().name()));
+        var diagnostic=LiveUiDiagnostic.from(read);lastUiDiagnostic=diagnostic;state(diagnostic.safeState());
         if(!read.knownClean())throw new SecurityException("Live UI cleanup unconfirmed");
         if(LivePerceptionBudget.ui(read.fixedStatus(),report==null?null:report.base().source().reason(),true,afterExpired(scope,phase))){
             scope.discardUi(permit,true);throw new AfterExpired();
