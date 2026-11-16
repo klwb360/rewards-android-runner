@@ -3,7 +3,14 @@ import java.util.*;
 import java.util.regex.*;
 /** Explicit points grammar bound to exact original resource/parent structure; never infers middle-text meaning. */
 final class NativeUiBoundPointsParser {
- record Node(int index,int parentIndex,boolean visible,boolean packageMatches,String resourceId,String text,String description,int left,int top,int right,int bottom){}
+ enum ClassRole { TEXT, BUTTON, UNKNOWN }
+ record Node(int index,int parentIndex,boolean visible,boolean packageMatches,String resourceId,String text,String description,int left,int top,int right,int bottom,
+             ClassRole classRole,boolean clickable){
+  Node(int index,int parentIndex,boolean visible,boolean packageMatches,String resourceId,String text,String description,int left,int top,int right,int bottom){
+   this(index,parentIndex,visible,packageMatches,resourceId,text,description,left,top,right,bottom,ClassRole.UNKNOWN,false);
+  }
+  Node{Objects.requireNonNull(classRole);}
+ }
  record BoundResult(NativeUiStructureParser.Result counters,NativeUiRegions.Pair regions){
   BoundResult{Objects.requireNonNull(counters);Objects.requireNonNull(regions);}
  }
