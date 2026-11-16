@@ -56,4 +56,49 @@ public class LiveTaskMatcherTest {
         assertTrue(LiveTaskMatcher.nativeTitleMatches(seed,expected.titleHash()));
         assertFalse(LiveTaskMatcher.nativeTitleMatches(seed,""));
     }
+    @Test public void aSkippedUnknownTitlePeerCannotSupplyAnotherTasksCompactCompletion(){
+        var attempted=LivePreflightHistory.unreadable(task("Repeated title, Earlier description, + 5 积分","Repeated title",1));
+        var expected=task("Repeated title, Current description, + 5 积分","Repeated title",2);
+        // The current task disappeared/refreshed. Only the earlier attempted card remains,
+        // compressed after completion; its unknown title must not be counted as the new card.
+        var match=LiveTaskMatcher.find(roster("Repeated title, 5 积分"),expected,List.of(attempted,expected));
+        assertEquals(LiveTaskMatcher.State.AMBIGUOUS,match.state());assertNull(match.item());assertFalse(match.compact());
+        assertFalse(attempted.complete());assertEquals("",attempted.titleHash());
+    }
+    @Test public void aFullExactDescriptorStillMatchesWithAnUnknownSameValuePeer(){
+        var attempted=LivePreflightHistory.unreadable(task("Repeated title, Earlier description, + 5 积分","Repeated title",1));
+        var expected=task("Repeated title, Current description, + 5 积分","Repeated title",2);
+        var match=LiveTaskMatcher.find(roster("Repeated title, 5 积分","Repeated title, Current description, + 5 积分"),expected,List.of(attempted,expected));
+        assertEquals(LiveTaskMatcher.State.UNIQUE,match.state());assertEquals(2,match.item().index());assertFalse(match.compact());
+    }
+    @Test public void unknownTitlesFromAnotherRegionOrValueDoNotBlockAUniqueCompactMatch(){
+        var expected=task("Task name, Current description, + 5 积分","Task name",2);
+        var otherRegion=new LiveRewardsTypes.Task(LiveRewardsTypes.Kind.DAILY,LiveCardIdentity.hashText("unknown daily"),1,"",5,false,false,-1);
+        var otherValue=new LiveRewardsTypes.Task(LiveRewardsTypes.Kind.MORE,LiveCardIdentity.hashText("unknown more"),1,"",10,false,false,-1);
+        var match=LiveTaskMatcher.find(roster("Task name, 5 积分"),expected,List.of(otherRegion,otherValue,expected));
+        assertEquals(LiveTaskMatcher.State.UNIQUE,match.state());assertTrue(match.compact());
+    }
+    @Test public void anotherCardsCompactTitleCannotImpersonateANoDescriptionExactIdentity(){
+        var expected=task("Repeated title, + 5 积分","Repeated title",1);
+        var other=task("Repeated title, Different description, + 5 积分","Repeated title",2);
+        assertEquals(expected.titleHash(),expected.descriptorHash());
+        // The no-description card disappeared. The sole remaining row is the other card's
+        // completed compact form, which hashes exactly like the missing card's descriptor.
+        for(var peer:List.of(other,LivePreflightHistory.unreadable(other))){
+            var match=LiveTaskMatcher.find(roster("Repeated title, 5 积分"),expected,List.of(expected,peer));
+            assertEquals(LiveTaskMatcher.State.AMBIGUOUS,match.state());assertNull(match.item());assertFalse(match.compact());
+        }
+        assertEquals(LiveTaskMatcher.State.AMBIGUOUS,LiveTaskMatcher.find(roster("Repeated title, 5 积分"),expected,List.of()).state());
+        assertEquals(LiveTaskMatcher.State.AMBIGUOUS,LiveTaskMatcher.find(roster("Repeated title, 5 积分"),expected,null).state());
+    }
+    @Test public void aUniqueNoDescriptionIdentityStillMatchesAndOtherRegionsOrValuesDoNotInterfere(){
+        var expected=task("Unique title, + 5 积分","Unique title",1);
+        var unrelated=task("Another title, Description, + 5 积分","Another title",2);
+        var otherRegion=new LiveRewardsTypes.Task(LiveRewardsTypes.Kind.DAILY,LiveCardIdentity.hashText("unknown daily"),1,"",5,false,false,-1);
+        var otherValue=new LiveRewardsTypes.Task(LiveRewardsTypes.Kind.MORE,LiveCardIdentity.hashText("unknown more"),1,"",10,false,false,-1);
+        for(var cohort:List.of(List.of(expected),List.of(expected,unrelated,otherRegion,otherValue))){
+            var match=LiveTaskMatcher.find(roster("Unique title, 5 积分"),expected,cohort);
+            assertEquals(LiveTaskMatcher.State.UNIQUE,match.state());assertFalse(match.compact());assertEquals(1,match.item().index());
+        }
+    }
 }

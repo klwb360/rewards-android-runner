@@ -19,14 +19,28 @@ final class LiveTaskMatcher {
         for(var item:report.items())if(item.role()==role&&item.descriptorHash().equals(expected.descriptorHash())
                 &&(expected.kind()==LiveRewardsTypes.Kind.CHECK_IN||item.points()==expected.points())){exact=item;matches++;}
         if(matches>1)return new Match(State.AMBIGUOUS,null,false);
-        if(matches==1)return new Match(State.UNIQUE,exact,false);
+        if(matches==1){
+            // A descriptor without a description is title-only too: another card's completed
+            // compact form can have this exact hash. Require the same uniqueness proof.
+            if(expected.kind()!=LiveRewardsTypes.Kind.CHECK_IN&&!expected.titleHash().isEmpty()
+                    &&expected.descriptorHash().equals(expected.titleHash())&&!uniqueKnownTitle(expected,cohort))
+                return new Match(State.AMBIGUOUS,null,false);
+            return new Match(State.UNIQUE,exact,false);
+        }
         if(expected.kind()==LiveRewardsTypes.Kind.CHECK_IN||expected.titleHash().isEmpty()||cohort==null)
             return new Match(State.MISSING,null,false);
-        int titlePeers=0;
-        for(var task:cohort)if(task.kind()==expected.kind()&&task.points()==expected.points()&&task.titleHash().equals(expected.titleHash()))titlePeers++;
-        if(titlePeers!=1)return new Match(State.AMBIGUOUS,null,false);
+        if(!uniqueKnownTitle(expected,cohort))return new Match(State.AMBIGUOUS,null,false);
         for(var item:report.items())if(item.role()==role&&item.points()==expected.points()&&item.descriptorHash().equals(expected.titleHash())){exact=item;matches++;}
         return matches==1?new Match(State.UNIQUE,exact,true):new Match(matches==0?State.MISSING:State.AMBIGUOUS,null,false);
+    }
+    private static boolean uniqueKnownTitle(LiveRewardsTypes.Task expected,List<LiveRewardsTypes.Task> cohort){
+        if(cohort==null)return false;int titlePeers=0;
+        for(var task:cohort)if(task.kind()==expected.kind()&&task.points()==expected.points()){
+            // Skipped native reads leave peer titles unknown; those cannot be ruled out.
+            if(task.titleHash().isEmpty())return false;
+            if(task.titleHash().equals(expected.titleHash()))titlePeers++;
+        }
+        return titlePeers==1;
     }
     private LiveTaskMatcher(){}
 }
