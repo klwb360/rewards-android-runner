@@ -116,13 +116,45 @@ final class OverviewUiParser {
         return value.equals(node.text()) || value.equals(node.description());
     }
     private NativeUiBoundPointsParser.Node childTitle(NativeUiBoundPointsParser.Node parent, String title) {
-        NativeUiBoundPointsParser.Node found=null;
-        for (var node : children(parent)) if (exact(node,title)) {
-            if (found != null) { ambiguous=true; return null; }
-            found=node;
-        }
-        return found;
+        List<NativeUiBoundPointsParser.Node> matches=new ArrayList<>();
+        for(var node:children(parent))if(exact(node,title))matches.add(node);
+        if(matches.size()<2)return matches.isEmpty()?null:matches.get(0);
+        if(!"签入".equals(title)||matches.size()!=2){ambiguous=true;return null;}
+        return checkInHeaderTitle(parent,matches);
     }
+    /** The live helper supplies actual class/clickability. Keep both nodes and distinguish
+     * the observed text heading from its separately labelled right-hand button. */
+    private NativeUiBoundPointsParser.Node checkInHeaderTitle(NativeUiBoundPointsParser.Node parent,List<NativeUiBoundPointsParser.Node> matches){
+        NativeUiBoundPointsParser.Node heading=null,button=null;
+        for(var node:matches){
+            if(node.parentIndex()!=parent.index()||!children(node).isEmpty()||!empty(node.resourceId())){ambiguous=true;return null;}
+            if(node.classRole()==NativeUiBoundPointsParser.ClassRole.TEXT&&!node.clickable()&&"签入".equals(node.text())&&empty(node.description())){
+                if(heading!=null){ambiguous=true;return null;}heading=node;
+            }else if(node.classRole()==NativeUiBoundPointsParser.ClassRole.BUTTON&&node.clickable()&&empty(node.text())&&"签入".equals(node.description())){
+                if(button!=null){ambiguous=true;return null;}button=node;
+            }else{ambiguous=true;return null;}
+        }
+        if(heading==null||button==null){ambiguous=true;return null;}
+        if(heading.visible()||button.visible()){
+            if(!visible(parent)){ambiguous=true;return null;}
+            Box p=box(parent);double w=p.width(),h=p.height();
+            if(heading.visible()){
+                Box t=box(heading);
+                if(!visible(heading)||!p.contains(t)||t.left()>p.left()+.10*w||t.right()>p.left()+.45*w){ambiguous=true;return null;}
+            }
+            if(button.visible()){
+                Box b=box(button);
+                if(!visible(button)||!p.contains(b)||b.left()<p.left()+.80*w||b.right()<p.right()-.04*w
+                        ||b.width()>.12*w||b.width()<.60*b.height()||b.width()>1.50*b.height()
+                        ||b.height()<.40*h||Math.abs(b.centerY()-p.centerY())>.20*h){ambiguous=true;return null;}
+            }
+            if(heading.visible()&&button.visible()&&box(heading).overlaps(box(button))){ambiguous=true;return null;}
+        }
+        // Hidden metadata supplies no region. Mixed visibility must never expose the heading
+        // as a complete check-in candidate while its paired control is still offscreen.
+        return heading.visible()==button.visible()?heading:null;
+    }
+    private static boolean empty(String value){return value==null||value.isEmpty();}
     private void activities(List<NativeUiBoundPointsParser.Node> siblings) {
         var container=uniqueId("dailySet");
         if (container==null || !visible(container)) return;

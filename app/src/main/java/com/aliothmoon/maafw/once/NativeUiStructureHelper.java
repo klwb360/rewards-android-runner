@@ -150,8 +150,10 @@ public final class NativeUiStructureHelper {
                         fieldDiagnostics.node(current.index(),current.parent(),current.depth(),originalBounds.left,originalBounds.top,originalBounds.right,originalBounds.bottom,visible,node.isEnabled(),node.isClickable(),node.getClassName(),node.getViewIdResourceName(),text,description);
                     }
                     if(boundMode){Rect originalBounds=new Rect();node.getBoundsInScreen(originalBounds);
+                        var classRole=liveMode||visitMode?liveClassRole(node.getClassName()):NativeUiBoundPointsParser.ClassRole.UNKNOWN;
+                        boolean clickable=(liveMode||visitMode)&&node.isClickable();
                         boundRecords.add(new NativeUiBoundPointsParser.Node(current.index(),current.parent(),visible,true,
-                                node.getViewIdResourceName(),text,description,originalBounds.left,originalBounds.top,originalBounds.right,originalBounds.bottom));
+                                node.getViewIdResourceName(),text,description,originalBounds.left,originalBounds.top,originalBounds.right,originalBounds.bottom,classRole,clickable));
                     }
                     if(overviewMode&&visible&&node.isScrollable()) {
                         boolean backward=false,forward=false;
@@ -265,6 +267,11 @@ public final class NativeUiStructureHelper {
     static boolean validReadyArguments(String[] args){return args!=null&&(args.length==2||args.length==3&&("READY_V49".equals(args[2])||"FORMAT_V50".equals(args[2])||"DIAGNOSTIC_V51".equals(args[2])||"DIAGNOSTIC_LOCATED_V52".equals(args[2])||"BOUND_POINTS_V53".equals(args[2])||"BOUND_REGIONS".equals(args[2])||"OVERVIEW_V5".equals(args[2])||"OVERVIEW_CARDS_V1".equals(args[2])||"LIVE_REWARDS_UI_V1".equals(args[2])||"LIVE_VISIT_V1".equals(args[2])));}
     private static boolean packageMatches(CharSequence value) {
         return value != null && value.length() == BING.length() && BING.contentEquals(value);
+    }
+    static NativeUiBoundPointsParser.ClassRole liveClassRole(CharSequence value){
+        if(value!=null&&value.length()=="android.widget.TextView".length()&&"android.widget.TextView".contentEquals(value))return NativeUiBoundPointsParser.ClassRole.TEXT;
+        if(value!=null&&value.length()=="android.widget.Button".length()&&"android.widget.Button".contentEquals(value))return NativeUiBoundPointsParser.ClassRole.BUTTON;
+        return NativeUiBoundPointsParser.ClassRole.UNKNOWN;
     }
     private static String field(CharSequence value) throws Stop {
         if (value == null) return "";

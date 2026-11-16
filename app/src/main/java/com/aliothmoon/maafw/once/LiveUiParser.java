@@ -11,7 +11,7 @@ final class LiveUiParser {
     static List<NativeUiBoundPointsParser.Node> labels(List<NativeUiBoundPointsParser.Node> nodes){
         List<NativeUiBoundPointsParser.Node> out=new ArrayList<>(nodes.size());
         for(var n:nodes)out.add(new NativeUiBoundPointsParser.Node(n.index(),n.parentIndex(),n.visible(),n.packageMatches(),n.resourceId(),
-                "签到".equals(n.text())?"签入":n.text(),"签到".equals(n.description())?"签入":n.description(),n.left(),n.top(),n.right(),n.bottom()));
+                "签到".equals(n.text())?"签入":n.text(),"签到".equals(n.description())?"签入":n.description(),n.left(),n.top(),n.right(),n.bottom(),n.classRole(),n.clickable()));
         return out;
     }
     static List<LiveUiProtocol.Item> identities(List<NativeUiBoundPointsParser.Node> nodes,OverviewUiProtocol.Report base){
