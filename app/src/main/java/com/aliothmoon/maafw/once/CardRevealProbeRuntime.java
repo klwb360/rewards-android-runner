@@ -305,7 +305,7 @@ final class CardRevealProbeRuntime {
                     :remainingOutcome.status().equals("ITEM_COMPLETE_SKIP")?Stage.SKIP_REVIEW_COMPLETE:Stage.DIAGNOSTIC_REVIEW_COMPLETE;
         }finally{if(!transferred&&marked!=null)Arrays.fill(marked,(byte)0);}
     }
-    private String profile(){return remaining==null?"CARD_NATIVE_CHAIN_V1":"REMAINING_CARDS_V1";}
+    private String profile(){return remaining==null?"CARD_NATIVE_CHAIN_V1":remaining.profile();}
     private boolean diagnosticAvailable(){return remaining==null?diagnostic!=null:remainingDiagnosticJson!=null;}
     private org.json.JSONObject addChoice(org.json.JSONObject json)throws org.json.JSONException{return json.put("choice",remaining.key()).put("role",remaining.role().name()).put("cardIndex",remaining.index());}
     private static Object boxJson(Box box){return box==null?org.json.JSONObject.NULL:new org.json.JSONArray().put(box.left()).put(box.top()).put(box.right()).put(box.bottom());}

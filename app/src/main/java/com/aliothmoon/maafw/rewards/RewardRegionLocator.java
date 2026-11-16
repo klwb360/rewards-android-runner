@@ -69,6 +69,9 @@ public final class RewardRegionLocator {
         return switch(mode){case 0,4 -> value>=252;case 1,3 -> value<160;default -> value>=241 && value<=250;};
     }
     private static List<Component> components(byte[] gray,int w,int h,Box roi,int mode,BooleanSupplier cancel) {
+        return components(gray,w,h,roi,mode,cancel,null);
+    }
+    private static List<Component> components(byte[] gray,int w,int h,Box roi,int mode,BooleanSupplier cancel,Box badgeCard) {
         int rw=roi.width(),rh=roi.height(),area=rw*rh;
         boolean[] seen=new boolean[area]; int[] queue=new int[area];
         List<Component> out=new ArrayList<>();
@@ -96,6 +99,8 @@ public final class RewardRegionLocator {
                 mode==4?b.width()>.70*w && b.height()>=.10*w:
                 mode==3?b.width()>.025*w&&b.width()<.09*w&&b.height()>.025*w&&b.height()<.09*w
                     &&b.width()/(double)b.height()>=.75&&b.width()/(double)b.height()<=1.3:
+                badgeCard!=null?b.width()>=.16*badgeCard.width()&&b.width()<=.26*badgeCard.width()
+                    &&b.height()>=.24*badgeCard.height()&&b.height()<=.51*badgeCard.height():
                 b.width()>.10*w && b.width()<.30*w && b.height()>.03*h && b.height()<.40*h;
             if(eligible) {
                 Component c=new Component(b,tail);
@@ -158,7 +163,17 @@ public final class RewardRegionLocator {
     public static Geometry observeVisibleMoreGray8(Key key,byte[] pixels,int width,int height,BooleanSupplier canceled) {
         return observeGray8(key,pixels,width,height,canceled,true);
     }
+    /** One independently sealed card crop. Its badge proportions use the observed card, so a
+     * tighter crop cannot hide a valid badge. Existing section/viewport observers are unchanged;
+     * this method grants neither OCR identity nor input authority. */
+    public static Geometry observeSingleCardGray8(Key key,byte[] pixels,int width,int height,BooleanSupplier canceled) {
+        return observeGray8(key,pixels,width,height,canceled,true,true);
+    }
     private static Geometry observeGray8(Key key,byte[] pixels,int width,int height,BooleanSupplier canceled,boolean visibleMore) {
+        return observeGray8(key,pixels,width,height,canceled,visibleMore,false);
+    }
+    private static Geometry observeGray8(Key key,byte[] pixels,int width,int height,BooleanSupplier canceled,
+            boolean visibleMore,boolean singleCard) {
         Objects.requireNonNull(key);
         BooleanSupplier cancel=canceled==null?()->false:canceled;
         if(width<32||height<32||width>4096||height>8192||(long)width*height>4_194_304
@@ -170,6 +185,7 @@ public final class RewardRegionLocator {
         List<Component> raw=components(gray,width,height,new Box(0,0,width,height),visibleMore?4:0,cancel);
         if(raw==null)return new Geometry(key,width,height,Status.CANCELED,List.of());
         if(raw.size()>16)return new Geometry(key,width,height,Status.TOO_MANY_COMPONENTS,List.of());
+        if(singleCard&&raw.size()>1)return new Geometry(key,width,height,Status.INCOMPLETE_CARD,List.of());
         List<Card> cards=new ArrayList<>();
         raw.sort(Comparator.comparingInt((Component c)->c.box.top).thenComparingInt(c->c.box.left));
         for(Component c:raw) {
@@ -178,7 +194,7 @@ public final class RewardRegionLocator {
             Box roi=new Box(b.left+(int)(b.width()*.65),b.top,b.right,b.bottom);
             List<Badge> badges=new ArrayList<>();
             for(int mode=1;mode<=2;mode++) {
-                List<Component> parts=components(gray,width,height,roi,mode,cancel);
+                List<Component> parts=components(gray,width,height,roi,mode,cancel,singleCard?b:null);
                 if(parts==null)return new Geometry(key,width,height,Status.CANCELED,List.of());
                 if(parts.size()>16)return new Geometry(key,width,height,Status.TOO_MANY_COMPONENTS,List.of());
                 for(Component part:parts)badges.add(new Badge(part.box,mode==1?BadgeTone.DARK:BadgeTone.PALE));
