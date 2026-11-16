@@ -146,7 +146,8 @@ final class RemainingCardPlan {
         if(ring==null)return denied(choice,w,h,"NO_CURRENT_RING",panel,proof);
         for(var tick:geometry.ticks())if(ring.overlaps(tick.disk()))return denied(choice,w,h,"CURRENT_RING_HAS_TICK",panel,proof);
         if(!yellow(argb,w,ring,stop))return denied(choice,w,h,"RING_NOT_YELLOW",panel,proof);
-        var columns=CheckInCoinColumns.locate(argb,w,h,panel,ring,stop);
+        var columns=choice.coinRepair()?CheckInCoinColumns.locateSeparatedCoins(argb,w,h,panel,ring,stop)
+                :CheckInCoinColumns.locate(argb,w,h,panel,ring,stop);
         if(!columns.ready())return denied(choice,w,h,columns.status(),panel,proof);
         Box title=new Box(panel.left(),panel.top(),panel.left()+(int)(.35*panel.width()),panel.top()+(int)(.40*panel.height()));
         if(title.overlaps(ring))return denied(choice,w,h,"TITLE_RING_OVERLAP",panel,proof);

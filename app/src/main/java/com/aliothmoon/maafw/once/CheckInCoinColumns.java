@@ -18,6 +18,15 @@ final class CheckInCoinColumns {
     }
 
     static Result locate(int[] argb,int width,int height,Box panel,Box ring,BooleanSupplier canceled){
+        return locate(argb,width,height,panel,ring,canceled,false);
+    }
+    /** V3-only query planning: a short central connector cannot supply a coin column. All
+     * column count, shape, valley, density, pitch and ring-ownership checks remain shared. */
+    static Result locateSeparatedCoins(int[] argb,int width,int height,Box panel,Box ring,BooleanSupplier canceled){
+        return locate(argb,width,height,panel,ring,canceled,true);
+    }
+    private static Result locate(int[] argb,int width,int height,Box panel,Box ring,BooleanSupplier canceled,
+            boolean excludeThinConnectors){
         if(stopped(canceled))return denied("CANCELED");
         if(width<32||height<32||width>4096||height>4096||(long)width*height>MAX_PIXELS
                 ||argb==null||argb.length!=(long)width*height||panel==null||ring==null
@@ -30,7 +39,7 @@ final class CheckInCoinColumns {
         int half=Math.max(1,(int)Math.floor(.20*ring.height())),cy=(int)Math.floor(ring.centerY());
         int top=cy-half,bottom=cy+half;
         if(top<panel.top()||bottom>panel.bottom())return denied("INVALID_GEOMETRY");
-        int minimum=Math.max(2,(int)Math.ceil(.07*(bottom-top)));
+        int minimum=Math.max(2,(int)Math.ceil((excludeThinConnectors?.25:.07)*(bottom-top)));
         int mergeGap=Math.max(1,(int)Math.floor(.12*size));
         int[] projection=new int[panel.width()];
         try {
