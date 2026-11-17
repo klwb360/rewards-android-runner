@@ -42,6 +42,8 @@ final class LiveRewardsRuntime {
     private LiveRewardsPerception perception;
     private LiveRewardsNavigation navigation;
     private LiveRewardsInput input;
+    private LiveRewardsForegroundLease foreground;
+    private final String runDay;
     private LiveRewardsCoordinator.Summary summary;
     private Path artifacts;
     private Object artifactKey;
@@ -52,10 +54,11 @@ final class LiveRewardsRuntime {
     private boolean inputUnknown;
     private long startedElapsed,finishedElapsed=-1,releasedElapsed=-1;
     private String reportSha256;
+    private boolean foregroundStopWaiting,reportAttempted;
 
     private LiveRewardsRuntime(DormantCaptureConfirmationActivity activity,
-            VisibleCaptureAuthority.LiveRewardsApproval approval,BingNavigationSnapshot.Shape shape){
-        this.activity=activity;this.approval=approval;this.shape=shape;
+            VisibleCaptureAuthority.LiveRewardsApproval approval,BingNavigationSnapshot.Shape shape,String runDay){
+        this.activity=activity;this.approval=approval;this.shape=shape;this.runDay=runDay;
     }
     static LiveRewardsRuntime start(DormantCaptureConfirmationActivity activity,
             DormantCaptureConfirmationActivity.LiveClick click,Object approvalOwner){
@@ -66,6 +69,7 @@ final class LiveRewardsRuntime {
                 ||!(activity.getPackageName()+":capture_once").equals(Application.getProcessName()))
             throw new SecurityException("Explicit live run process required");
         var epoch=CaptureSessionRuntime.alignmentEpoch();long now=SystemClock.elapsedRealtime();
+        String approvedDay=LocalDate.now(ZoneId.of("Asia/Shanghai")).toString();
         var approval=VisibleCaptureAuthority.issueLiveRewardsApproval(activity,click,epoch,approvalOwner,now);
         var manager=activity.getSystemService(DisplayManager.class);var display=manager==null?null:manager.getDisplay(Display.DEFAULT_DISPLAY);
         if(display==null||display.getState()!=Display.STATE_ON||display.getRotation()!=Surface.ROTATION_0)
@@ -75,23 +79,41 @@ final class LiveRewardsRuntime {
         var bounds=wm.getMaximumWindowMetrics().getBounds();
         if(bounds.left!=0||bounds.top!=0||bounds.width()!=1440||bounds.height()!=2560)
             throw new SecurityException("Reviewed portrait shape required");
-        var run=new LiveRewardsRuntime(activity,approval,new BingNavigationSnapshot.Shape(bounds.width(),bounds.height(),0));
+        var run=new LiveRewardsRuntime(activity,approval,new BingNavigationSnapshot.Shape(bounds.width(),bounds.height(),0),approvedDay);
         run.root=CaptureSessionRuntime.retainAlignment(run,approval.deadline,run::latchCancel,run::closeOnOwner,()->run.closed,run::postOwner);
         try{
-            run.authority=new LiveRunAuthority(approval,new LiveRunAuthority.Clock(){
+            run.loop.start();run.owner=new Handler(run.loop.getLooper());run.root.arm();run.startedElapsed=approval.issued;
+            run.stage="FOREGROUND_STARTING";
+            run.foreground=LiveRewardsForegroundService.reserve(run,run.runId,approval.issued,approval.deadline,run.runDay,
+                    run::foregroundReady,run::cancel,()->run.postOwner(run::closeOnOwner));
+            LiveRewardsForegroundService.requestStart(activity,run.foreground);
+            long wait=Math.max(0,run.foreground.startupDeadline-SystemClock.elapsedRealtime());
+            if(!run.main.postDelayed(run::checkForegroundStartup,wait))run.cancel();
+        }catch(RuntimeException unknown){run.failure="FOREGROUND_START_REJECTED";run.stage="STOPPED";run.cancel();}
+        return run;
+    }
+    private boolean bootstrapCurrent(){return !constructionUnknown&&!workerReturned&&!canceled.get()&&root!=null&&root.current()
+            &&SystemClock.elapsedRealtime()<approval.deadline&&runDay.equals(LocalDate.now(ZoneId.of("Asia/Shanghai")).toString());}
+    private void foregroundReady(){
+        try{
+            if(Looper.myLooper()!=Looper.getMainLooper()||!bootstrapCurrent()||foreground==null||!foreground.ready())
+                throw new SecurityException("Current foreground acknowledgement required");
+            authority=new LiveRunAuthority(approval,new LiveRunAuthority.Clock(){
                 public long elapsedRealtime(){return SystemClock.elapsedRealtime();}
                 public String day(){return LocalDate.now(ZoneId.of("Asia/Shanghai")).toString();}
-            },run::sessionCurrent);
-            run.loop.start();run.owner=new Handler(run.loop.getLooper());run.root.arm();run.stage="HANDOFF";
-            if(!run.main.post(run::handoff))run.cancel();
-        }catch(RuntimeException unknown){run.constructionUnknown=true;run.stage="CLEANUP_UNKNOWN";run.cancel();}
-        return run;
+            },this::sessionCurrent);
+            stage="HANDOFF";handoff();
+        }catch(RuntimeException rejected){failure="FOREGROUND_READY_REJECTED";cancel();}
+    }
+    private void checkForegroundStartup(){
+        var exact=foreground;if(exact==null||exact.everReady()||exact.destroyed())return;
+        exact.checkDeadline();if(!exact.everReady()){failure="FOREGROUND_START_TIMEOUT";cancel();}
     }
     private boolean postOwner(Runnable action){
         try{if(owner!=null&&owner.post(action))return true;}catch(RuntimeException unavailable){/* Retain graph. */}
         constructionUnknown=true;latchCancel();return false;
     }
-    private boolean sessionCurrent(){return !constructionUnknown&&!workerReturned&&!canceled.get()&&root!=null&&root.current();}
+    private boolean sessionCurrent(){return bootstrapCurrent()&&foreground!=null&&foreground.ready();}
     private boolean hiddenCurrent(){return sessionCurrent()&&authority!=null&&authority.current()
             &&activity.rootHiddenScalar()&&activity.hiddenWithSoleTask();}
     private void requireHidden(){if(!hiddenCurrent())throw new SecurityException("Live run hidden owner unavailable");}
@@ -149,12 +171,6 @@ final class LiveRewardsRuntime {
         }catch(Error unknown){failure="ERROR_UNKNOWN";constructionUnknown=true;stage="CLEANUP_UNKNOWN";latchCancel();}
         finally{
             finishedElapsed=SystemClock.elapsedRealtime();workerReturned=true;
-            try{if(artifacts!=null){
-                byte[] bytes=reportJson().toString().getBytes(StandardCharsets.UTF_8);
-                verifyArtifactRoot();writeFile(artifacts,"REPORT.json",bytes);verifyArtifactRoot();
-                reportSha256=CardNativeMockReceipt.digest(bytes);reportPublished=true;
-            }}
-            catch(Exception failed){failure="REPORT_PUBLICATION_FAILED";}
             closeOnOwner();
         }
     }
@@ -209,7 +225,7 @@ final class LiveRewardsRuntime {
         JSONObject uiDiagnostic=perception==null?null:perception.lastUiDiagnostic();
         JSONObject readPreparation=perception==null?null:perception.lastReadPreparation();
         JSONObject navigationDiagnostic=navigation==null?null:navigation.lastNavigationDiagnostic();
-        JSONObject value=new JSONObject().put("profile",PROFILE).put("runId",runId).put("day",authority==null?"UNKNOWN":authority.day())
+        JSONObject value=new JSONObject().put("profile",PROFILE).put("runId",runId).put("day",runDay)
                 .put("stage",stage).put("failure",safeEnum(failure)).put("perceptionState",perceptionState())
                 .put("lastUiDiagnostic",uiDiagnostic==null?JSONObject.NULL:uiDiagnostic)
                 .put("lastReadPreparation",readPreparation==null?JSONObject.NULL:readPreparation)
@@ -292,23 +308,73 @@ final class LiveRewardsRuntime {
     private boolean nativeResourcesClosed(){return !constructionUnknown&&AndroidCardRegionCapture.knownClean()
             &&AndroidOverviewUiReader.knownClean()&&AndroidUiStructureReader.processKnownClean()&&ReviewBingNavigation.knownClean()
             &&(navigation==null||navigation.knownClean())&&(perception==null||perception.knownClean())&&(input==null||input.knownClean());}
-    private boolean allResourcesClosed(){return nativeResourcesClosed()&&!appendActive.get();}
+    private boolean nativeWorkClosed(){return nativeResourcesClosed()&&!appendActive.get();}
+    private boolean allResourcesClosed(){return nativeWorkClosed()&&(foreground==null||foreground.destroyed());}
     private void latchCancel(){canceled.set(true);if(authority!=null)authority.cancel();if(coordinator!=null)coordinator.cancel();activity.clearPendingHandoff();}
     void cancel(){if(root!=null)root.request();else latchCancel();}
     private void closeOnOwner(){
-        if(!workerStarted.get()&&canceled.get()){workerReturned=true;stage="CANCELED";}
+        if(!workerStarted.get()&&canceled.get()){workerReturned=true;finishedElapsed=SystemClock.elapsedRealtime();stage="CANCELED";}
         if(closed||!workerReturned)return;
-        if(!allResourcesClosed()){stage="CLEANUP_UNKNOWN";notifyFinished();return;}
+        if(!nativeWorkClosed()){
+            stage="CLEANUP_UNKNOWN";LiveRewardsForegroundService.cleanupUnknown(foreground);notifyFinished();return;
+        }
+        if(foreground!=null&&!foreground.destroyed()){
+            if(!foregroundStopWaiting){
+                foregroundStopWaiting=true;stage="FOREGROUND_STOPPING";
+                LiveRewardsForegroundService.requestClose(activity.getApplicationContext(),foreground);
+                if(!owner.postDelayed(this::foregroundStopTimeout,5000))foregroundStopTimeout();
+            }
+            return;
+        }
+        finishAfterForeground();
+    }
+    private void foregroundStopTimeout(){
+        if(closed)return;
+        if(foreground==null||foreground.destroyed()){finishAfterForeground();return;}
+        foreground.stopUnknown();failure="FOREGROUND_STOP_UNKNOWN";stage="CLEANUP_UNKNOWN";
+        LiveRewardsForegroundService.cleanupUnknown(foreground);notifyFinished();
+    }
+    private void finishAfterForeground(){
+        if(closed||!workerReturned||!allResourcesClosed())return;
+        if(stage.equals("FOREGROUND_STOPPING"))stage=summary==null?"CANCELED":summary.stopped()?"STOPPED":"COMPLETE";
+        publishTerminalReports();
         closed=true;
         try{
             if(root==null)throw new SecurityException("Exact live root required");
             root.releaseIfClosed();
             if(!root.released())throw new SecurityException("Root release unconfirmed");
         }catch(RuntimeException unknown){constructionUnknown=true;failure="ROOT_RELEASE_UNCONFIRMED";stage="CLEANUP_UNKNOWN";notifyFinished();return;}
-        released=true;releasedElapsed=SystemClock.elapsedRealtime();loop.quitSafely();
+        released=true;releasedElapsed=SystemClock.elapsedRealtime();
         try{writeReleaseReceipt();releaseReceiptPublished=true;}
         catch(Exception failed){failure="RELEASE_PUBLICATION_FAILED";}
+        loop.quitSafely();
         notifyFinished();
+    }
+    private void publishTerminalReports(){
+        if(reportAttempted)return;reportAttempted=true;
+        try{
+            if(artifacts==null){artifacts=createArtifactDirectory();artifactKey=directoryKey(artifacts);}
+            byte[] bytes=reportJson().toString().getBytes(StandardCharsets.UTF_8);
+            verifyArtifactRoot();writeFile(artifacts,"REPORT.json",bytes);verifyArtifactRoot();
+            reportSha256=CardNativeMockReceipt.digest(bytes);reportPublished=true;
+            writeForegroundReceipt();
+        }catch(Throwable failed){failure="REPORT_PUBLICATION_FAILED";}
+    }
+    private void writeForegroundReceipt()throws Exception{
+        var exact=foreground;
+        JSONObject receipt=new JSONObject().put("schemaVersion",1).put("profile",PROFILE).put("runId",runId).put("day",runDay)
+                .put("serviceType","SPECIAL_USE").put("process","CAPTURE_ONCE")
+                .put("issuedElapsed",approval.issued).put("deadlineElapsed",approval.deadline)
+                .put("startupDeadlineElapsed",exact==null?Math.min(approval.deadline,approval.issued+5000):exact.startupDeadline)
+                .put("startRequested",exact!=null&&exact.dispatchAttempted()).put("startReturned",exact!=null&&exact.startReturned())
+                .put("readyObserved",exact!=null&&exact.everReady()).put("readyElapsed",exact==null?-1:exact.readyElapsed())
+                .put("stopRequested",exact!=null&&exact.closeRequested()).put("destroyObserved",exact!=null&&exact.destroyObserved())
+                .put("destroyedElapsed",exact==null?-1:exact.destroyedElapsed())
+                .put("state",exact==null?"NOT_STARTED":exact.state().name()).put("reason",exact==null?"NONE":exact.reason().name())
+                .put("nativeCleanup",nativeWorkClosed()?"CONFIRMED":"UNKNOWN").put("reportSha256",reportSha256)
+                .put("minimumVisitDelayMs",LiveRewardsInput.RETURN_DELAY_MS)
+                .put("rawTextIncluded",false).put("rawDataUploaded",false).put("oldRecordsReset",false);
+        verifyArtifactRoot();writeFile(artifacts,"FOREGROUND.json",receipt.toString().getBytes(StandardCharsets.UTF_8));verifyArtifactRoot();
     }
     private boolean releaseConfirmed(){return workerReturned&&closed&&released&&root!=null&&root.released()&&allResourcesClosed();}
     private void writeReleaseReceipt()throws Exception{
@@ -316,7 +382,7 @@ final class LiveRewardsRuntime {
                 ||finishedElapsed<0||releasedElapsed<finishedElapsed)
             throw new SecurityException("Released terminal report required");
         verifyArtifactRoot();
-        JSONObject receipt=new JSONObject().put("schemaVersion",1).put("profile",PROFILE).put("runId",runId).put("day",authority.day())
+        JSONObject receipt=new JSONObject().put("schemaVersion",1).put("profile",PROFILE).put("runId",runId).put("day",runDay)
                 .put("terminal",true).put("released",true).put("rootEpochReleased",true).put("cleanup","CONFIRMED")
                 .put("reportFile","REPORT.json").put("reportSha256",reportSha256)
                 .put("reportFinishedElapsed",finishedElapsed).put("releasedElapsed",releasedElapsed).put("failure",safeEnum(failure))

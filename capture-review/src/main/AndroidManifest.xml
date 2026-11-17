@@ -4,6 +4,7 @@
     <uses-permission tools:node="removeAll" />
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission-sdk-23 tools:node="removeAll" />
     <permission tools:node="removeAll" />
@@ -22,6 +23,9 @@
             android:process=":capture_once" />
         <provider android:name=".once.ReviewVisibilityProvider" android:authorities="${applicationId}.visibility" android:exported="false" android:process=":capture_once" />
         <service tools:node="removeAll" />
+        <service android:name=".once.LiveRewardsForegroundService" android:exported="false" android:process=":capture_once" android:foregroundServiceType="specialUse" android:stopWithTask="true">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User-started bounded local Rewards UI automation, with visible status and cancellation" />
+        </service>
         <service android:name=".once.SyntheticDemoService" android:exported="false" android:process=":readonly_ocr" android:stopWithTask="true" />
         <activity android:name=".once.DormantCaptureConfirmationActivity" android:enabled="true" android:exported="false" android:process=":capture_once" />
         <service android:name=".once.DormantProjectionForegroundService" android:enabled="true" android:exported="false" android:process=":capture_once" android:foregroundServiceType="mediaProjection" android:stopWithTask="true" />
