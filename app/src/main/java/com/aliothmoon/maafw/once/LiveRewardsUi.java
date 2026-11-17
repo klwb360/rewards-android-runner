@@ -12,6 +12,8 @@ final class LiveRewardsUi {
     static final String RUN="确认开始本轮真实流程";
     static final String OPEN_READ_ONLY="打开独立只读预检（不点击任务）";
     static final String RUN_READ_ONLY="确认开始只读预检（不点击任务）";
+    static final String OPEN_SINGLE_TASK="打开一次任务试点（尚不执行）";
+    static final String RUN_SINGLE_TASK="确认只点击一个任务";
     private static LinearLayout page(Activity a,String text){
         ScrollView scroll=new ScrollView(a);LinearLayout box=new LinearLayout(a);
         box.setOrientation(LinearLayout.VERTICAL);box.setPadding(24,24,24,24);
@@ -33,8 +35,13 @@ final class LiveRewardsUi {
                 +"点击和进度变化都不证明账户积分已到账。来源、输入或清理不明时停止。");
         button(a,box,RUN,ready,run);button(a,box,"关闭",true,close);
     }
-    static void running(Activity a,Runnable close){
-        LinearLayout box=page(a,"本轮真实流程正在运行。可以停止并关闭；停止不会重置已消费记录。");
+    static void singleTaskChoice(Activity a,boolean ready,Runnable run,Runnable close){
+        LinearLayout box=page(a,"一次任务试点\n按签入、每日活动、更多活动的顺序，识别并点击第一个符合条件的未完成任务。今天已经尝试过的任务会跳过。\n"
+                +"最多点击一次。签入后原地查看结果。活动卡点击成功后静置至少 5 秒，返回一次并查看结果。");
+        button(a,box,RUN_SINGLE_TASK,ready,run);button(a,box,"关闭",true,close);
+    }
+    static void running(Activity a,boolean singleTask,Runnable close){
+        LinearLayout box=page(a,singleTask?"一次任务试点正在运行。":"本轮真实流程正在运行。可以停止并关闭；停止不会重置已消费记录。");
         button(a,box,"停止并关闭",true,close);
     }
     static void readOnlyChoice(Activity a,boolean ready,Runnable run,Runnable close){
@@ -49,8 +56,8 @@ final class LiveRewardsUi {
         LinearLayout box=page(a,"正在进行独立只读预检。可能滚动并截取完整局部卡片，不点击任务、不按返回。\n可以停止并关闭；旧记录保持不变。");
         button(a,box,"停止并关闭",true,close);
     }
-    static void status(Activity a,String summary,Runnable close){
-        LinearLayout box=page(a,"本轮真实流程已停止\n"+summary);
+    static void status(Activity a,boolean singleTask,String summary,Runnable close){
+        LinearLayout box=page(a,(singleTask?"一次任务试点已停止\n":"本轮真实流程已停止\n")+summary);
         button(a,box,"关闭",true,close);
     }
     static void readOnlyStatus(Activity a,String summary,Runnable close){

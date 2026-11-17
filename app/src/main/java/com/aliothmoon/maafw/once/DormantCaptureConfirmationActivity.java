@@ -72,47 +72,50 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  }
  private volatile LiveRewardsRuntime liveRewardsRuntime;
  private Object liveRewardsOwner;
- private boolean liveRewardsSelected,liveRewardsSpent,readOnlyRewardsSelected;
+ private enum RewardsMode { READ_ONLY, FULL, SINGLE_TASK }
+ private RewardsMode rewardsMode;
+ private boolean liveRewardsSpent;
  private volatile boolean liveRewardsFinished;
  private volatile String liveRewardsHistory;
- void openLiveRewardsChoice(){
+ void openLiveRewardsChoice(){selectRewardsMode(RewardsMode.FULL);}
+ void openReadOnlyRewardsChoice(){selectRewardsMode(RewardsMode.READ_ONLY);}
+ void openSingleTaskRewardsChoice(){selectRewardsMode(RewardsMode.SINGLE_TASK);}
+ private void selectRewardsMode(RewardsMode mode){
   if(consumed||liveRewardsSpent||cardRevealSpent||localMockSpent||alignmentSpent||overviewSpent||!isResumedForApproval())return;
-  liveRewardsSelected=true;readOnlyRewardsSelected=false;cardRevealSelected=false;localMockSelected=false;alignmentSelected=false;overviewSelected=false;
-  remainingCardSelection=null;approvedRemainingCardChoice=null;showLiveRewardsChoice();
- }
- void openReadOnlyRewardsChoice(){
-  if(consumed||liveRewardsSpent||cardRevealSpent||localMockSpent||alignmentSpent||overviewSpent||!isResumedForApproval())return;
-  liveRewardsSelected=true;readOnlyRewardsSelected=true;cardRevealSelected=false;localMockSelected=false;alignmentSelected=false;overviewSelected=false;
+  rewardsMode=mode;cardRevealSelected=false;localMockSelected=false;alignmentSelected=false;overviewSelected=false;
   remainingCardSelection=null;approvedRemainingCardChoice=null;showLiveRewardsChoice();
  }
  private void showLiveRewardsChoice(){
-  if(destroyed||isFinishing()||isDestroyed())return;
-  if(readOnlyRewardsSelected){
-   LiveRewardsUi.readOnlyChoice(this,NativeCheckInSession.permissionReady()&&!consumed&&!liveRewardsSpent&&isResumedForApproval(),
-     this::confirmLiveRewards,this::cancelAndFinish);return;
+  if(destroyed||isFinishing()||isDestroyed()||rewardsMode==null)return;
+  RewardsMode mode=rewardsMode;
+  boolean ready=NativeCheckInSession.permissionReady()&&!consumed&&!liveRewardsSpent&&isResumedForApproval();
+  Runnable confirm=()->confirmLiveRewards(mode);
+  switch(mode){
+   case READ_ONLY -> LiveRewardsUi.readOnlyChoice(this,ready,confirm,this::cancelAndFinish);
+   case FULL -> LiveRewardsUi.choice(this,ready,confirm,this::cancelAndFinish);
+   case SINGLE_TASK -> LiveRewardsUi.singleTaskChoice(this,ready,confirm,this::cancelAndFinish);
   }
-  LiveRewardsUi.choice(this,NativeCheckInSession.permissionReady()&&!consumed&&!liveRewardsSpent&&isResumedForApproval(),
-    this::confirmLiveRewards,this::cancelAndFinish);
  }
  boolean liveRewardsApprovalMatches(Object owner,LiveClick incoming){
-  return !readOnlyRewardsSelected&&liveRewardsSelected&&liveRewardsSpent&&!liveRewardsFinished&&owner!=null&&owner==liveRewardsOwner
+  return (rewardsMode==RewardsMode.FULL||rewardsMode==RewardsMode.SINGLE_TASK)&&liveRewardsSpent&&!liveRewardsFinished&&owner!=null&&owner==liveRewardsOwner
     &&incoming!=null&&incoming==click&&isResumedForApproval();
  }
+ boolean singleTaskRewardsSelected(){return rewardsMode==RewardsMode.SINGLE_TASK;}
  boolean readOnlyRewardsApprovalMatches(Object owner,LiveClick incoming){
-  return readOnlyRewardsSelected&&liveRewardsSelected&&liveRewardsSpent&&!liveRewardsFinished&&owner!=null&&owner==liveRewardsOwner
+  return rewardsMode==RewardsMode.READ_ONLY&&liveRewardsSpent&&!liveRewardsFinished&&owner!=null&&owner==liveRewardsOwner
     &&incoming!=null&&incoming==click&&isResumedForApproval();
  }
- private void confirmLiveRewards(){
-  if(consumed||liveRewardsSpent||!liveRewardsSelected||!isResumedForApproval())return;
+ private void confirmLiveRewards(RewardsMode visibleMode){
+  if(consumed||liveRewardsSpent||visibleMode==null||visibleMode!=rewardsMode||!isResumedForApproval())return;
   liveRewardsSpent=true;consumed=true;terminalShown=false;liveRewardsOwner=new Object();click=new LiveClick(this);
   terminalSnapshot=new TerminalSnapshot(false,false,"CURRENT_STATUS",false);
   try{
    if(!NativeCheckInSession.permissionReady())throw new SecurityException("Existing permission unavailable");
-   if(readOnlyRewardsSelected){
+   if(visibleMode==RewardsMode.READ_ONLY){
     LiveRewardsUi.readOnlyRunning(this,this::cancelAndFinish);
     liveRewardsRuntime=LiveRewardsRuntime.startReadOnly(this,click,liveRewardsOwner);
    }else{
-    LiveRewardsUi.running(this,this::cancelAndFinish);
+    LiveRewardsUi.running(this,visibleMode==RewardsMode.SINGLE_TASK,this::cancelAndFinish);
     liveRewardsRuntime=LiveRewardsRuntime.start(this,click,liveRewardsOwner);
    }
   }catch(RuntimeException rejected){
@@ -138,8 +141,8 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
   }))exact.cancel();
  }
  private void showLiveRewardsStatus(){
-  if(readOnlyRewardsSelected)LiveRewardsUi.readOnlyStatus(this,liveRewardsHistory,this::cancelAndFinish);
-  else LiveRewardsUi.status(this,liveRewardsHistory,this::cancelAndFinish);
+  if(rewardsMode==RewardsMode.READ_ONLY)LiveRewardsUi.readOnlyStatus(this,liveRewardsHistory,this::cancelAndFinish);
+  else LiveRewardsUi.status(this,singleTaskRewardsSelected(),liveRewardsHistory,this::cancelAndFinish);
  }
  private volatile CardRevealProbeRuntime cardRevealRuntime;
  private Object cardRevealOwner;
@@ -823,7 +826,7 @@ public final class DormantCaptureConfirmationActivity extends ComponentActivity 
  }
  private void summaryRejected(){terminalShown=true;terminalSnapshot=new TerminalSnapshot(true,false,"OWN_STATE",false);OwnStateSummaryUi.rejected(this,this::cancelAndFinish);}
  private void showCaptureChoices(){
-  if(liveRewardsSelected){showLiveRewardsChoice();return;}
+  if(rewardsMode!=null){showLiveRewardsChoice();return;}
   if(OwnStateSummaryUi.ACTIVE){if(!consumed){if(localMockSelected)showLocalCardMockChoice();else if(cardRevealSelected)showCardRevealChoice();else if(overviewSelected)showOverviewChoice();else if(alignmentSelected)showAlignmentChoice();else OwnStateSummaryUi.choice(this,this::inspectOwnState,this::openAlignmentChoice,this::cancelAndFinish,this::openAlignmentDiagnosticChoice,()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.FIRST),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.CONFIRMATION),()->openAlignmentCalibrationChoice(UiImageAlignmentScope.Calibration.TITLE_TIMING),this::openOverviewChoice,this::openCardRevealChoice,this::openLocalCardMockChoice,this::openRemainingCardChoice);}return;}
   boolean ready=false;
   try{

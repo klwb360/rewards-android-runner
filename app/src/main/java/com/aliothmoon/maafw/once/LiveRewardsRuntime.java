@@ -44,7 +44,7 @@ final class LiveRewardsRuntime {
     private LiveRewardsInput input;
     private LiveRewardsForegroundLease foreground;
     private final String runDay;
-    private final boolean taskInputAllowed;
+    private final boolean taskInputAllowed,singleTask;
     private LiveRewardsCoordinator.Summary summary;
     private LiveRewardsTypes.Preflight readOnlyPreflight;
     private boolean readOnlyPreflightStarted,readOnlyPreflightReturned;
@@ -63,6 +63,7 @@ final class LiveRewardsRuntime {
     private LiveRewardsRuntime(DormantCaptureConfirmationActivity activity,
             VisibleCaptureAuthority.LiveRewardsApproval approval,BingNavigationSnapshot.Shape shape,String runDay){
         this.activity=activity;this.approval=approval;this.shape=shape;this.runDay=runDay;taskInputAllowed=approval.taskInputAllowed;
+        singleTask=approval.singleTask;
     }
     static LiveRewardsRuntime start(DormantCaptureConfirmationActivity activity,
             DormantCaptureConfirmationActivity.LiveClick click,Object approvalOwner){
@@ -158,13 +159,17 @@ final class LiveRewardsRuntime {
                     requireHidden();stage=phase.name();return perception.observe(scope,phase,task);
                 }
                 public LiveRewardsInput.TapReceipt tap(LiveActionPermit permit)throws Exception{
-                    requireHidden();stage="TAP";tapCalls++;
+                    requireHidden();
+                    if(singleTask&&tapCalls!=0)throw new SecurityException("Single-task tap already attempted");
+                    stage="TAP";tapCalls++;
                     LiveRewardsInput.TapReceipt result=null;
                     try{result=input.tap(permit);return result;}
                     finally{recordTap(permit,result);}
                 }
                 public LiveRewardsInput.ReturnReceipt returnAfterTap(LiveActionPermit permit,LiveRewardsInput.TapReceipt receipt)throws Exception{
-                    requireHidden();stage="WAIT_AND_RETURN";returnCalls++;
+                    requireHidden();
+                    if(singleTask&&returnCalls!=0)throw new SecurityException("Single-task return already attempted");
+                    stage="WAIT_AND_RETURN";returnCalls++;
                     LiveRewardsInput.ReturnReceipt result=null;
                     try{result=input.returnAfterTap(permit,receipt);if(result!=null&&result.commandConfirmed()&&result.knownClean())returnSuccesses++;return result;}
                     finally{recordReturn(permit,receipt,result);}
@@ -178,7 +183,7 @@ final class LiveRewardsRuntime {
                         LiveRewardsTypes.Observation before,LiveRewardsTypes.Observation after){
                     recordOutcome(task,outcome,reason,before,after);
                 }
-            });
+            },singleTask);
             summary=coordinator.run();stage=summary.stopped()?"STOPPED":"COMPLETE";
         }catch(Exception failed){
             if(failed instanceof InterruptedException)Thread.currentThread().interrupt();
@@ -282,7 +287,7 @@ final class LiveRewardsRuntime {
                 .put("visitDelayStartsAt","SUCCESSFUL_TAP_COMMAND_RETURN").put("accountCreditVerified",false)
                 .put("rawTextIncluded",false).put("rawDataUploaded",false).put("oldRecordsReset",false)
                 .put("outcomes",outcomes).put("artifacts",artifactsIndex).put("actions",actionIndex);
-        if(summary!=null)value.put("summary",summary.fixedSummary());
+        if(summary!=null)value.put("summary",summary.fixedSummary()+(singleTask?" taskBudget=1":""));
         return value;
     }
     private void publishArtifact(String taskKey,String phase,String filename,byte[] payload)throws Exception{

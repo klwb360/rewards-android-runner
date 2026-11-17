@@ -23,6 +23,7 @@ final class RemainingCardsUi {
         LinearLayout box=page(a,"其余卡片独立模拟测试\n每次仅测试一张完整卡片。本页不采集，不点击任务。序号按当前区域结构顺序，不代表任务完成状态。");
         if(a instanceof DormantCaptureConfirmationActivity readOnly)button(a,box,LiveRewardsUi.OPEN_READ_ONLY,true,readOnly::openReadOnlyRewardsChoice);
         if(a instanceof DormantCaptureConfirmationActivity live)button(a,box,LiveRewardsUi.OPEN,true,live::openLiveRewardsChoice);
+        if(a instanceof DormantCaptureConfirmationActivity single)button(a,box,LiveRewardsUi.OPEN_SINGLE_TASK,true,single::openSingleTaskRewardsChoice);
         button(a,box,OPEN_REPAIR,true,()->chooseRepair(a,select,close));
         button(a,box,OPEN_COINS,true,()->chooseCoins(a,select,close));
         var weekly=new RemainingCardChoice(OverviewUiRegions.Role.DAILY_PROGRESS,0);

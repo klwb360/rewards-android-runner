@@ -25,9 +25,31 @@ public class LiveRewardsEntryTest {
     }
     @Test public void fixtureApprovalIsNotLiveAndCanBeConsumedOnlyOnce(){
         var approval=VisibleCaptureAuthority.fixtureLiveRewardsApproval(new RealCaptureClaim.ProcessEpoch(),new Object(),100);
-        assertFalse(approval.live);assertTrue(approval.consume(100));assertFalse(approval.consume(101));
+        assertFalse(approval.live);assertFalse(approval.singleTask);assertTrue(approval.consume(100));assertFalse(approval.consume(101));
         var expired=VisibleCaptureAuthority.fixtureLiveRewardsApproval(new RealCaptureClaim.ProcessEpoch(),new Object(),100);
         assertFalse(expired.consume(expired.deadline));assertFalse(expired.consume(101));
+    }
+    @Test public void singleTaskBudgetIsBoundToTheVisibleConfirmationAndProductionInput()throws Exception{
+        String menu=source("RemainingCardsUi");
+        assertTrue(menu.contains("LiveRewardsUi.OPEN_SINGLE_TASK,true,single::openSingleTaskRewardsChoice"));
+        String activity=source("DormantCaptureConfirmationActivity");
+        assertTrue(activity.contains("openSingleTaskRewardsChoice(){selectRewardsMode(RewardsMode.SINGLE_TASK);}"));
+        assertTrue(activity.contains("case SINGLE_TASK -> LiveRewardsUi.singleTaskChoice(this,ready,confirm"));
+        assertTrue(activity.contains("Runnable confirm=()->confirmLiveRewards(mode)"));
+        assertTrue(activity.contains("visibleMode!=rewardsMode"));
+        String issuer=body(source("VisibleCaptureAuthority"),"static LiveRewardsApproval issueLiveRewardsApproval(",
+                "static LiveRewardsApproval issueReadOnlyRewardsApproval(");
+        assertTrue(issuer.indexOf("!click.consume(")>=0);
+        assertTrue(issuer.indexOf("activity.singleTaskRewardsSelected()")>issuer.indexOf("!click.consume("));
+        String runtime=source("LiveRewardsRuntime");
+        assertTrue(runtime.contains("singleTask=approval.singleTask;"));
+        assertTrue(runtime.contains("},singleTask);"));
+        String tap=body(runtime,"public LiveRewardsInput.TapReceipt tap(","input.tap(permit)");
+        String back=body(runtime,"public LiveRewardsInput.ReturnReceipt returnAfterTap(","input.returnAfterTap(permit,receipt)");
+        assertTrue(tap.contains("if(singleTask&&tapCalls!=0)throw"));
+        assertTrue(tap.indexOf("tapCalls++")>tap.indexOf("if(singleTask&&tapCalls!=0)throw"));
+        assertTrue(back.contains("if(singleTask&&returnCalls!=0)throw"));
+        assertTrue(back.indexOf("returnCalls++")>back.indexOf("if(singleTask&&returnCalls!=0)throw"));
     }
     @Test public void liveCropHasSeparateTypedAuthorityWhileLegacyCropRemainsOneShot()throws Exception{
         String transport=source("AndroidCardRegionCapture");

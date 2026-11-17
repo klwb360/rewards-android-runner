@@ -44,6 +44,7 @@ final class LiveRewardsCoordinator {
     private final LiveRunAuthority authority;
     private final LiveRewardsLedger ledger;
     private final Ports ports;
+    private final boolean singleTask;
     private final AtomicBoolean started=new AtomicBoolean();
     private final EnumMap<LiveRewardsTypes.Outcome,Integer> counts=new EnumMap<>(LiveRewardsTypes.Outcome.class);
     private final Set<String> reported=new HashSet<>();
@@ -54,23 +55,34 @@ final class LiveRewardsCoordinator {
     private LiveRewardsTypes.Observation activeBefore,activeAfter;
 
     LiveRewardsCoordinator(LiveRunAuthority authority,LiveRewardsLedger ledger,Ports ports){
+        this(authority, ledger, ports, false);
+    }
+    LiveRewardsCoordinator(LiveRunAuthority authority,LiveRewardsLedger ledger,Ports ports,boolean singleTask){
         if(authority==null||ledger==null||ports==null)throw new IllegalArgumentException("Exact run ports required");
         this.authority=authority;this.ledger=ledger;this.ports=ports;authority.attachLedger(ledger);
+        this.singleTask=singleTask;
         for(var o:LiveRewardsTypes.Outcome.values())counts.put(o,0);
     }
     void cancel(){authority.cancel();}
     Summary run(){
         if(!started.compareAndSet(false,true))return summary("ALREADY_STARTED",true);
         try{
-            for(var kind:LiveRewardsTypes.Kind.values()) runRegion(kind);
-            requireCurrent();reason="PLAN_FINISHED";
+            reason = singleTask ? "NO_ELIGIBLE_TASK" : "PLAN_FINISHED";
+            for (var kind : LiveRewardsTypes.Kind.values()) {
+                if (runRegion(kind)) {
+                    reason = "SINGLE_TASK_FINISHED";
+                    break;
+                }
+            }
+            requireCurrent();
         }catch(InterruptedException interrupted){Thread.currentThread().interrupt();fail("CANCELED");}
         catch(Stop failed){fail(failed.reason);}
         catch(Exception|LinkageError failed){fail("RUN_FAILED");}
         return summary(reason,stopped);
     }
 
-    private void runRegion(LiveRewardsTypes.Kind kind)throws Exception{
+    /** Returns true when a single-task trial has recorded its one attempted task's outcome. */
+    private boolean runRegion(LiveRewardsTypes.Kind kind)throws Exception{
         activeTask=null;activeBefore=null;activeAfter=null;
         requireCurrent();
         var scan=ports.preflightRegion(authority,kind);
@@ -139,7 +151,9 @@ final class LiveRewardsCoordinator {
             emit(task,outcome,outcomeReason,before,activeAfter);
             if(kind==LiveRewardsTypes.Kind.CHECK_IN&&outcome!=LiveRewardsTypes.Outcome.OBSERVED_COMPLETE)
                 throw stop("CHECK_IN_NOT_CONFIRMED");
+            if(singleTask)return true;
         }
+        return false;
     }
     private void requireCurrent()throws Stop{
         if(!authority.current())throw stop("RUN_REVOKED_OR_EXPIRED");

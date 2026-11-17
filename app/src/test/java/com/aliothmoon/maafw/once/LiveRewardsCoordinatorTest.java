@@ -93,6 +93,9 @@ public class LiveRewardsCoordinatorTest {
             regionEvents.add("RESULT_"+task.kind()+"_"+outcome);
         }
         LiveRewardsCoordinator.Summary run(){return new LiveRewardsCoordinator(f.authority,ledger,this).run();}
+        LiveRewardsCoordinator.Summary runSingleTask(){
+            return new LiveRewardsCoordinator(f.authority, ledger, this, true).run();
+        }
     }
     private static LiveRewardsTypes.Task daily(String name){return LiveCoreFixture.task(LiveRewardsTypes.Kind.DAILY,1,name);}
     private static LiveRewardsTypes.Task more(String name){return LiveCoreFixture.task(LiveRewardsTypes.Kind.MORE,1,name);}
@@ -110,6 +113,83 @@ public class LiveRewardsCoordinatorTest {
         assertEquals(Integer.valueOf(3),result.counts().get(LiveRewardsTypes.Outcome.OBSERVED_COMPLETE));
         assertEquals(List.of("SCAN_CHECK_IN","RESULT_CHECK_IN_OBSERVED_COMPLETE","SCAN_DAILY","RESULT_DAILY_OBSERVED_COMPLETE",
                 "SCAN_MORE","RESULT_MORE_OBSERVED_COMPLETE"),rig.regionEvents);
+    }
+    @Test public void singleTaskConfirmsCheckInWithoutEnteringTheActivityRegions() throws Exception {
+        var sign = LiveCoreFixture.task(LiveRewardsTypes.Kind.CHECK_IN, 0, "SIGN");
+        var activity = daily("LATER");
+        var rig = new Rig(List.of(activity, sign, more("LAST")));
+        var coordinator = new LiveRewardsCoordinator(rig.f.authority, rig.ledger, rig, true);
+        var result = coordinator.run();
+        assertFalse(result.stopped());
+        assertEquals("SINGLE_TASK_FINISHED", result.reason());
+        assertEquals(1, result.regionsReady());
+        assertEquals(List.of("SCAN_CHECK_IN", "RESULT_CHECK_IN_OBSERVED_COMPLETE"), rig.regionEvents);
+        assertEquals(1, rig.afterCalls);
+        assertEquals(0, rig.returnCalls);
+        assertTrue(rig.ledger.attempted(sign));
+        assertFalse(rig.ledger.attempted(activity));
+        assertEquals("ALREADY_STARTED", coordinator.run().reason());
+        assertEquals(1, rig.tapCalls);
+    }
+
+    @Test public void singleTaskSkipsIneligibleCardsAndStopsAfterOneUnconfirmedActivity() throws Exception {
+        var sign = LiveCoreFixture.task(LiveRewardsTypes.Kind.CHECK_IN, 0, "PREVIOUS_SIGN");
+        var done = LiveCoreFixture.completed(daily("DONE"));
+        var duplicate = LiveCoreFixture.task(LiveRewardsTypes.Kind.DAILY, 2, "DUPLICATE");
+        var twin = LiveCoreFixture.task(LiveRewardsTypes.Kind.DAILY, 3, "DUPLICATE");
+        var eligible = LiveCoreFixture.task(LiveRewardsTypes.Kind.DAILY, 4, "ELIGIBLE");
+        var later = LiveCoreFixture.task(LiveRewardsTypes.Kind.DAILY, 5, "ALSO_ELIGIBLE");
+        var last = more("LAST");
+        var previous = LiveRewardsLedger.synthetic(LiveCoreFixture.DAY, LiveCoreFixture.RUN);
+        previous.begin(sign);
+        var today = previous.syntheticNextRun("00000000-0000-4000-8000-000000000002");
+        var rig = new Rig(List.of(last, later, eligible, twin, duplicate, done, sign), today);
+        rig.completeAfter = false;
+        var result = rig.runSingleTask();
+        assertFalse(result.stopped());
+        assertEquals("SINGLE_TASK_FINISHED", result.reason());
+        assertEquals(Integer.valueOf(1), result.counts().get(LiveRewardsTypes.Outcome.ALREADY_ATTEMPTED_SKIP));
+        assertEquals(Integer.valueOf(1), result.counts().get(LiveRewardsTypes.Outcome.COMPLETE_SKIP));
+        assertEquals(Integer.valueOf(2), result.counts().get(LiveRewardsTypes.Outcome.DUPLICATE_SKIP));
+        assertEquals(Integer.valueOf(1), result.counts().get(LiveRewardsTypes.Outcome.UNCONFIRMED));
+        assertEquals(List.of(LiveRewardsTypes.Kind.DAILY), rig.tappedKinds);
+        assertEquals(1, rig.returnCalls);
+        assertEquals(2, rig.afterCalls);
+        assertTrue(rig.ledger.attempted(eligible));
+        assertFalse(rig.ledger.attempted(later));
+        assertFalse(rig.ledger.attempted(last));
+        assertFalse(rig.regionEvents.contains("SCAN_MORE"));
+    }
+
+    @Test public void singleTaskDoesNotReplaceAReservedTaskWhenItsInputFails() throws Exception {
+        var chosen = daily("CHOSEN");
+        var next = LiveCoreFixture.task(LiveRewardsTypes.Kind.DAILY, 2, "NEXT");
+        var rig = new Rig(List.of(chosen, next, more("LAST"))) {
+            @Override public LiveRewardsInput.TapReceipt tap(LiveActionPermit permit) {
+                tapCalls++;
+                throw new SecurityException("Final source check failed before dispatch");
+            }
+        };
+        var result = rig.runSingleTask();
+        assertTrue(result.stopped());
+        assertEquals("RUN_FAILED", result.reason());
+        assertTrue(rig.ledger.attempted(chosen));
+        assertFalse(rig.ledger.attempted(next));
+        assertEquals(1, rig.tapCalls);
+        assertEquals(0, result.taps());
+        assertEquals(0, rig.returnCalls);
+    }
+
+    @Test public void singleTaskWithNoEligibleTaskFinishesWithoutInput() throws Exception {
+        var done = LiveCoreFixture.completed(daily("DONE"));
+        var rig = new Rig(List.of(done));
+        var result = rig.runSingleTask();
+        assertFalse(result.stopped());
+        assertEquals("NO_ELIGIBLE_TASK", result.reason());
+        assertEquals(3, result.regionsReady());
+        assertEquals(0, rig.tapCalls);
+        assertEquals(0, rig.returnCalls);
+        assertFalse(rig.ledger.attempted(done));
     }
     @Test public void laterSourceFailureKeepsEarlierClicksAndTheirResults()throws Exception{
         var sign=LiveCoreFixture.task(LiveRewardsTypes.Kind.CHECK_IN,0,"SIGN");
