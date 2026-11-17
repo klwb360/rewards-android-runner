@@ -83,7 +83,8 @@ final class LiveRewardsLedger {
         if(begunHere.contains(key))store.create(taskPath(task)+"/RESULT.burned","kind="+task.kind()+" taskHash="+key+" outcome="+outcome+"\n");
     }
     synchronized void recordRead(String safeSlot)throws IOException{
-        if(safeSlot==null||!safeSlot.matches("[A-Z][A-Z0-9_]{0,179}")||readSlots>=2048)
+        if(safeSlot==null||!safeSlot.matches("[A-Z][A-Z0-9_]{0,179}")
+                ||safeSlot.startsWith("FOCUS_DIAGNOSTIC_")&&!safeSlot.matches("FOCUS_DIAGNOSTIC_[1-3]")||readSlots>=2048)
             throw new IOException("Bounded scalar read slot required");
         readSlots++;store.create(runRoot+"/reads/"+safeSlot+".burned","slot="+safeSlot+" inputAuthority=false\n");
     }

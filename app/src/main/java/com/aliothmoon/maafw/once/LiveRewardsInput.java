@@ -69,7 +69,7 @@ final class LiveRewardsInput {
     private boolean inputKnownClean=true;
     boolean knownClean(){return inputKnownClean&&ports.knownClean();}
     LiveRewardsInput(Context context,LiveRunAuthority authority,LiveRewardsNavigation navigation,BeforeTapGuard beforeTap){
-        if(context==null||authority==null||!authority.live()||navigation==null||beforeTap==null)
+        if(context==null||authority==null||!authority.live()||!authority.taskInputAllowed()||navigation==null||beforeTap==null)
             throw new IllegalArgumentException("Visible live input owner and pre-tap guard required");
         this.authority=authority;
         ports=new Ports(){
@@ -85,11 +85,11 @@ final class LiveRewardsInput {
     }
     private LiveRewardsInput(LiveRunAuthority authority,Ports ports){this.authority=authority;this.ports=ports;}
     static LiveRewardsInput synthetic(LiveRunAuthority authority,Ports ports){
-        if(authority==null||authority.live()||ports==null)throw new SecurityException("Synthetic input fixture only");
+        if(authority==null||authority.live()||!authority.taskInputAllowed()||ports==null)throw new SecurityException("Synthetic input fixture only");
         return new LiveRewardsInput(authority,ports);
     }
     private boolean current(LiveActionPermit permit){
-        return permit!=null&&permit.scope().run()==authority&&permit.live()==authority.live()
+        return permit!=null&&authority.taskInputAllowed()&&permit.scope().run()==authority&&permit.live()==authority.live()
                 &&authority.current()&&permit.current(ports.elapsedRealtime())&&ports.current()&&knownClean()
                 &&!Thread.currentThread().isInterrupted();
     }

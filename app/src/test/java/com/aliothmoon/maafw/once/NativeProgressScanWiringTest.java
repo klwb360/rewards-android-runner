@@ -6,9 +6,10 @@ public class NativeProgressScanWiringTest {
  private String between(String s,String a,String b){return s.substring(s.indexOf(a),s.indexOf(b,s.indexOf(a)));}
  @Test public void immutableIndependentBudget(){assertEquals(3,RootProgressScanScope.MAX_FRAMES);assertEquals(2,RootProgressScanScope.MAX_SWIPES);assertEquals(15,RootProgressScanScope.SOURCE_TASK_ID);assertNotEquals(RootProgressReadScope.DIRECTORY,RootProgressScanScope.DIRECTORY);assertFalse(RootProgressScanScope.current(RootProgressScanScope.EXPIRES_UTC));}
  @Test public void everyOldLiveIssuerIsBlocked()throws Exception{
-  Matcher m=Pattern.compile("static [\\w.<>]+ (issue\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(source("VisibleCaptureAuthority"));int n=0,alignment=0,overviewIntent=0,overviewFrame=0,cardReveal=0;
+  Matcher m=Pattern.compile("static [\\w.<>]+ (issue\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(source("VisibleCaptureAuthority"));int n=0,alignment=0,overviewIntent=0,overviewFrame=0,cardReveal=0,readOnlyRewards=0;
   while(m.find()){
    if(m.group(1).equals("issueLiveRewardsApproval"))continue; // New explicit live authority is covered by LiveRewardsEntryTest.
+   if(m.group(1).equals("issueReadOnlyRewardsApproval")){readOnlyRewards++;continue;} // Purpose, Runtime flag match and hard task-input denial: LiveRewardsReadOnlyTest + LiveRewardsForegroundIntegrationContractTest.
    if(m.group(1).equals("issueAlignment")){alignment++;continue;} // Independently checked by UiImageAlignmentEntryTest.
    if(m.group(1).equals("issueOverviewIntent")){overviewIntent++;continue;} // Independently checked by OverviewEntryWiringTest.
    if(m.group(1).equals("issueOverviewFrame")){overviewFrame++;continue;}
@@ -16,7 +17,7 @@ public class NativeProgressScanWiringTest {
    if(m.group(1).equals("issueProgressScanIntent")||m.group(1).equals("issueProgressScanFrame")||m.group(1).equals("issueProgressLocateIntent")||m.group(1).equals("issueProgressLocateFrame")||m.group(1).equals("issueCheckpointIntent")||m.group(1).equals("issueCheckpointFrame")||m.group(1).equals("issueProgressLocateIntent")||m.group(1).equals("issueProgressLocateFrame"))continue;
    assertTrue(m.group(1),m.group(2).contains("if(RootProgressScanScope.ACTIVE)throw"));n++;
   }
-  assertTrue(n>=19);assertEquals(1,alignment);assertEquals(1,overviewIntent);assertEquals(1,overviewFrame);assertEquals(1,cardReveal);
+  assertTrue(n>=19);assertEquals(1,alignment);assertEquals(1,overviewIntent);assertEquals(1,overviewFrame);assertEquals(1,cardReveal);assertEquals(1,readOnlyRewards);
  }
  @Test public void everyOldLiveStartIsBlocked()throws Exception{Matcher m=Pattern.compile("(?m)^    static CaptureSessionRuntime (start\\w*)\\([^{}]*\\)\\s*\\{([^{}]*)").matcher(source("CaptureSessionRuntime"));int n=0;while(m.find()){if(m.group(1).equals("startProgressScan")||m.group(1).equals("startCheckpointRead")||m.group(1).equals("startProgressLocate"))continue;assertTrue(m.group(1),m.group(2).contains("if(RootProgressScanScope.ACTIVE)throw"));n++;}assertTrue(n>=15);}
  @Test public void cluesAndUnhealthyStopBeforeActorConstruction()throws Exception{String s=between(source("CaptureSessionRuntime"),"private boolean advanceProgressScan(","private static final class ScanContinuation");for(String token:new String[]{"if(!healthy)","!progress.scanRowsUsable()","if(progress.scanClue())","returnReadIndex>=(returnReadIntent.progressLocate()?RootProgressLocateScope.MAX_FRAMES:RootProgressScanScope.MAX_FRAMES)","if(unpresented)"})assertTrue(token,s.indexOf(token)<s.indexOf("ReviewShizukuSwipeActor.forProgressScan"));assertTrue(s.contains("HEALTHY_UNPRESENTED_NO_SWIPE"));}

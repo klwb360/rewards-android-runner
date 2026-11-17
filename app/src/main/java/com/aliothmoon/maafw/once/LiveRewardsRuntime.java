@@ -44,7 +44,10 @@ final class LiveRewardsRuntime {
     private LiveRewardsInput input;
     private LiveRewardsForegroundLease foreground;
     private final String runDay;
+    private final boolean taskInputAllowed;
     private LiveRewardsCoordinator.Summary summary;
+    private LiveRewardsTypes.Preflight readOnlyPreflight;
+    private boolean readOnlyPreflightStarted,readOnlyPreflightReturned;
     private Path artifacts;
     private Object artifactKey;
     private volatile String stage="NEW",failure="NONE";
@@ -55,13 +58,22 @@ final class LiveRewardsRuntime {
     private long startedElapsed,finishedElapsed=-1,releasedElapsed=-1;
     private String reportSha256;
     private boolean foregroundStopWaiting,reportAttempted;
+    private String terminalWorkStage;
 
     private LiveRewardsRuntime(DormantCaptureConfirmationActivity activity,
             VisibleCaptureAuthority.LiveRewardsApproval approval,BingNavigationSnapshot.Shape shape,String runDay){
-        this.activity=activity;this.approval=approval;this.shape=shape;this.runDay=runDay;
+        this.activity=activity;this.approval=approval;this.shape=shape;this.runDay=runDay;taskInputAllowed=approval.taskInputAllowed;
     }
     static LiveRewardsRuntime start(DormantCaptureConfirmationActivity activity,
             DormantCaptureConfirmationActivity.LiveClick click,Object approvalOwner){
+        return startBound(activity,click,approvalOwner,true);
+    }
+    static LiveRewardsRuntime startReadOnly(DormantCaptureConfirmationActivity activity,
+            DormantCaptureConfirmationActivity.LiveClick click,Object approvalOwner){
+        return startBound(activity,click,approvalOwner,false);
+    }
+    private static LiveRewardsRuntime startBound(DormantCaptureConfirmationActivity activity,
+            DormantCaptureConfirmationActivity.LiveClick click,Object approvalOwner,boolean requestedTaskInputAllowed){
         CaptureReleaseGate.requireConfigured();
         if(activity==null||click==null||approvalOwner==null||Looper.myLooper()!=Looper.getMainLooper()
                 ||android.os.Build.VERSION.SDK_INT<34||android.os.Process.myUid()<10000
@@ -70,7 +82,9 @@ final class LiveRewardsRuntime {
             throw new SecurityException("Explicit live run process required");
         var epoch=CaptureSessionRuntime.alignmentEpoch();long now=SystemClock.elapsedRealtime();
         String approvedDay=LocalDate.now(ZoneId.of("Asia/Shanghai")).toString();
-        var approval=VisibleCaptureAuthority.issueLiveRewardsApproval(activity,click,epoch,approvalOwner,now);
+        var approval=requestedTaskInputAllowed?VisibleCaptureAuthority.issueLiveRewardsApproval(activity,click,epoch,approvalOwner,now)
+                :VisibleCaptureAuthority.issueReadOnlyRewardsApproval(activity,click,epoch,approvalOwner,now);
+        if(approval.taskInputAllowed!=requestedTaskInputAllowed)throw new SecurityException("Exact visible run purpose required");
         var manager=activity.getSystemService(DisplayManager.class);var display=manager==null?null:manager.getDisplay(Display.DEFAULT_DISPLAY);
         if(display==null||display.getState()!=Display.STATE_ON||display.getRotation()!=Surface.ROTATION_0)
             throw new SecurityException("Reviewed display required");
@@ -128,6 +142,7 @@ final class LiveRewardsRuntime {
         if(!workerStarted.compareAndSet(false,true)||closed)return;
         try{
             requireHidden();startedElapsed=SystemClock.elapsedRealtime();stage="PREPARING";
+            if(!taskInputAllowed){runReadOnly();return;}
             artifacts=createArtifactDirectory();artifactKey=directoryKey(artifacts);
             ledger=new LiveRewardsLedger(activity.getNoBackupFilesDir().toPath(),authority.day(),runId);
             navigation=new LiveRewardsNavigation(activity.getApplicationContext(),authority,activity.getTaskId(),
@@ -172,6 +187,34 @@ final class LiveRewardsRuntime {
         finally{
             finishedElapsed=SystemClock.elapsedRealtime();workerReturned=true;
             closeOnOwner();
+        }
+    }
+    private void runReadOnly()throws Exception{
+        requireHidden();
+        if(taskInputAllowed||authority==null||authority.taskInputAllowed()||input!=null||coordinator!=null
+                ||authority.taskScopeCount()!=0)throw new SecurityException("Read-only preflight authority required");
+        artifacts=createArtifactDirectory();artifactKey=directoryKey(artifacts);
+        ledger=new LiveRewardsLedger(activity.getNoBackupFilesDir().toPath(),authority.day(),runId);
+        authority.attachLedger(ledger);
+        navigation=new LiveRewardsNavigation(activity.getApplicationContext(),authority,activity.getTaskId(),
+                activity.getComponentName().flattenToString(),shape,this::hiddenCurrent);
+        perception=new LiveRewardsPerception(activity.getApplicationContext(),authority,navigation,this::hiddenCurrent,this::publishArtifact,ledger);
+        stage="PREFLIGHT";readOnlyPreflightStarted=true;
+        try{readOnlyPreflight=perception.preflight();readOnlyPreflightReturned=true;}
+        catch(Exception original){diagnoseReadOnlyRejection();throw original;}
+        if(readOnlyPreflight==null||!readOnlyPreflight.completeScan()||!readOnlyPreflight.knownClean()||!readOnlyPreflight.sourceReady()
+                ||!nativeResourcesClosed()||!authority.current()||!navigation.current())
+            throw new SecurityException("Read-only preflight unqualified");
+        stage="COMPLETE";
+    }
+    private void diagnoseReadOnlyRejection(){
+        try{
+            if(!taskInputAllowed&&navigation!=null&&authority!=null&&authority.current()&&nativeResourcesClosed()
+                    &&navigation.hasFocusRejection())
+                navigation.diagnoseReadOnlyFocus(authority.claimFocusDiagnostics(authority.now()));
+        }catch(Throwable diagnosticFailure){
+            if(diagnosticFailure instanceof InterruptedException)Thread.currentThread().interrupt();
+            // The original preflight exception remains terminal. No ordinary scope is resumed.
         }
     }
     private void recordOutcome(LiveRewardsTypes.Task task,LiveRewardsTypes.Outcome outcome,String reason,
@@ -320,7 +363,7 @@ final class LiveRewardsRuntime {
         }
         if(foreground!=null&&!foreground.destroyed()){
             if(!foregroundStopWaiting){
-                foregroundStopWaiting=true;stage="FOREGROUND_STOPPING";
+                foregroundStopWaiting=true;terminalWorkStage=stage;stage="FOREGROUND_STOPPING";
                 LiveRewardsForegroundService.requestClose(activity.getApplicationContext(),foreground);
                 if(!owner.postDelayed(this::foregroundStopTimeout,5000))foregroundStopTimeout();
             }
@@ -336,7 +379,7 @@ final class LiveRewardsRuntime {
     }
     private void finishAfterForeground(){
         if(closed||!workerReturned||!allResourcesClosed())return;
-        if(stage.equals("FOREGROUND_STOPPING"))stage=summary==null?"CANCELED":summary.stopped()?"STOPPED":"COMPLETE";
+        stage=workStageAfterForeground(stage,terminalWorkStage);
         publishTerminalReports();
         closed=true;
         try{
@@ -350,6 +393,12 @@ final class LiveRewardsRuntime {
         loop.quitSafely();
         notifyFinished();
     }
+    static String workStageAfterForeground(String current,String terminalWorkStage){
+        if(!"FOREGROUND_STOPPING".equals(current))return current;
+        if(!"COMPLETE".equals(terminalWorkStage)&&!"STOPPED".equals(terminalWorkStage)&&!"CANCELED".equals(terminalWorkStage))
+            throw new IllegalStateException("Sealed terminal work stage required");
+        return terminalWorkStage;
+    }
     private void publishTerminalReports(){
         if(reportAttempted)return;reportAttempted=true;
         try{
@@ -358,7 +407,30 @@ final class LiveRewardsRuntime {
             verifyArtifactRoot();writeFile(artifacts,"REPORT.json",bytes);verifyArtifactRoot();
             reportSha256=CardNativeMockReceipt.digest(bytes);reportPublished=true;
             writeForegroundReceipt();
+            if(!taskInputAllowed)writeReadOnlyReceipt();
+            writeFocusReceipt();
         }catch(Throwable failed){failure="REPORT_PUBLICATION_FAILED";}
+    }
+    private void writeReadOnlyReceipt()throws Exception{
+        var exact=readOnlyPreflight;
+        JSONObject receipt=new JSONObject().put("schemaVersion",1).put("profile",PROFILE).put("runId",runId).put("day",runDay)
+                .put("purpose","READ_ONLY_PREFLIGHT").put("taskInputAllowed",taskInputAllowed)
+                .put("taskScopeCount",authority==null?0:authority.taskScopeCount())
+                .put("inputConstructed",input!=null).put("coordinatorConstructed",coordinator!=null)
+                .put("tapCalls",tapCalls).put("tapDispatchAttempts",tapDispatches).put("returnCalls",returnCalls).put("backDispatchAttempts",backDispatches)
+                .put("preflightStarted",readOnlyPreflightStarted).put("preflightReturned",readOnlyPreflightReturned)
+                .put("completeScan",exact!=null&&exact.completeScan()).put("sourceReady",exact!=null&&exact.sourceReady())
+                .put("knownClean",exact!=null&&exact.knownClean()).put("taskCount",exact==null?0:exact.tasks().size())
+                .put("scrollAllowed",true).put("issuedElapsed",approval.issued).put("deadlineElapsed",approval.deadline)
+                .put("reportSha256",reportSha256).put("rawTextIncluded",false).put("rawDataUploaded",false).put("oldRecordsReset",false);
+        verifyArtifactRoot();writeFile(artifacts,"READONLY.json",receipt.toString().getBytes(StandardCharsets.UTF_8));verifyArtifactRoot();
+    }
+    private void writeFocusReceipt()throws Exception{
+        JSONObject focus=navigation==null?null:navigation.focusDiagnostics();
+        JSONObject receipt=new JSONObject().put("schemaVersion",1).put("profile",PROFILE).put("runId",runId).put("day",runDay)
+                .put("reportSha256",reportSha256).put("focusDiagnostics",focus==null?JSONObject.NULL:focus)
+                .put("rawTextIncluded",false).put("rawDataUploaded",false).put("oldRecordsReset",false);
+        verifyArtifactRoot();writeFile(artifacts,"FOCUS.json",receipt.toString().getBytes(StandardCharsets.UTF_8));verifyArtifactRoot();
     }
     private void writeForegroundReceipt()throws Exception{
         var exact=foreground;

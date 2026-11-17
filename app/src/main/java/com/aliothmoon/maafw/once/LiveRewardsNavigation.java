@@ -12,6 +12,26 @@ final class LiveRewardsNavigation {
     private final BooleanSupplier hidden;
     private BingNavigationSnapshot.Ready baseline;
     private volatile LiveNavigationDiagnostic lastDiagnostic;
+    /** Passive bounded metadata receipts only. This getter never reads or revalidates a source. */
+    org.json.JSONObject focusDiagnostics(){
+        try{String exact=reader.focusDiagnostics();return exact==null?null:new org.json.JSONObject(exact);}
+        catch(Throwable unavailable){return null;}
+    }
+    boolean hasFocusRejection(){return reader.hasFocusRejection();}
+    /** Independent, permanently read-only follow-up. Never calls template/visit or replaces baseline. */
+    void diagnoseReadOnlyFocus(LiveRunAuthority.FocusDiagnosticPermit permit)throws Exception{
+        if(permit==null||!permit.live()||!permit.matches(authority)||!hasFocusRejection())
+            throw new SecurityException("Exact stopped read-only focus diagnostic required");
+        for(int pair=0;pair<3;pair++){
+            while(permit.current()&&SystemClock.elapsedRealtime()<permit.nextDueElapsed()){
+                long wait=Math.min(100,permit.nextDueElapsed()-SystemClock.elapsedRealtime());
+                if(wait>0)Thread.sleep(wait);
+            }
+            if(!permit.current()||!hidden.getAsBoolean()||!knownClean())return;
+            var observation=reader.diagnoseReadOnlyFocus(permit,shape);
+            if(!observation.continueSampling())return;
+        }
+    }
     org.json.JSONObject lastNavigationDiagnostic()throws org.json.JSONException{
         try{var exact=lastDiagnostic;return exact==null?null:new org.json.JSONObject(exact.json());}
         catch(Throwable unavailable){return null;}
