@@ -7,9 +7,14 @@ import android.hardware.display.DisplayManager;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.system.OsConstants;
+import android.system.StructPollfd;
 import android.view.Display;
 import android.view.WindowManager;
-import java.io.InputStream;
+import java.io.Closeable;
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicInteger;
 import moe.shizuku.server.IRemoteProcess;
@@ -524,7 +529,7 @@ final class ReviewBingNavigation {
     private byte[] readFixedCommand(String[] command){
         lastFixed=diagnosticNotRun;
         lastFixedException=LiveNavigationDiagnostic.ExceptionKind.NONE;
-        byte[] bytes=new byte[262144];IRemoteProcess process=null;InputStream input=null;
+        byte[] bytes=new byte[262144];IRemoteProcess process=null;MetadataInput input=null;
         ParcelFileDescriptor stdout=null,stdin=null,stderr=null;boolean invoked=false,quiet=false,clean=false,exitObserved=false;
         int count=0,exit=-1;FixedStatus status=FixedStatus.AUTHORITY_REJECTED;
         try{
@@ -538,17 +543,24 @@ final class ReviewBingNavigation {
             invoked=true;status=FixedStatus.PROCESS_NULL;process=service.newProcess(command,null,null);
             if(process==null)throw new IllegalStateException();
             status=FixedStatus.STREAM_MISSING;stdout=process.getInputStream();stdin=process.getOutputStream();stderr=process.getErrorStream();
-            if(stdout==null)throw new IllegalStateException();input=new ParcelFileDescriptor.AutoCloseInputStream(stdout);stdout=null;status=FixedStatus.IO_UNKNOWN;
+            if(stdout==null)throw new IllegalStateException();
+            status=FixedStatus.IO_UNKNOWN;
+            input=new MetadataInput(stdout);stdout=null;
             long end=SystemClock.elapsedRealtime()+2000;
-            for(;;){
-                if(!liveRunCurrent()){status=FixedStatus.READ_TIMEOUT;throw new IllegalStateException();}
-                if(alignmentPermit!=null&&!alignmentPermit.current()){status=FixedStatus.READ_TIMEOUT;throw new IllegalStateException();}
-                int available=input.available();
-                if(available>0){if(count==bytes.length){status=FixedStatus.BUFFER_LIMIT;throw new IllegalStateException();}
-                    int n=input.read(bytes,count,Math.min(available,bytes.length-count));if(n<0){status=FixedStatus.IO_UNKNOWN;throw new IllegalStateException();}count+=n;}
-                quiet=process.waitForTimeout(0,"MILLISECONDS");if(quiet&&input.available()==0)break;
-                if(SystemClock.elapsedRealtime()>=end){status=FixedStatus.READ_TIMEOUT;throw new IllegalStateException();}if(available==0)Thread.sleep(5);
+            var reader=new MetadataPipeReader();
+            IRemoteProcess producer=process;
+            try{
+                status=reader.drain(bytes,input,wait->producer.waitForTimeout(wait,"MILLISECONDS"),
+                        SystemClock::elapsedRealtime,()->{
+                            if(alignmentPermit!=null&&!alignmentPermit.current())return false;
+                            return liveRunCurrent();
+                        },end);
+            }finally{
+                count=reader.count();
+                quiet=reader.exited();
             }
+            if(status!=FixedStatus.READ_COMPLETE)return null;
+            status=FixedStatus.IO_UNKNOWN;
             exit=process.exitValue();exitObserved=true;if(exit!=0){status=FixedStatus.EXIT_NONZERO;return null;}
             if(alignmentPermit!=null&&!alignmentPermit.current()){status=FixedStatus.READ_TIMEOUT;throw new IllegalStateException();}
             if(!liveRunCurrent()){status=FixedStatus.READ_TIMEOUT;throw new IllegalStateException();}
@@ -573,6 +585,40 @@ final class ReviewBingNavigation {
             boolean cleanKnown=(!invoked||clean)&&knownClean();
             lastFixed=new FixedRead(cleanKnown?status:FixedStatus.CLEANUP_UNKNOWN,count,invoked,exitObserved,exit,quiet||!invoked,cleanKnown);
         }
+    }
+
+    private static final class MetadataInput implements MetadataPipeReader.Input, Closeable {
+        private final ParcelFileDescriptor stdout;
+        private final StructPollfd poll = new StructPollfd();
+        private final StructPollfd[] descriptors = { poll };
+
+        MetadataInput(ParcelFileDescriptor stdout) throws ErrnoException {
+            // All metadata paths already require the Android 14 display profile in display().
+            if (android.os.Build.VERSION.SDK_INT < 34) throw new IllegalStateException("Unsupported display profile");
+            this.stdout = stdout;
+            poll.fd = stdout.getFileDescriptor();
+            poll.events = (short) (OsConstants.POLLIN | OsConstants.POLLHUP | OsConstants.POLLERR);
+            int flags = Os.fcntlInt(poll.fd, OsConstants.F_GETFL, 0);
+            Os.fcntlInt(poll.fd, OsConstants.F_SETFL, flags | OsConstants.O_NONBLOCK);
+        }
+
+        @Override public int read(byte[] target, int offset, int length, int waitMillis) throws Exception {
+            try {
+                if (Os.poll(descriptors, waitMillis) == 0) return 0;
+                if ((poll.revents & (OsConstants.POLLNVAL | OsConstants.POLLERR)) != 0)
+                    throw new IOException("Metadata pipe error");
+                // HUP may arrive with unread bytes. Only a positive-length read returning zero proves EOF.
+                int n = Os.read(poll.fd, target, offset, length);
+                if (n != 0) return n;
+                if (stdout.canDetectErrors()) stdout.checkError();
+                return -1;
+            } catch (ErrnoException e) {
+                if (e.errno == OsConstants.EAGAIN || e.errno == OsConstants.EINTR) return 0;
+                throw e;
+            }
+        }
+
+        @Override public void close() throws IOException { stdout.close(); }
     }
 }
 
