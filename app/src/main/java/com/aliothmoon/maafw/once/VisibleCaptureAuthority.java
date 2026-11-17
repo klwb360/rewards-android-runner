@@ -49,12 +49,12 @@ final class VisibleCaptureAuthority {
         final RealCaptureClaim.ProcessEpoch epoch;
         final Object owner,visible,request;
         final long issued,deadline;
-        final boolean live;
+        final boolean live,taskInputAllowed;
         private boolean used;
         private LiveRewardsApproval(RealCaptureClaim.ProcessEpoch epoch,Object owner,Object visible,Object request,
-                long issued,long deadline,boolean live){
+                long issued,long deadline,boolean live,boolean taskInputAllowed){
             this.epoch=epoch;this.owner=owner;this.visible=visible;this.request=request;
-            this.issued=issued;this.deadline=deadline;this.live=live;
+            this.issued=issued;this.deadline=deadline;this.live=live;this.taskInputAllowed=taskInputAllowed;
         }
         synchronized boolean consume(long now){boolean first=!used;used=true;
             return first&&epoch!=null&&owner!=null&&visible!=null&&request!=null&&now>=issued&&now<deadline;}
@@ -67,11 +67,25 @@ final class VisibleCaptureAuthority {
                 ||!activity.liveRewardsApprovalMatches(owner,click)
                 ||!click.consume(activity,activity.requestIdentity(),owner,epoch))
             throw new SecurityException("Fresh visible live Rewards approval required");
-        return new LiveRewardsApproval(epoch,owner,activity,activity.requestIdentity(),now,now+1_800_000L,true);
+        return new LiveRewardsApproval(epoch,owner,activity,activity.requestIdentity(),now,now+1_800_000L,true,true);
+    }
+    static LiveRewardsApproval issueReadOnlyRewardsApproval(DormantCaptureConfirmationActivity activity,
+            DormantCaptureConfirmationActivity.LiveClick click,RealCaptureClaim.ProcessEpoch epoch,Object owner,long now){
+        CaptureReleaseGate.requireConfigured();
+        if(now<0||now>Long.MAX_VALUE-1_800_000L||activity==null||click==null||owner==null
+                ||epoch!=CaptureSessionRuntime.alignmentEpoch()||!NativeCheckInSession.permissionReady()
+                ||!activity.readOnlyRewardsApprovalMatches(owner,click)
+                ||!click.consume(activity,activity.requestIdentity(),owner,epoch))
+            throw new SecurityException("Fresh visible read-only Rewards approval required");
+        return new LiveRewardsApproval(epoch,owner,activity,activity.requestIdentity(),now,now+1_800_000L,true,false);
     }
     static LiveRewardsApproval fixtureLiveRewardsApproval(RealCaptureClaim.ProcessEpoch epoch,Object owner,long now){
         if(now<0||now>Long.MAX_VALUE-1_800_000L)throw new IllegalArgumentException("Clock");
-        return new LiveRewardsApproval(epoch,owner,new Object(),new Object(),now,now+1_800_000L,false);
+        return new LiveRewardsApproval(epoch,owner,new Object(),new Object(),now,now+1_800_000L,false,true);
+    }
+    static LiveRewardsApproval fixtureReadOnlyRewardsApproval(RealCaptureClaim.ProcessEpoch epoch,Object owner,long now){
+        if(now<0||now>Long.MAX_VALUE-1_800_000L)throw new IllegalArgumentException("Clock");
+        return new LiveRewardsApproval(epoch,owner,new Object(),new Object(),now,now+1_800_000L,false,false);
     }
     static final class CardRevealApproval {
         final RealCaptureClaim.ProcessEpoch epoch;

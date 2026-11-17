@@ -10,6 +10,8 @@ import android.widget.TextView;
 final class LiveRewardsUi {
     static final String OPEN="打开签入与活动真实流程（尚不执行）";
     static final String RUN="确认开始本轮真实流程";
+    static final String OPEN_READ_ONLY="打开独立只读预检（不点击任务）";
+    static final String RUN_READ_ONLY="确认开始只读预检（不点击任务）";
     private static LinearLayout page(Activity a,String text){
         ScrollView scroll=new ScrollView(a);LinearLayout box=new LinearLayout(a);
         box.setOrientation(LinearLayout.VERTICAL);box.setPadding(24,24,24,24);
@@ -35,8 +37,24 @@ final class LiveRewardsUi {
         LinearLayout box=page(a,"本轮真实流程正在运行。可以停止并关闭；停止不会重置已消费记录。");
         button(a,box,"停止并关闭",true,close);
     }
+    static void readOnlyChoice(Activity a,boolean ready,Runnable run,Runnable close){
+        LinearLayout box=page(a,"独立只读预检：签入 → 每日活动 → 更多活动\n"
+                +"按需滚动至完整卡片，只做界面结构、局部截图和安卓原生OCR识别。\n"
+                +"本入口不能生成任务点击或返回资格，不启动真实任务流程。\n"
+                +"来源不明确时停止；截图和无原文诊断只保存在本机。保留全部旧记录，不采集整屏。\n"
+                +"最长三十分钟；每区最多八张活动卡。预检结果不代表任务完成或积分到账。");
+        button(a,box,RUN_READ_ONLY,ready,run);button(a,box,"关闭",true,close);
+    }
+    static void readOnlyRunning(Activity a,Runnable close){
+        LinearLayout box=page(a,"正在进行独立只读预检。可能滚动并截取完整局部卡片，不点击任务、不按返回。\n可以停止并关闭；旧记录保持不变。");
+        button(a,box,"停止并关闭",true,close);
+    }
     static void status(Activity a,String summary,Runnable close){
         LinearLayout box=page(a,"本轮真实流程已停止\n"+summary);
+        button(a,box,"关闭",true,close);
+    }
+    static void readOnlyStatus(Activity a,String summary,Runnable close){
+        LinearLayout box=page(a,"独立只读预检已停止\n未执行真实任务点击或返回。\n"+summary);
         button(a,box,"关闭",true,close);
     }
     private LiveRewardsUi(){}

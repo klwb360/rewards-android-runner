@@ -19,7 +19,7 @@ final class LiveActionPermit {
     }
     static LiveActionPermit create(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Observation before,LiveRewardsLedger ledger){
         long now=scope==null?-1:scope.run().now();
-        if(scope==null||scope.preflight()||scope.scan()||before==null||ledger==null
+        if(scope==null||!scope.run().taskInputAllowed()||scope.preflight()||scope.scan()||before==null||ledger==null
                 ||!scope.isSealed(before)||before.owner()!=scope.owner()||before.phase()!=LiveRewardsTypes.Phase.BEFORE
                 ||!before.qualified()||!before.fresh(now)||!before.data().uniqueMatch()||before.task().complete()
                 ||!before.task().sameKey(scope.task())||before.source().kind()!=BingNavigationSnapshot.Kind.TEMPLATE

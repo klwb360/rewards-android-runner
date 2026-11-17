@@ -33,6 +33,23 @@ final class ReviewBingNavigation {
     private java.util.function.BooleanSupplier liveRunHidden;
     private int liveRunPairs;
     private volatile LiveNavigationDiagnostic lastLiveNavigationDiagnostic;
+    private final BingFocusDiagnostic.History focusHistory=BingFocusDiagnostic.history();
+    String focusDiagnostics(){try{return focusHistory==null?null:focusHistory.json();}catch(Throwable unavailable){return null;}}
+    boolean hasFocusRejection(){try{return focusHistory!=null&&focusHistory.hasFocusRejection();}catch(Throwable unavailable){return false;}}
+    private static BingFocusDiagnostic focusDocument(byte[] document){
+        try{return BingFocusDiagnostic.inspect(document==null?null:new String(document,java.nio.charset.StandardCharsets.UTF_8));}
+        catch(Throwable unavailable){return null;}
+    }
+    private void recordFocus(String call,int pair,long observedElapsed,long elapsed,BingFocusDiagnostic focus,boolean parsed,String parserStatus,
+            String parserGate,boolean parserReady,boolean returnedReady,FixedRead windows,FixedRead activities){
+        recordFocus("SOURCE_READ",call,pair,observedElapsed,elapsed,focus,parsed,parserStatus,parserGate,parserReady,returnedReady,windows,activities);
+    }
+    private void recordFocus(String phase,String call,int pair,long observedElapsed,long elapsed,BingFocusDiagnostic focus,boolean parsed,String parserStatus,
+            String parserGate,boolean parserReady,boolean returnedReady,FixedRead windows,FixedRead activities){
+        try{if(focusHistory!=null)focusHistory.record(phase,call,pair,observedElapsed,elapsed,focus==null?BingFocusDiagnostic.inspect(null):focus,
+                parsed,parserStatus,parserGate,parserReady,returnedReady,knownClean(),windows.status().name(),activities.status().name());}
+        catch(Throwable unavailable){/* Passive only. */}
+    }
     private LiveNavigationDiagnostic.ExceptionKind lastFixedException=LiveNavigationDiagnostic.ExceptionKind.NOT_OBSERVED;
     LiveNavigationDiagnostic lastLiveNavigationDiagnostic(){return lastLiveNavigationDiagnostic;}
     enum FixedStatus { NOT_INVOKED, AUTHORITY_REJECTED, PROCESS_NULL, STREAM_MISSING, BUFFER_LIMIT, READ_TIMEOUT, EXIT_NONZERO, IO_UNKNOWN, READ_COMPLETE, CLEANUP_UNKNOWN }
@@ -168,24 +185,30 @@ final class ReviewBingNavigation {
         byte[] windows=null,activities=null;
         BingNavigationSnapshot.Result template=BingNavigationSnapshot.Result.unknown();
         BingNavigationSnapshot.LiveVisitResult visit=BingNavigationSnapshot.LiveVisitResult.unknown(BingNavigationSnapshot.LiveVisitGate.INPUT);
+        BingFocusDiagnostic focus=null;int focusPair=-1;
+        FixedRead focusWindows=diagnosticNotRun,focusActivities=diagnosticNotRun;
+        boolean focusParsed=false,parserReady=false,returnedReady=false;
+        String focusStatus="NOT_OBSERVED",focusGate="NOT_OBSERVED";
         try{
             LiveNavigationDiagnostic.metadataStarted(diagnostic,-1);
             LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.AUTHORITY_REJECTED);
             if(liveRunAuthority==null||!liveRunCurrent())return new LiveRead(template,visit,knownClean());
             LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.BUDGET_REJECTED);
             LiveNavigationDiagnostic.metadataStarted(diagnostic,++liveRunPairs);
+            focusPair=liveRunPairs;
             if(liveRunPairs>4096)return new LiveRead(template,visit,knownClean());
             LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.AUTHORITY_REJECTED);
             if(!authorityMatches(shape))return new LiveRead(template,visit,knownClean());
             LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.WINDOWS_READ);
             long lower=SystemClock.elapsedRealtime();
             try{windows=readFixed(true);}
-            finally{try{LiveNavigationDiagnostic.fixed(diagnostic,true,lastFixed,lastFixedException,LiveNavigationDiagnostic.elapsed(lower,LiveNavigationDiagnostic.clock()));}catch(Throwable ignored){}}
+            finally{focusWindows=lastFixed;try{LiveNavigationDiagnostic.fixed(diagnostic,true,lastFixed,lastFixedException,LiveNavigationDiagnostic.elapsed(lower,LiveNavigationDiagnostic.clock()));}catch(Throwable ignored){}}
+            focus=focusDocument(windows);
             if(windows==null||!liveRunCurrent()||!authorityMatches(shape))return new LiveRead(template,visit,knownClean());
             LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.ACTIVITIES_READ);
             long activitiesStarted=LiveNavigationDiagnostic.clock();
             try{activities=readFixed(false);}
-            finally{try{LiveNavigationDiagnostic.fixed(diagnostic,false,lastFixed,lastFixedException,LiveNavigationDiagnostic.elapsed(activitiesStarted,LiveNavigationDiagnostic.clock()));}catch(Throwable ignored){}}
+            finally{focusActivities=lastFixed;try{LiveNavigationDiagnostic.fixed(diagnostic,false,lastFixed,lastFixedException,LiveNavigationDiagnostic.elapsed(activitiesStarted,LiveNavigationDiagnostic.clock()));}catch(Throwable ignored){}}
             if(activities==null||!liveRunCurrent()||!authorityMatches(shape)||!knownClean())return new LiveRead(template,visit,knownClean());
             String w=new String(windows,java.nio.charset.StandardCharsets.UTF_8),a=new String(activities,java.nio.charset.StandardCharsets.UTF_8);
             long observed=SystemClock.elapsedRealtime();var profile=new BingNavigationSnapshot.Profile(bingUid,systemUiUid,shape);
@@ -193,23 +216,71 @@ final class ReviewBingNavigation {
                 var parsed=BingNavigationSnapshot.parseCurrentTemplate(w,a,profile,readOnlyGuard,lower,observed);
                 template=new BingNavigationSnapshot.Result(parsed.status(),parsed.source()==null?null:parsed.source().ready(),parsed.readOnlyGate(),parsed.firstGate());
                 LiveNavigationDiagnostic.parser(diagnostic,template);
+                focusParsed=true;focusStatus=template.status().name();focusGate=template.firstGate().name();parserReady=template.ready()!=null;
             }else{
                 visit=BingNavigationSnapshot.parseLiveVisit(w,a,profile,readOnlyGuard,original,lower,observed);
                 LiveNavigationDiagnostic.visitParser(diagnostic,visit);
+                focusParsed=true;focusStatus=visit.kind()==BingNavigationSnapshot.LiveVisitKind.TRANSITION?"BING_TRANSITION":
+                        visit.source()!=null?"READY":"UNKNOWN";focusGate=visit.gate().name();parserReady=visit.source()!=null;
             }
             LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.POST_AUTHORITY);
             if(!liveRunCurrent()||!authorityMatches(shape))return new LiveRead(BingNavigationSnapshot.Result.unknown(),
                     BingNavigationSnapshot.LiveVisitResult.unknown(BingNavigationSnapshot.LiveVisitGate.STRICT_SOURCE),knownClean());
             LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.PARSED);
+            returnedReady=parserReady;
             return new LiveRead(template,visit,knownClean());
         }catch(RuntimeException|Error failure){LiveNavigationDiagnostic.metadataException(diagnostic,failure);throw failure;}
         finally{
             if(windows!=null)Arrays.fill(windows,(byte)0);if(activities!=null)Arrays.fill(activities,(byte)0);
             try{
-                long elapsed=LiveNavigationDiagnostic.elapsed(diagnosticStarted,LiveNavigationDiagnostic.clock());
+                long observedElapsed=LiveNavigationDiagnostic.clock();long elapsed=LiveNavigationDiagnostic.elapsed(diagnosticStarted,observedElapsed);
+                recordFocus(original==null?"LIVE_TEMPLATE":"LIVE_VISIT",focusPair,observedElapsed,elapsed,focus,focusParsed,focusStatus,focusGate,parserReady,returnedReady,focusWindows,focusActivities);
                 LiveNavigationDiagnostic.metadataElapsed(diagnostic,elapsed);
                 lastLiveNavigationDiagnostic=LiveNavigationDiagnostic.finish(diagnostic,elapsed);
             }catch(Throwable ignored){lastLiveNavigationDiagnostic=null;}
+        }
+    }
+    enum FocusObservationState { PERMIT_REJECTED, AUTHORITY_REJECTED, WINDOWS_FAILED, ACTIVITIES_FAILED, PARSED }
+    /** A passive receipt, deliberately incapable of carrying Ready or changing a normal result. */
+    record FocusObservation(FocusObservationState state,boolean knownClean){
+        boolean continueSampling(){return state==FocusObservationState.PARSED&&knownClean;}
+    }
+    FocusObservation diagnoseReadOnlyFocus(LiveRunAuthority.FocusDiagnosticPermit permit,BingNavigationSnapshot.Shape shape)throws java.io.IOException{
+        byte[] windows=null,activities=null;BingFocusDiagnostic focus=null;
+        FixedRead wd=diagnosticNotRun,ad=diagnosticNotRun;boolean claimed=false,parsed=false,parserReady=false;
+        String parserStatus="NOT_OBSERVED",parserGate="NOT_OBSERVED";int pair=-1;
+        long began=LiveNavigationDiagnostic.clock();
+        try{
+            if(permit==null||!permit.live()||!permit.matches(liveRunAuthority)||!permit.current()
+                    ||!hasFocusRejection())return new FocusObservation(FocusObservationState.PERMIT_REJECTED,knownClean());
+            if(!permit.claimPair(SystemClock.elapsedRealtime()))return new FocusObservation(FocusObservationState.PERMIT_REJECTED,knownClean());
+            claimed=true;pair=permit.pairCount();
+            if(!permit.dispatchValid(SystemClock.elapsedRealtime())||!liveRunCurrent()||!authorityMatches(shape))
+                return new FocusObservation(FocusObservationState.AUTHORITY_REJECTED,knownClean());
+            long lower=SystemClock.elapsedRealtime();
+            try{windows=readFixed(true);}finally{wd=lastFixed;}
+            focus=focusDocument(windows);
+            if(windows==null||wd.status()!=FixedStatus.READ_COMPLETE||!wd.knownClean())
+                return new FocusObservation(FocusObservationState.WINDOWS_FAILED,knownClean());
+            if(!permit.dispatchValid(SystemClock.elapsedRealtime())||!liveRunCurrent()||!authorityMatches(shape))
+                return new FocusObservation(FocusObservationState.AUTHORITY_REJECTED,knownClean());
+            try{activities=readFixed(false);}finally{ad=lastFixed;}
+            if(activities==null||ad.status()!=FixedStatus.READ_COMPLETE||!ad.knownClean())
+                return new FocusObservation(FocusObservationState.ACTIVITIES_FAILED,knownClean());
+            if(!permit.dispatchValid(SystemClock.elapsedRealtime())||!liveRunCurrent()||!authorityMatches(shape)||!knownClean())
+                return new FocusObservation(FocusObservationState.AUTHORITY_REJECTED,knownClean());
+            // The original parser is evaluated only for diagnostic scalars; its Ready stays local.
+            var result=BingNavigationSnapshot.parseCurrentTemplate(new String(windows,java.nio.charset.StandardCharsets.UTF_8),
+                    new String(activities,java.nio.charset.StandardCharsets.UTF_8),new BingNavigationSnapshot.Profile(bingUid,systemUiUid,shape),
+                    readOnlyGuard,lower,SystemClock.elapsedRealtime());
+            parsed=true;parserStatus=result.status().name();parserGate=result.firstGate().name();parserReady=result.source()!=null;
+            return new FocusObservation(FocusObservationState.PARSED,knownClean());
+        }finally{
+            if(windows!=null)Arrays.fill(windows,(byte)0);if(activities!=null)Arrays.fill(activities,(byte)0);
+            if(claimed)permit.finishPair(parsed,knownClean()&&wd.knownClean()&&ad.knownClean());
+            long observedElapsed=LiveNavigationDiagnostic.clock();
+            recordFocus("AFTER_REJECTION_DIAGNOSTIC","DIAGNOSTIC",pair,observedElapsed,LiveNavigationDiagnostic.elapsed(began,observedElapsed),
+                    focus,parsed,parserStatus,parserGate,parserReady,false,wd,ad);
         }
     }
     private boolean process(){return Looper.myLooper()!=Looper.getMainLooper()&&android.os.Process.myUid()>=10000
@@ -316,12 +387,14 @@ final class ReviewBingNavigation {
         FixedRead wd=FixedRead.notRun(),ad=FixedRead.notRun();
         BingNavigationSnapshot.Result result=BingNavigationSnapshot.Result.unknown();
         byte[] windows=null,activities=null;
+        BingFocusDiagnostic focus=null;boolean parsedFocus=false;long focusStarted=LiveNavigationDiagnostic.clock();
         try{
             if(alignmentPermit==null||!alignmentPermit.read(stage))return result;
             gate=PairGate.AUTHORITY_REJECTED;
             if(!alignmentPermit.current()||!authorityMatches(shape))return result;
             long lower=SystemClock.elapsedRealtime();
             gate=PairGate.WINDOWS_READ;windows=readFixed(true);wd=lastFixed;
+            focus=focusDocument(windows);
             if(windows==null||!alignmentPermit.current()||!authorityMatches(shape))return result;
             gate=PairGate.ACTIVITIES_READ;activities=readFixed(false);ad=lastFixed;
             if(activities==null)return result;
@@ -334,9 +407,13 @@ final class ReviewBingNavigation {
                     lower,SystemClock.elapsedRealtime());
             result=new BingNavigationSnapshot.Result(parsed.status(),parsed.source()==null?null:parsed.source().ready(),
                     parsed.readOnlyGate(),parsed.firstGate());
+            parsedFocus=true;
             lastReadOnlyGate=result.readOnlyGate();gate=PairGate.PARSED;return result;
         }finally{
             if(windows!=null)Arrays.fill(windows,(byte)0);if(activities!=null)Arrays.fill(activities,(byte)0);
+            long observedElapsed=LiveNavigationDiagnostic.clock();
+            recordFocus("ALIGNMENT",pair,observedElapsed,LiveNavigationDiagnostic.elapsed(focusStarted,observedElapsed),focus,
+                    parsedFocus,parsedFocus?result.status().name():"NOT_OBSERVED",parsedFocus?result.firstGate().name():"NOT_OBSERVED",result.ready()!=null,result.ready()!=null,wd,ad);
             lastDiagnostic=new ReadDiagnostic(pair,gate,wd,ad,result.firstGate(),result.readOnlyGate(),knownClean(),BingNavigationSnapshot.TopDiagnostic.notObserved());
         }
     }
@@ -352,6 +429,7 @@ final class ReviewBingNavigation {
         int pair=++diagnosticPairs;PairGate gate=PairGate.PERMIT_REJECTED;
         FixedRead wd=FixedRead.notRun(),ad=FixedRead.notRun();BingNavigationSnapshot.Result result=BingNavigationSnapshot.Result.unknown();
         byte[] windows=null,activities=null;BingNavigationSnapshot.TopDiagnostic top=BingNavigationSnapshot.TopDiagnostic.notObserved();
+        BingFocusDiagnostic focus=null;boolean parsedFocus=false;long focusStarted=LiveNavigationDiagnostic.clock();
         try{
             if(alignmentPermit!=null)return result; // Alignment readers cannot enter an old budget or navigation path.
             if(readOnlyGuard!=null)lastReadOnlyGate=BingNavigationSnapshot.ReadOnlyGate.LEGACY_METADATA;
@@ -363,7 +441,7 @@ final class ReviewBingNavigation {
             gate=PairGate.BUDGET_REJECTED;
             if(rootSourcePermit==null&&rootRecoveryPermit==null&&rootCurrentPermit==null&&(selectedPendingNavigation?PAIRS.incrementAndGet()>12:readOnlyGuard!=null?READ_ONLY_PAIRS.incrementAndGet()>4:rootPreflight?PREFLIGHT_PAIRS.incrementAndGet()>2:PAIRS.incrementAndGet()>12))return result;
             long lower=SystemClock.elapsedRealtime();gate=PairGate.WINDOWS_READ;
-            windows=readFixed(true);wd=lastFixed;if(windows==null)return result;
+            windows=readFixed(true);wd=lastFixed;focus=focusDocument(windows);if(windows==null)return result;
             gate=PairGate.ACTIVITIES_READ;activities=readFixed(false);ad=lastFixed;if(activities==null)return result;
             if(!timedTask&&!timedReturn)top=BingNavigationSnapshot.topDiagnostic(new String(activities,java.nio.charset.StandardCharsets.UTF_8));
             gate=PairGate.POST_AUTHORITY;
@@ -392,10 +470,14 @@ final class ReviewBingNavigation {
                     BingNavigationSnapshot.ReadOnlyGate.METADATA_STABLE_ONLY:lastRecovery.readOnlyGate(),lastRecovery.firstGate());
             }else result=selectedPendingNavigation?BingNavigationSnapshot.parseSelectedNavigation(w,a,profile,readOnlyGuard,selectedOriginal,lower,observed):readOnlyGuard==null?BingNavigationSnapshot.parse(w,a,profile,lower,observed)
                 :BingNavigationSnapshot.parseRootReadOnly(w,a,profile,readOnlyGuard,lower,observed);
+            parsedFocus=true;
             if(readOnlyGuard!=null&&result.readOnlyGate()!=BingNavigationSnapshot.ReadOnlyGate.NOT_APPLIED)lastReadOnlyGate=result.readOnlyGate();
             gate=PairGate.PARSED;return result;
         }finally{
             if(windows!=null)Arrays.fill(windows,(byte)0);if(activities!=null)Arrays.fill(activities,(byte)0);
+            long observedElapsed=LiveNavigationDiagnostic.clock();
+            recordFocus("LEGACY",pair,observedElapsed,LiveNavigationDiagnostic.elapsed(focusStarted,observedElapsed),focus,
+                    parsedFocus,parsedFocus?result.status().name():"NOT_OBSERVED",parsedFocus?result.firstGate().name():"NOT_OBSERVED",result.ready()!=null,result.ready()!=null,wd,ad);
             lastDiagnostic=new ReadDiagnostic(pair,gate,wd,ad,result.firstGate(),result.readOnlyGate(),knownClean(),top);
         }
     }

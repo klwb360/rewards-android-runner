@@ -263,6 +263,16 @@ public final class LiveRewardsForegroundIntegrationContractTest {
         assertTrue("Native cleanup remains part of completion",hasCall(complete,"nativeWorkClosed"));
         assertTrue("Service destruction remains part of completion",hasCall(complete,"destroyed"));
     }
+    private static void workOutcomeSurvivesForeground(Unit source){
+        var close=source.method("closeOnOwner");int seal=-1,overwritten=-1;
+        for(int i=0;i+3<close.size();i++){
+            if(close.get(i).is("terminalWorkStage")&&close.get(i+1).is("=")&&close.get(i+2).is("stage")&&close.get(i+3).is(";"))seal=i;
+            if(close.get(i).is("stage")&&close.get(i+1).is("=")&&close.get(i+2).literal&&close.get(i+2).text.equals("FOREGROUND_STOPPING"))overwritten=i;
+        }
+        assertTrue("Foreground shutdown must preserve the actual terminal work stage",seal>=0&&overwritten>seal);
+        var finish=source.method("finishAfterForeground");assertTrue(hasCall(finish,"workStageAfterForeground"));
+        for(var token:finish)assertFalse("A missing coordinator summary cannot mean cancellation",token.is("summary"));
+    }
     private static void noIntentAuthorityOrRestart(Unit source){
         Set<String> forbidden=Set.of("getExtras","getStringExtra","getParcelableExtra","getSerializableExtra","putExtra",
                 "issueLiveRewardsApproval","fixtureLiveRewardsApproval","synthetic","forTest");
@@ -293,6 +303,10 @@ public final class LiveRewardsForegroundIntegrationContractTest {
         destroyedBeforeRelease(Unit.parse(finish+"void finishAfterForeground(){if(!allResourcesClosed())return;publishTerminalReports();root.releaseIfClosed();writeReleaseReceipt();}}"));
         assertThrows(AssertionError.class,()->destroyedBeforeRelease(Unit.parse(finish+"void finishAfterForeground(){lease.requestClose();publishTerminalReports();root.releaseIfClosed();writeReleaseReceipt();}}")));
         assertThrows(AssertionError.class,()->destroyedBeforeRelease(Unit.parse(finish+"void finishAfterForeground(){if(!allResourcesClosed())return;publishTerminalReports();writeReleaseReceipt();root.releaseIfClosed();}}")));
+        String terminal="class Contract { void closeOnOwner(){terminalWorkStage=stage;stage=\"FOREGROUND_STOPPING\";} ";
+        workOutcomeSurvivesForeground(Unit.parse(terminal+"void finishAfterForeground(){stage=workStageAfterForeground(stage,terminalWorkStage);}}"));
+        assertThrows(AssertionError.class,()->workOutcomeSurvivesForeground(Unit.parse("class Contract { void closeOnOwner(){stage=\"FOREGROUND_STOPPING\";} void finishAfterForeground(){stage=summary==null?\"CANCELED\":\"COMPLETE\";}}")));
+        assertThrows(AssertionError.class,()->workOutcomeSurvivesForeground(Unit.parse(terminal+"void finishAfterForeground(){stage=summary==null?\"CANCELED\":\"COMPLETE\";}}")));
     }
     @Test public void thePrivateServiceCannotReceiveAuthorityOrRestartAProcessRun()throws Exception{
         var service=source("LiveRewardsForegroundService");noIntentAuthorityOrRestart(service);
@@ -331,7 +345,7 @@ public final class LiveRewardsForegroundIntegrationContractTest {
         for(var call:invocations(gate))if(simple(call.name).equals("elapsedRealtime")&&call.end+3<gate.size())
             bounded|=gate.get(call.end).is("<")&&joined(gate.subList(call.end+1,call.end+4)).equals("approval.deadline");
         assertTrue("Startup may not create a fresh thirty-minute clock",bounded);
-        var entry=calls(runtime.method("start"));
+        var entry=calls(runtime.method("startBound"));
         assertTrue("The original day is sealed before visible approval is issued",entry.indexOf("LocalDate.now")>=0
                 &&entry.indexOf("LocalDate.now")<entry.indexOf("VisibleCaptureAuthority.issueLiveRewardsApproval"));
     }
@@ -362,5 +376,41 @@ public final class LiveRewardsForegroundIntegrationContractTest {
         for(String name:List.of("returnAfterTap","current","knownClean","stopped"))
             for(String call:calls(input.method(name)))assertFalse("Return path must retain its no-page-read boundary: "+call,forbidden.contains(simple(call)));
         assertTrue("Return still dispatches through the same bound Back actor",hasCall(input.method("returnAfterTap"),"backActor"));
+    }
+    @Test public void readOnlyEntryNeverConstructsOrFallsThroughToBusinessExecution()throws Exception{
+        var runtime=source("LiveRewardsRuntime");
+        for(String entry:List.of("start","startReadOnly")){
+            var factory=invocations(runtime.method(entry)).stream().filter(call->simple(call.name).equals("startBound")).findFirst();
+            assertTrue("Both visible entries use the same lifecycle factory",factory.isPresent());
+            var arguments=factory.get().arguments;assertEquals(4,arguments.size());
+            assertTrue("The entry seals its task-input purpose",arguments.get(3).size()==1&&arguments.get(3).get(0).is(entry.equals("start")?"true":"false"));
+        }
+        boolean branch=false;
+        for(var statement:sequence(runtime.method("run"))){
+            if(statement.kind.equals("if")&&joined(statement.condition).equals("!taskInputAllowed")){
+                assertTrue("Read-only execution returns rather than resuming the live branch",terminates(statement.yes));
+                assertTrue(hasCall(statement.yes.tokens,"runReadOnly"));branch=true;
+            }
+            if(calls(statement.tokens).contains("new LiveRewardsInput")||calls(statement.tokens).contains("new LiveRewardsCoordinator"))
+                assertTrue("Task-capable objects remain after the read-only return branch",branch);
+        }
+        assertTrue("A distinct no-task-input branch is mandatory",branch);
+        var readOnly=runtime.method("runReadOnly");
+        assertTrue(hasCall(readOnly,"attachLedger"));assertTrue(hasCall(readOnly,"preflight"));
+        for(String forbidden:List.of("new LiveRewardsInput","new LiveRewardsCoordinator","ledger.begin","authority.cardScope","input.tap","input.returnAfterTap"))
+            assertFalse("Read-only path has no business operation: "+forbidden,calls(readOnly).contains(forbidden));
+    }
+    @Test public void focusPostObservationCannotResumeTheFailedPreflightOrReturnAnInputSource()throws Exception{
+        var runtime=source("LiveRewardsRuntime");var diagnostic=runtime.method("diagnoseReadOnlyRejection");
+        for(String required:List.of("hasFocusRejection","nativeResourcesClosed","claimFocusDiagnostics","diagnoseReadOnlyFocus"))assertTrue(required,hasCall(diagnostic,required));
+        for(String forbidden:List.of("preflight","readUi","observe","cardScope","tap","returnAfterTap"))assertFalse(forbidden,hasCall(diagnostic,forbidden));
+        boolean rethrows=false;var original=runtime.method("runReadOnly");
+        for(int i=0;i+2<original.size();i++)rethrows|=original.get(i).is("throw")&&original.get(i+1).is("original")&&original.get(i+2).is(";");
+        assertTrue("After-observation preserves the original terminal failure",rethrows);
+        var side=runtime.method("writeFocusReceipt");assertTrue(hasCall(side,"focusDiagnostics"));
+        assertFalse("Side receipt cannot acquire a new source",hasCall(side,"template"));
+    }
+    @Test public void foregroundCleanupDoesNotInferCancellationFromMissingLiveCoordinator()throws Exception{
+        workOutcomeSurvivesForeground(source("LiveRewardsRuntime"));
     }
 }

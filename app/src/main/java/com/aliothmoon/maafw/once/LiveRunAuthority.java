@@ -18,28 +18,33 @@ final class LiveRunAuthority {
     private final BooleanSupplier guard;
     private final long issued,deadline;
     private final String day;
-    private final boolean live;
+    private final boolean live,taskInputAllowed;
     private final AtomicBoolean canceled=new AtomicBoolean();
     private final Map<LiveRewardsTypes.Kind,CardScope> scans=new EnumMap<>(LiveRewardsTypes.Kind.class);
     private final Map<String,CardScope> previews=new HashMap<>(),cards=new HashMap<>();
     private LiveRewardsLedger ledger;
     private BingNavigationSnapshot.Ready original;
     private int scopeSequence;
+    private volatile boolean diagnosticOnly;
+    private FocusDiagnosticPermit focusDiagnostic;
 
     LiveRunAuthority(VisibleCaptureAuthority.LiveRewardsApproval approval,Clock clock,BooleanSupplier guard){
         if(approval==null||clock==null||guard==null||!approval.live||!approval.consume(clock.elapsedRealtime()))
             throw new SecurityException("Fresh exact visible live approval required");
         this.epoch=approval.epoch;owner=approval.owner;this.clock=clock;this.guard=guard;
-        issued=approval.issued;deadline=Math.min(approval.deadline,add(issued,MAX_RUN_MILLIS));day=validDay(clock.day());live=true;
+        issued=approval.issued;deadline=Math.min(approval.deadline,add(issued,MAX_RUN_MILLIS));day=validDay(clock.day());live=true;taskInputAllowed=approval.taskInputAllowed;
         if(epoch==null||owner==null||deadline<=issued||!current())throw new SecurityException("Live run approval unavailable");
     }
-    private LiveRunAuthority(Object owner,RealCaptureClaim.ProcessEpoch epoch,Clock clock,BooleanSupplier guard){
+    private LiveRunAuthority(Object owner,RealCaptureClaim.ProcessEpoch epoch,Clock clock,BooleanSupplier guard,boolean taskInputAllowed){
         if(owner==null||epoch==null||clock==null||guard==null)throw new IllegalArgumentException("Fixture owner required");
         this.owner=owner;this.epoch=epoch;this.clock=clock;this.guard=guard;issued=clock.elapsedRealtime();
-        deadline=add(issued,MAX_RUN_MILLIS);day=validDay(clock.day());live=false;
+        deadline=add(issued,MAX_RUN_MILLIS);day=validDay(clock.day());live=false;this.taskInputAllowed=taskInputAllowed;
     }
     static LiveRunAuthority synthetic(Object owner,RealCaptureClaim.ProcessEpoch epoch,Clock clock,BooleanSupplier guard){
-        return new LiveRunAuthority(owner,epoch,clock,guard);
+        return new LiveRunAuthority(owner,epoch,clock,guard,true);
+    }
+    static LiveRunAuthority syntheticReadOnly(Object owner,RealCaptureClaim.ProcessEpoch epoch,Clock clock,BooleanSupplier guard){
+        return new LiveRunAuthority(owner,epoch,clock,guard,false);
     }
     private static String validDay(String value){LocalDate.parse(value);return value;}
     private static long add(long value,long delta){if(value<0||delta<=0||value>Long.MAX_VALUE-delta)throw new IllegalArgumentException("Clock unavailable");return value+delta;}
@@ -49,6 +54,9 @@ final class LiveRunAuthority {
     Object owner(){return owner;}
     RealCaptureClaim.ProcessEpoch epoch(){return epoch;}
     boolean live(){return live;}
+    boolean taskInputAllowed(){return taskInputAllowed;}
+    synchronized int taskScopeCount(){return cards.size();}
+    boolean diagnosticOnly(){return diagnosticOnly;}
     boolean current(){
         if(canceled.get())return false;
         try{long now=clock.elapsedRealtime();return now>=issued&&now<deadline&&day.equals(clock.day())&&guard.getAsBoolean();}
@@ -63,24 +71,59 @@ final class LiveRunAuthority {
         try{ledger.recordRead(slot);}catch(IOException|RuntimeException failed){cancel();throw failed;}
     }
     synchronized void bindTemplate(BingNavigationSnapshot.Ready source,long now){
-        if(source==null||source.kind()!=BingNavigationSnapshot.Kind.TEMPLATE||!source.fresh(now)||!current())
+        if(diagnosticOnly||source==null||source.kind()!=BingNavigationSnapshot.Kind.TEMPLATE||!source.fresh(now)||!current())
             throw new SecurityException("Fresh original Rewards source required");
         if(original==null)original=source;
         else if(!original.sameSource(source))throw new SecurityException("Original Rewards source changed");
     }
     synchronized CardScope scanScope(LiveRewardsTypes.Kind kind){
-        if(kind==null||!current()||scans.containsKey(kind))throw new SecurityException("One region scan required");
+        if(diagnosticOnly||kind==null||!current()||scans.containsKey(kind))throw new SecurityException("One region scan required");
         var task=new LiveRewardsTypes.Task(kind,LiveRewardsTypes.hash("SCAN_"+kind),kind==LiveRewardsTypes.Kind.CHECK_IN?0:1,"",0,false,false,-1);
         var scope=new CardScope(this,task,true,true,++scopeSequence,now());scans.put(kind,scope);return scope;
     }
     synchronized CardScope preflightScope(LiveRewardsTypes.Task task){return scope(task,true);}
     synchronized CardScope cardScope(LiveRewardsTypes.Task task){return scope(task,false);}
     private CardScope scope(LiveRewardsTypes.Task task,boolean preview){
-        if(task==null||!current())throw new SecurityException("Current task required");var map=preview?previews:cards;
+        if(!preview&&!taskInputAllowed)throw new SecurityException("Read-only run cannot issue task scopes");
+        if(diagnosticOnly||task==null||!current())throw new SecurityException("Current task required");var map=preview?previews:cards;
         if(map.size()>=17||map.containsKey(task.key()))throw new SecurityException("One scope per task required");
         long inKind=map.values().stream().filter(s->s.task.kind()==task.kind()).count();
         if(inKind>=(task.kind()==LiveRewardsTypes.Kind.CHECK_IN?1:8))throw new SecurityException("Per-region scope budget exhausted");
         var scope=new CardScope(this,task,preview,false,++scopeSequence,now());map.put(task.key(),scope);return scope;
+    }
+    synchronized FocusDiagnosticPermit claimFocusDiagnostics(long now){
+        if(taskInputAllowed||diagnosticOnly||focusDiagnostic!=null||ledger==null||!current()||now<issued||now>=deadline)
+            throw new SecurityException("One read-only focus diagnostic sequence required");
+        diagnosticOnly=true;focusDiagnostic=new FocusDiagnosticPermit(this,now);return focusDiagnostic;
+    }
+    /** Metadata only after ordinary preflight has stopped. No Ready or UI/input permit is exposed. */
+    static final class FocusDiagnosticPermit {
+        private static final long[] OFFSETS={0,750,2000};
+        private final LiveRunAuthority run;private final long issued;
+        private int pairs;private boolean active,burned,closed;
+        private FocusDiagnosticPermit(LiveRunAuthority run,long issued){this.run=run;this.issued=issued;}
+        boolean live(){return run.live;}
+        boolean matches(LiveRunAuthority exact){return run==exact;}
+        long issuedElapsed(){return issued;}
+        long deadline(){return run.deadline;}
+        boolean current(){return current(run.now());}
+        synchronized boolean current(long now){return !closed&&!run.taskInputAllowed&&run.diagnosticOnly
+                &&run.focusDiagnostic==this&&run.current()&&now>=issued&&now<run.deadline;}
+        synchronized int pairCount(){return pairs;}
+        synchronized long nextDueElapsed(){return pairs>=OFFSETS.length||issued>Long.MAX_VALUE-OFFSETS[pairs]
+                ?Long.MAX_VALUE:issued+OFFSETS[pairs];}
+        synchronized boolean claimPair(long now)throws IOException{
+            if(active||pairs>=OFFSETS.length||!current(now)||now<nextDueElapsed())return false;
+            active=true;burned=false;pairs++;
+            try{run.readSlot("FOCUS_DIAGNOSTIC_"+pairs);burned=true;return true;}
+            catch(IOException|RuntimeException failed){closed=true;run.cancel();throw failed;}
+        }
+        synchronized boolean dispatchValid(long now){return active&&burned&&current(now);}
+        void finishPair(boolean completed,boolean clean){
+            synchronized(this){if(!active)return;active=false;
+                if(!burned||!completed||!clean||pairs==OFFSETS.length)closed=true;}
+            if(!clean)run.cancel();
+        }
     }
 
     static final class CardScope {
@@ -118,7 +161,7 @@ final class LiveRunAuthority {
         synchronized long observationDeadline(LiveRewardsTypes.Phase phase){
             return phase==LiveRewardsTypes.Phase.BEFORE?deadline:afterDeadline<0?deadline:Math.min(deadline,afterDeadline);
         }
-        boolean current(long now){return run.current()&&now>=issued&&now<deadline;}
+        boolean current(long now){return !run.diagnosticOnly&&run.current()&&now>=issued&&now<deadline;}
         private void require(long now){if(!current(now))throw new SecurityException("Task scope expired or revoked");}
         synchronized UiPermit claimUi(Object observationOwner,long now){
             require(now);
@@ -202,7 +245,7 @@ final class LiveRunAuthority {
         }
         synchronized boolean isSealed(LiveRewardsTypes.Observation value){return value!=null&&value.scope()==this&&sealed[value.phase().ordinal()]==value;}
         synchronized LiveActionPermit actionPermit(LiveRewardsTypes.Observation before,LiveRewardsLedger ledger){
-            if(preflight||scan||action!=null||ledger==null||ledger!=run.ledger||!ledger.begunHere(task)
+            if(!run.taskInputAllowed||preflight||scan||action!=null||ledger==null||ledger!=run.ledger||!ledger.begunHere(task)
                     ||!isSealed(before)||before.phase()!=LiveRewardsTypes.Phase.BEFORE)
                 throw new SecurityException("Fresh pending live task required");
             action=LiveActionPermit.create(this,before,ledger);return action;
