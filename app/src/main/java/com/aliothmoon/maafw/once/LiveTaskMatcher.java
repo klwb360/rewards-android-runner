@@ -33,6 +33,28 @@ final class LiveTaskMatcher {
         for(var item:report.items())if(item.role()==role&&item.points()==expected.points()&&item.descriptorHash().equals(expected.titleHash())){exact=item;matches++;}
         return matches==1?new Match(State.UNIQUE,exact,true):new Match(matches==0?State.MISSING:State.AMBIGUOUS,null,false);
     }
+
+    /** A refreshed sibling, changed card count or ambiguous compact title invalidates the region. */
+    static boolean sameRoster(LiveUiProtocol.Report report, LiveRewardsTypes.Kind kind, List<LiveRewardsTypes.Task> cohort) {
+        if (report == null || !report.qualified() || kind == null || cohort == null || cohort.isEmpty()) return false;
+        int count = switch (kind) {
+            case CHECK_IN -> 1;
+            case DAILY -> report.base().cards().dailyCount();
+            case MORE -> report.base().cards().moreCount();
+        };
+        if (count != cohort.size()) return false;
+        boolean[] matched = new boolean[count];
+        for (var expected : cohort) {
+            if (expected.kind() != kind) return false;
+            var match = find(report, expected, cohort);
+            if (match.state() != State.UNIQUE) return false;
+            int index = kind == LiveRewardsTypes.Kind.CHECK_IN ? match.item().index() : match.item().index() - 1;
+            if (index < 0 || index >= count || matched[index]) return false;
+            matched[index] = true;
+        }
+        return true;
+    }
+
     private static boolean uniqueKnownTitle(LiveRewardsTypes.Task expected,List<LiveRewardsTypes.Task> cohort){
         if(cohort==null)return false;int titlePeers=0;
         for(var task:cohort)if(task.kind()==expected.kind()&&task.points()==expected.points()){

@@ -421,11 +421,44 @@ final class BingNavigationSnapshot {
         return parseInternal(windows,activities,profile,guard,lower,observed,timedOriginal,false);
     }
     private static Result parseInternal(String windows,String activities,Profile profile,ReadOnlyGuard guard,long lower,long observed,Ready timedOriginal,boolean entry){
-        if(windows==null||activities==null||windows.length()>262144||activities.length()>262144||windows.indexOf('\0')>=0||activities.indexOf('\0')>=0
-            ||profile==null||profile.bingUid<10000||profile.systemUiUid<10000||profile.shape==null||profile.shape.width<=0||profile.shape.height<=0
-            ||profile.shape.rotation<0||profile.shape.rotation>3||lower<0||observed<lower||observed-lower>5_000)return unknown(FirstGate.INPUT);
+        if(!validInputs(windows,activities,profile,lower,observed))return unknown(FirstGate.INPUT);
         var focus=BingForegroundSnapshot.parse(windows);if(focus==null)return unknown(focusFailure(windows));
         if(!(entry?entryComponent(focus.component()):namedComponent(focus.component())))return unknown(FirstGate.FOCUS_COMPONENT);
+        Result rejection=bindingRejection(windows,activities,profile,guard,focus,timedOriginal,entry);
+        if(rejection!=null)return rejection;
+        return new Result(Status.READY,new Ready(focus,focus.component().equals(TEMPLATE)?Kind.TEMPLATE:entry?Kind.MAIN:Kind.BROWSER,profile,lower,observed),
+            guard==null?ReadOnlyGate.NOT_APPLIED:ReadOnlyGate.METADATA_STABLE_ONLY,FirstGate.READY);
+    }
+
+    private static boolean validInputs(String windows,String activities,Profile profile,long lower,long observed){
+        return windows!=null&&activities!=null&&windows.length()<=262144&&activities.length()<=262144
+            &&windows.indexOf('\0')<0&&activities.indexOf('\0')<0&&profile!=null&&profile.bingUid>=10000
+            &&profile.systemUiUid>=10000&&profile.shape!=null&&profile.shape.width>0&&profile.shape.height>0
+            &&profile.shape.rotation>=0&&profile.shape.rotation<=3&&lower>=0&&observed>=lower&&observed-lower<=5_000;
+    }
+
+    /**
+     * Permission to wait for new metadata only. Compare the actual window and activity tokens with
+     * the already authenticated run anchor. Examine both original documents for any other failure.
+     * A missing display never creates a Ready, even when all other checks pass.
+     */
+    static boolean onlyDisplayMissing(String windows,String activities,Profile profile,ReadOnlyGuard guard,
+            Ready anchor,long lower,long observed){
+        if(anchor==null||anchor.kind!=Kind.TEMPLATE||!anchor.profile.equals(profile)||guard==null||!guard.valid()
+                ||!validInputs(windows,activities,profile,lower,observed)||windows.contains("mTopFocusedDisplayId")
+                ||count(windows,"mCurrentFocus")!=1||count(windows,"mFocusedApp")!=1)return false;
+        String[] window=one(windows,"^[ \\t]*mCurrentFocus=Window\\{([a-fA-F0-9]+) u0 ([^\\s}]+)\\}[ \\t]*$",2);
+        String[] activity=one(windows,"^[ \\t]*mFocusedApp=ActivityRecord\\{([a-fA-F0-9]+) u0 ([^\\s}]+) t([0-9]+)(?: [^}\\r\\n]*)?\\}[ \\t]*$",3);
+        var focus=anchor.focus;
+        if(window==null||activity==null||!focus.window().equals(window[0])||!focus.component().equals(window[1])
+                ||!focus.activity().equals(activity[0])||!focus.component().equals(activity[1])||!focus.task().equals(activity[2]))
+            return false;
+        return bindingRejection(windows,activities,profile,guard,focus,null,false)==null;
+    }
+
+    /** Returns the original rejection or null. This shared check never constructs a source. */
+    private static Result bindingRejection(String windows,String activities,Profile profile,ReadOnlyGuard guard,
+            BingForegroundSnapshot.Snapshot focus,Ready timedOriginal,boolean entry){
         List<Block> windowBlocks=blocks(windows,WINDOW,false);
         if(windowBlocks.isEmpty()||headerCount(windows,"(?m)^\\s*Window #\\d+ Window\\{")!=windowBlocks.size())return unknown(FirstGate.WINDOW_HEADERS);
         Block focused=null;boolean anotherBingVisible=false;
@@ -465,8 +498,7 @@ final class BingNavigationSnapshot {
             return new Result(Status.BING_TRANSITION,null,ReadOnlyGate.NOT_APPLIED,FirstGate.KNOWN_TRANSITION);
         if(guard!=null){GuardResult stable=readonlyStability(windows,activities,profile,guard,focus);
             if(stable.status!=Status.READY)return new Result(stable.status,null,stable.gate,FirstGate.READ_ONLY_STABILITY); }
-        return new Result(Status.READY,new Ready(focus,focus.component().equals(TEMPLATE)?Kind.TEMPLATE:entry?Kind.MAIN:Kind.BROWSER,profile,lower,observed),
-            guard==null?ReadOnlyGate.NOT_APPLIED:ReadOnlyGate.METADATA_STABLE_ONLY,FirstGate.READY);
+        return null;
     }
     static RecoveryResult parseReturnRead(String windows,String activities,Profile profile,ReadOnlyGuard guard,long lower,long observed){
         Result r=guard==null?parse(windows,activities,profile,lower,observed):parseRootReadOnly(windows,activities,profile,guard,lower,observed);

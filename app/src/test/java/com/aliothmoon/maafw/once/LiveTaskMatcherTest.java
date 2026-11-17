@@ -27,6 +27,32 @@ public class LiveTaskMatcherTest {
         var match=LiveTaskMatcher.find(roster("Second task, 5 积分","First task, Another description, + 5 积分"),expected,List.of(expected,other));
         assertEquals(LiveTaskMatcher.State.UNIQUE,match.state());assertTrue(match.compact());assertEquals(1,match.item().index());
     }
+
+    @Test public void fullRegionMustStillMatchAfterReorderingAndCompletion() {
+        var first = task("First, Description one, + 5 积分", "First", 1);
+        var second = task("Second, Description two, + 5 积分", "Second", 2);
+        var cohort = List.of(first, second);
+        var reordered = roster("Second, 5 积分", "First, Description one, + 5 积分");
+        assertTrue(LiveTaskMatcher.sameRoster(reordered, LiveRewardsTypes.Kind.MORE, cohort));
+        assertFalse(LiveTaskMatcher.sameRoster(reordered, LiveRewardsTypes.Kind.DAILY, cohort));
+
+        for (var changed : List.of(
+                roster("First, Description one, + 5 积分"),
+                roster("First, Description one, + 5 积分", "New task, + 5 积分"),
+                roster("First, Description one, + 5 积分", "Second, 5 积分", "Extra, + 5 积分"),
+                roster("First, Description one, + 5 积分", "First, Description one, + 5 积分"))) {
+            assertFalse(LiveTaskMatcher.sameRoster(changed, LiveRewardsTypes.Kind.MORE, cohort));
+        }
+    }
+
+    @Test public void regionMatchingRequiresOneDistinctCardForEveryIdentity() {
+        var a = task("First, Description one, + 5 积分", "First", 1);
+        var b = task("Other, Description two, + 5 积分", "Other", 2);
+        var stable = roster("First, Description one, + 5 积分", "Other, Description two, + 5 积分");
+        assertFalse(LiveTaskMatcher.sameRoster(stable, LiveRewardsTypes.Kind.MORE, List.of(a, a)));
+        assertFalse(LiveTaskMatcher.sameRoster(stable, LiveRewardsTypes.Kind.MORE, List.of(a)));
+        assertTrue(LiveTaskMatcher.sameRoster(stable, LiveRewardsTypes.Kind.MORE, List.of(b, a)));
+    }
     @Test public void repeatedDescriptorsAndAmbiguousCompactTitlesNeverProduceAUniqueMatch(){
         var a=task("Repeated title, Alpha, + 5 积分","Repeated title",1);var b=task("Repeated title, Beta, + 5 积分","Repeated title",2);
         assertEquals(LiveTaskMatcher.State.AMBIGUOUS,LiveTaskMatcher.find(roster("Repeated title, 5 积分"),a,List.of(a,b)).state());

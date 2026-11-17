@@ -6,9 +6,7 @@ import com.aliothmoon.maafw.rewards.RewardRegionLocator.Box;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
 import org.json.JSONObject;
@@ -16,6 +14,11 @@ import org.json.JSONObject;
 /** Production local-only UI -> reveal -> direct card crop -> native ROI OCR chain. */
 final class LiveRewardsPerception {
     @FunctionalInterface interface ArtifactSink { void write(String key,String phase,String filename,byte[] payload)throws Exception; }
+    @FunctionalInterface interface UiAttempt<T> { T read(boolean allowRecovery) throws Exception; }
+    static final class RecoveredUiFrame extends Exception {
+        private static final long serialVersionUID = 1L;
+        private RecoveredUiFrame() {}
+    }
     private record Frame(LiveRunAuthority.UiPermit permit,LiveUiProtocol.Report report,
             BingNavigationSnapshot.Ready before,long beforeAt,BingNavigationSnapshot.Ready after){}
     private record Located(Frame frame,LiveTaskMatcher.Match match,CardRevealProbeTarget.Selection selection,
@@ -69,34 +72,57 @@ final class LiveRewardsPerception {
     private static void timeBudget(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Phase phase)throws AfterExpired{
         if(afterExpired(scope,phase))throw new AfterExpired();
     }
-    LiveRewardsTypes.Preflight preflight()throws Exception{return preflight(authority);}
-    LiveRewardsTypes.Preflight preflight(LiveRunAuthority exact)throws Exception{
-        state("PREFLIGHT_BEGIN");
-        if(exact!=authority)throw new SecurityException("Exact preflight run required");
-        List<LiveRewardsTypes.Task> result=new ArrayList<>();boolean complete=true;
-        for(var kind:LiveRewardsTypes.Kind.values()){
-            if(kind==LiveRewardsTypes.Kind.CHECK_IN){
-                var seed=LivePreflightHistory.checkInSeed();
-                if(attemptedHistory(seed)){
-                    // A prior attempt supplies no UI/image authority. Still require one fresh qualified
-                    // typed UI/source bracket, without searching for a possibly collapsed check-in card.
-                    readUi(authority.scanScope(kind),LiveRewardsTypes.Phase.BEFORE);
-                    result.add(seed);state("PREFLIGHT_CHECK_IN_ALREADY_ATTEMPTED");continue;
-                }
-            }
-            Roster roster=scan(kind);complete&=roster.known();
-            Map<String,Integer> duplicates=new HashMap<>();for(var task:roster.tasks())duplicates.merge(task.key(),1,Integer::sum);
-            for(var seed:roster.tasks()){
-                if(attemptedHistory(seed)){result.add(LivePreflightHistory.unreadable(seed));continue;}
-                if(seed.complete()){result.add(seed);continue;}
-                if(duplicates.get(seed.key())!=1){result.add(seed);continue;}
-                var observed=observe(authority.preflightScope(seed),LiveRewardsTypes.Phase.BEFORE,seed);
-                result.add(observed.task());
+    LiveRewardsTypes.Preflight preflight() throws Exception {
+        List<LiveRewardsTypes.Task> tasks = new ArrayList<>();
+        for (var kind : LiveRewardsTypes.Kind.values()) {
+            var region = preflightRegion(authority, kind);
+            tasks.addAll(region.tasks());
+            if (!region.completeScan() || !region.knownClean() || !region.sourceReady()) {
+                return new LiveRewardsTypes.Preflight(tasks, false, region.knownClean(), region.sourceReady());
             }
         }
-        cohort=List.copyOf(result);
-        state(complete?"PREFLIGHT_COMPLETE":"PREFLIGHT_INCOMPLETE");
-        return new LiveRewardsTypes.Preflight(cohort,complete,knownClean(),authority.current()&&navigation.current());
+        state("PREFLIGHT_COMPLETE");
+        return new LiveRewardsTypes.Preflight(tasks, true, knownClean(), authority.current() && navigation.current());
+    }
+
+    LiveRewardsTypes.Preflight preflightRegion(LiveRunAuthority exact, LiveRewardsTypes.Kind kind) throws Exception {
+        if (exact != authority || kind == null) throw new SecurityException("Exact preflight run and region required");
+        state("PREFLIGHT_BEGIN_" + kind.name());
+        cohort = List.of();
+        if (kind == LiveRewardsTypes.Kind.CHECK_IN) {
+            var checkIn = LivePreflightHistory.checkInSeed();
+            if (attemptedHistory(checkIn)) {
+                // An earlier attempt does not prove completion; bind this skip to a fresh Rewards UI read.
+                readUi(authority.scanScope(kind), LiveRewardsTypes.Phase.BEFORE);
+                return regionResult(List.of(checkIn), true, "PREFLIGHT_CHECK_IN_ALREADY_ATTEMPTED");
+            }
+        }
+        Roster roster = scan(kind);
+        if (!roster.known()) return regionResult(roster.tasks(), false, "PREFLIGHT_ROSTER_INCOMPLETE");
+        cohort = roster.tasks();
+        if (cohort.stream().map(LiveRewardsTypes.Task::key).distinct().count() != cohort.size()) {
+            return regionResult(cohort, false, "PREFLIGHT_ROSTER_AMBIGUOUS");
+        }
+
+        List<LiveRewardsTypes.Task> recognized = new ArrayList<>();
+        for (var seed : cohort) {
+            if (attemptedHistory(seed)) {
+                recognized.add(LivePreflightHistory.unreadable(seed));
+            } else {
+                var observed = observe(authority.preflightScope(seed), LiveRewardsTypes.Phase.BEFORE, seed);
+                recognized.add(observed.task());
+                if (!observed.qualified() || !observed.data().uniqueMatch() || !observed.task().sameKey(seed)) {
+                    return regionResult(recognized, false, "PREFLIGHT_CARD_UNRECOGNIZED_" + kind.name());
+                }
+            }
+        }
+        return regionResult(recognized, true, "PREFLIGHT_READY_" + kind.name());
+    }
+
+    private LiveRewardsTypes.Preflight regionResult(List<LiveRewardsTypes.Task> tasks, boolean complete, String status) {
+        cohort = List.copyOf(tasks);
+        state(status);
+        return new LiveRewardsTypes.Preflight(cohort, complete, knownClean(), authority.current() && navigation.current());
     }
     private boolean attemptedHistory(LiveRewardsTypes.Task seed)throws java.io.IOException{
         state("PREFLIGHT_HISTORY_QUERY_"+seed.kind().name());
@@ -107,20 +133,22 @@ final class LiveRewardsPerception {
     private Roster scan(LiveRewardsTypes.Kind kind)throws Exception{
         var scope=authority.scanScope(kind);ReviewShizukuSwipeActor.Direction previous=null;
         for(int attempt=0;attempt<=8;attempt++){
+            long generation = navigation.recoveryGeneration();
             Frame frame=readUi(scope,LiveRewardsTypes.Phase.BEFORE);var base=frame.report().base();
+            if (navigation.recoveryGeneration() != generation) previous = null;
             var role=LiveTaskMatcher.role(kind);int count=kind==LiveRewardsTypes.Kind.CHECK_IN?0:
                     kind==LiveRewardsTypes.Kind.DAILY?base.cards().dailyCount():base.cards().moreCount();
             var region=region(base,role);boolean regionComplete=region!=null&&region.target()>0&&region.current()==region.target();
-            List<LiveRewardsTypes.Task> roster=new ArrayList<>();
-            for(var item:frame.report().items())if(item.role()==role)roster.add(new LiveRewardsTypes.Task(kind,item.descriptorHash(),item.index(),"",
-                    Math.max(0,item.points()),regionComplete,regionComplete,-1));
-            if(kind==LiveRewardsTypes.Kind.CHECK_IN&&!roster.isEmpty()||kind!=LiveRewardsTypes.Kind.CHECK_IN&&count>=0&&roster.size()==count)
-                return new Roster(List.copyOf(roster),true);
-            if(regionComplete){
+            if(kind!=LiveRewardsTypes.Kind.CHECK_IN&&regionComplete){
                 publish(scope.task(),"PREFLIGHT","RESULT.json",new JSONObject().put("kind",kind.name()).put("outcome","REGION_COMPLETE_SKIP")
                         .put("counterCurrent",region.current()).put("counterTarget",region.target()).put("realExecutions",0).toString().getBytes(StandardCharsets.UTF_8));
                 return new Roster(List.of(),true);
             }
+            List<LiveRewardsTypes.Task> roster=new ArrayList<>();
+            for(var item:frame.report().items())if(item.role()==role)roster.add(new LiveRewardsTypes.Task(kind,item.descriptorHash(),item.index(),"",
+                    Math.max(0,item.points()),false,false,-1));
+            if(kind==LiveRewardsTypes.Kind.CHECK_IN&&roster.size()==1||kind!=LiveRewardsTypes.Kind.CHECK_IN&&count>=1&&roster.size()==count)
+                return new Roster(List.copyOf(roster),true);
             var shape=frame.after().profile().shape();
             var selected=kind==LiveRewardsTypes.Kind.CHECK_IN?CardRevealProbeTarget.select(base,shape.width(),shape.height()):
                     RemainingCardTarget.select(base,shape.width(),shape.height(),new RemainingCardChoice(role,1),previous).selection();
@@ -159,8 +187,15 @@ final class LiveRewardsPerception {
     private Located locate(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Phase phase,LiveRewardsTypes.Task expected)throws Exception{
         CardRevealProbeTarget.Selection previousCandidate=null;ReviewShizukuSwipeActor.Direction previousSearch=null;
         int swipes=0;long firstScroll=-1;
+        long generation = navigation.recoveryGeneration();
         for(int count=0;count<20;count++){
             timeBudget(scope,phase);Frame frame=readUi(scope,phase);var base=frame.report().base();
+            if (navigation.recoveryGeneration() != generation) {
+                // Stability must be demonstrated by two fresh frames after reacquiring focus.
+                previousCandidate = null;
+                previousSearch = null;
+                generation = navigation.recoveryGeneration();
+            }
             var match=LiveTaskMatcher.find(frame.report(),expected,cohort);var shape=frame.after().profile().shape();
             if(match.state()==LiveTaskMatcher.State.AMBIGUOUS)return new Located(frame,match,null,"AMBIGUOUS_TASK",swipes,elapsed(firstScroll));
             var parent=region(base,LiveTaskMatcher.role(expected.kind()));
@@ -180,6 +215,8 @@ final class LiveRewardsPerception {
             }
             if(selected.state()==CardRevealProbeTarget.State.CANDIDATE){
                 if(match.state()!=LiveTaskMatcher.State.UNIQUE)return new Located(frame,match,null,"TASK_IDENTITY_UNAVAILABLE",swipes,elapsed(firstScroll));
+                if (phase == LiveRewardsTypes.Phase.BEFORE && !LiveTaskMatcher.sameRoster(frame.report(), expected.kind(), cohort))
+                    return new Located(frame, match, null, "REGION_ROSTER_CHANGED", swipes, elapsed(firstScroll));
                 if(phase!=LiveRewardsTypes.Phase.BEFORE||selected.sameCandidate(previousCandidate))
                     return new Located(frame,match,selected,"READY",swipes,elapsed(firstScroll));
                 previousCandidate=selected;pause(scope,250);continue;
@@ -194,13 +231,40 @@ final class LiveRewardsPerception {
     }
     private static long elapsed(long start){return start<0?0:Math.max(0,now()-start);}
     private Frame readUi(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Phase phase)throws Exception{
+        return readUi(scope, phase, phase == LiveRewardsTypes.Phase.BEFORE);
+    }
+
+    private Frame readUi(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Phase phase, boolean allowRecovery)throws Exception{
+        return readFreshUi(allowRecovery, recover -> readUiOnce(scope, phase, recover));
+    }
+
+    static <T> T readFreshUi(boolean allowRecovery, UiAttempt<T> attempt) throws Exception {
+        try {
+            return attempt.read(allowRecovery);
+        } catch (RecoveredUiFrame stale) {
+            if (!allowRecovery) throw stale;
+            return attempt.read(false);
+        }
+    }
+
+    static RecoveredUiFrame discardRecoveredUi(LiveRunAuthority.CardScope scope, LiveRunAuthority.UiPermit stale, boolean clean) {
+        scope.discardUi(stale, clean);
+        return new RecoveredUiFrame();
+    }
+
+    private Frame readUiOnce(LiveRunAuthority.CardScope scope, LiveRewardsTypes.Phase phase, boolean allowRecovery) throws Exception {
         lastReadPreparation=null;state("UI_SOURCE_BEFORE");
         require(scope);timeBudget(scope,phase);var permit=scope.claimUi(new Object(),now());
         BingNavigationSnapshot.Ready[] before={null};long[] beforeAt={-1};
+        long generation = navigation.recoveryGeneration();
+        BooleanSupplier withinBudget = () -> permit.current(now()) && current(scope)
+                && now() < scope.observationDeadline(phase);
         var preparation=preparation(scope,phase,permit);
         var read=AndroidLiveUiReader.read(context,nonce(),Math.min(permit.deadline(),scope.observationDeadline(phase)),
                 ()->current(scope),()->{
-                    before[0]=navigation.template(()->permit.current(now())&&current(scope));beforeAt[0]=now();if(preparation!=null)preparation.sourceGateReturned();
+                    before[0] = allowRecovery ? navigation.templateForObservation(withinBudget) : navigation.template(withinBudget);
+                    beforeAt[0]=now();if(preparation!=null)preparation.sourceGateReturned();
+                    if (allowRecovery && navigation.recoveryGeneration() != generation) return false;
                     if(preparation!=null)preparation.enter(LiveReadPreparation.Stage.UI_READ_BURN);
                     boolean consumed=permit.consume(now());if(preparation!=null)preparation.uiReadBurnReturned(consumed);
                     if(consumed&&preparation!=null)preparation.enter(LiveReadPreparation.Stage.SOURCE_CURRENT);
@@ -210,13 +274,23 @@ final class LiveRewardsPerception {
         var report=read.protocolReport();
         var diagnostic=LiveUiDiagnostic.from(read);lastUiDiagnostic=diagnostic;state(diagnostic.safeState());
         if(!read.knownClean())throw new SecurityException("Live UI cleanup unconfirmed");
+        if (allowRecovery && navigation.recoveryGeneration() != generation && !read.invoked()
+                && read.fixedStatus() == AndroidLiveUiReader.FixedStatus.GATE_REJECTED) {
+            throw discardRecoveredUi(scope, permit, knownClean());
+        }
         if(LivePerceptionBudget.ui(read.fixedStatus(),report==null?null:report.base().source().reason(),true,afterExpired(scope,phase))){
             scope.discardUi(permit,true);throw new AfterExpired();
         }
         if(read.fixedStatus()!=AndroidLiveUiReader.FixedStatus.READ_COMPLETE||report==null||!report.qualified())
             throw new SecurityException("Live UI rejected: "+read.fixedStatus().name());
         if(afterExpired(scope,phase)){scope.discardUi(permit,true);throw new AfterExpired();}
-        state("UI_SOURCE_AFTER");var after=navigation.template(()->current(scope));long observed=now();
+        state("UI_SOURCE_AFTER");
+        var after = allowRecovery ? navigation.templateForObservation(withinBudget) : navigation.template(() -> current(scope));
+        long observed=now();
+        if (allowRecovery && navigation.recoveryGeneration() != generation) {
+            // The tree and its bounds were acquired across a focus gap; only a new bracket may supply a card or scroll.
+            throw discardRecoveredUi(scope, permit, knownClean());
+        }
         if(afterExpired(scope,phase)){scope.discardUi(permit,true);throw new AfterExpired();}
         if(!CardRevealProbeSource.ui(report.base(),before[0],beforeAt[0],after,after.profile().shape(),observed))
             throw new SecurityException("Live UI source bracket rejected");
@@ -332,10 +406,13 @@ final class LiveRewardsPerception {
     boolean rebind(LiveActionPermit permit)throws Exception{
         state("TAP_REBIND_BEGIN");
         if(permit==null||permit.scope().run()!=authority||!permit.live()||!permit.current(now()))return false;
-        var frame=readUi(permit.scope(),LiveRewardsTypes.Phase.BEFORE);var before=permit.before();
+        var frame=readUi(permit.scope(),LiveRewardsTypes.Phase.BEFORE,false);var before=permit.before();
         if(!permit.matchesBeforeSource(frame.after()))throw new SecurityException("Live tap source changed");
         var match=LiveTaskMatcher.find(frame.report(),before.task(),cohort);if(match.state()!=LiveTaskMatcher.State.UNIQUE||match.compact()){
             state("TAP_REBIND_"+match.state().name());return false;
+        }
+        if (!LiveTaskMatcher.sameRoster(frame.report(), before.task().kind(), cohort)) {
+            state("TAP_REBIND_REGION_ROSTER_CHANGED");return false;
         }
         var shape=frame.after().profile().shape();var selected=before.task().kind()==LiveRewardsTypes.Kind.CHECK_IN?
                 CardRevealProbeTarget.select(frame.report().base(),shape.width(),shape.height()):RemainingCardTarget.select(frame.report().base(),shape.width(),shape.height(),
