@@ -5,11 +5,8 @@ import android.os.SystemClock;
 
 /** Exact live-card inputs. A successful command never proves task completion or account credit. */
 final class LiveRewardsInput {
-    static final long RETURN_DELAY_MS=3_000L;
+    static final long RETURN_DELAY_MS=LiveActionPermit.RETURN_DELAY_MILLIS;
     enum VisitPage { ORIGINAL_REWARDS, BOUND_CHILD, BLOCKED, UNKNOWN }
-    @FunctionalInterface interface VisitGuard {
-        LiveVisitGuard.Report inspect(LiveActionPermit permit) throws Exception;
-    }
     @FunctionalInterface interface BeforeTapGuard { boolean inspect(LiveActionPermit permit) throws Exception; }
     interface Ports {
         long elapsedRealtime();
@@ -17,8 +14,6 @@ final class LiveRewardsInput {
         boolean current();
         boolean knownClean();
         BingNavigationSnapshot.Ready template();
-        BingNavigationSnapshot.LiveVisitResult visit(BingNavigationSnapshot.Ready original);
-        VisitPage page(LiveActionPermit permit,BingNavigationSnapshot.LiveVisitSource source) throws Exception;
         boolean beforeTap(LiveActionPermit permit) throws Exception;
         ReviewShizukuTapActor tapActor(LiveActionPermit permit);
         ReviewShizukuBackActor backActor(LiveActionPermit permit);
@@ -54,12 +49,17 @@ final class LiveRewardsInput {
             this.permit=permit;this.ready=ready;this.clean=clean;this.source=source;this.backDispatched=backDispatched;
             this.backGateElapsed=backGateElapsed;this.reason=reason;this.actorResult=actorResult;
         }
-        boolean ready(){return ready;}boolean knownClean(){return clean;}BingNavigationSnapshot.Ready source(){return source;}
+        /** Compatibility alias: confirms only the Back command, never a Rewards page. */
+        boolean ready(){return commandConfirmed();}
+        boolean commandConfirmed(){return ready;}
+        boolean matchesPermit(LiveActionPermit exact){return permit==exact;}
+        boolean knownClean(){return clean;}BingNavigationSnapshot.Ready source(){return source;}
         boolean backDispatched(){return backDispatched;}long backGateElapsed(){return backGateElapsed;}String reason(){return reason;}
         boolean backAttempted(){return backDispatched;}
         ReviewShizukuBackActor.Result actorResult(){return actorResult;}
         static ReturnReceipt synthetic(LiveActionPermit permit,boolean ready,boolean clean,BingNavigationSnapshot.Ready source){
             if(permit==null||permit.live())throw new SecurityException("Synthetic return receipt only");
+            if(ready&&!permit.backValid(permit.scope().run().now()))throw new SecurityException("Consumed due synthetic Back required");
             return new ReturnReceipt(permit,ready,clean,source,false,-1,"SYNTHETIC",null);
         }
     }
@@ -68,21 +68,16 @@ final class LiveRewardsInput {
     private ReviewShizukuBackActor.Result lastBackResult;
     private boolean inputKnownClean=true;
     boolean knownClean(){return inputKnownClean&&ports.knownClean();}
-    LiveRewardsInput(Context context,LiveRunAuthority authority,LiveRewardsNavigation navigation,VisitGuard guard,BeforeTapGuard beforeTap){
-        if(context==null||authority==null||!authority.live()||navigation==null||guard==null||beforeTap==null)
-            throw new IllegalArgumentException("Visible live input owner and page guard required");
+    LiveRewardsInput(Context context,LiveRunAuthority authority,LiveRewardsNavigation navigation,BeforeTapGuard beforeTap){
+        if(context==null||authority==null||!authority.live()||navigation==null||beforeTap==null)
+            throw new IllegalArgumentException("Visible live input owner and pre-tap guard required");
         this.authority=authority;
         ports=new Ports(){
             public long elapsedRealtime(){return SystemClock.elapsedRealtime();}
             public void pause(long millis)throws InterruptedException{Thread.sleep(millis);}
-            public boolean current(){return authority.current()&&navigation.current();}
+            public boolean current(){return authority.current();}
             public boolean knownClean(){return navigation.knownClean();}
             public BingNavigationSnapshot.Ready template(){return navigation.template();}
-            public BingNavigationSnapshot.LiveVisitResult visit(BingNavigationSnapshot.Ready original){return navigation.visit(original);}
-            public VisitPage page(LiveActionPermit permit,BingNavigationSnapshot.LiveVisitSource source)throws Exception{
-                var report=guard.inspect(permit);var after=navigation.visit(permit.source());
-                return classifyVisit(permit,source,report,after,elapsedRealtime());
-            }
             public boolean beforeTap(LiveActionPermit permit)throws Exception{return beforeTap.inspect(permit);}
             public ReviewShizukuTapActor tapActor(LiveActionPermit permit){return ReviewShizukuTapActor.forLiveRun(context,permit);}
             public ReviewShizukuBackActor backActor(LiveActionPermit permit){return ReviewShizukuBackActor.forLiveRun(context,permit);}
@@ -95,7 +90,8 @@ final class LiveRewardsInput {
     }
     private boolean current(LiveActionPermit permit){
         return permit!=null&&permit.scope().run()==authority&&permit.live()==authority.live()
-                &&authority.current()&&permit.current(ports.elapsedRealtime())&&ports.current()&&knownClean();
+                &&authority.current()&&permit.current(ports.elapsedRealtime())&&ports.current()&&knownClean()
+                &&!Thread.currentThread().isInterrupted();
     }
     TapReceipt tap(LiveActionPermit permit){
         if(!current(permit))return tapStopped(permit,"AUTHORITY_LOST");
@@ -140,30 +136,17 @@ final class LiveRewardsInput {
                 previous=now;ports.pause(Math.min(50,due-now));
             }
             if(!current(permit)||ports.elapsedRealtime()<due)return stopped(permit,false,-1,"WAIT_AUTHORITY_LOST");
-            // No page metadata, screenshots, OCR or UI action was performed during the delay.
-            var first=ports.visit(permit.source());
-            if(!visitReady(first,permit))return stopped(permit,false,-1,"VISIT_SOURCE_UNKNOWN");
-            var exact=first.source();var page=ports.page(permit,exact);
-            if(page==VisitPage.ORIGINAL_REWARDS&&first.kind()==BingNavigationSnapshot.LiveVisitKind.ORIGINAL_REWARDS)
-                return returned(permit,exact.ready(),false,-1,"ALREADY_ORIGINAL_REWARDS");
-            if(page!=VisitPage.BOUND_CHILD)return stopped(permit,false,-1,"VISIT_PAGE_BLOCKED");
+            // The approved return policy has no page, navigation, screenshot, UI or OCR reads.
             var actor=ports.backActor(permit);var shape=permit.shape();
             var target=new ReviewShizukuBackActor.BackTarget(shape.width(),shape.height(),shape.rotation());
             var result=actor.back(target,new ReviewShizukuBackActor.DispatchGate(){
                 private boolean consumed;
-                private boolean sourceStillChild(){
-                    if(!current(permit)||ports.elapsedRealtime()<due)return false;
-                    var fresh=ports.visit(permit.source());
-                    if(!visitReady(fresh,permit)||!exact.sameSource(fresh.source()))return false;
-                    try{return ports.page(permit,fresh.source())==VisitPage.BOUND_CHILD&&current(permit);}
-                    catch(Exception unknown){return false;}
-                }
                 public boolean consume(ReviewShizukuBackActor.BackTarget candidate)throws Exception{
-                    if(candidate!=target||consumed||!sourceStillChild())return false;consumed=true;
+                    if(candidate!=target||consumed||!current(permit)||ports.elapsedRealtime()<due)return false;consumed=true;
                     return permit.consumeBack(ports.elapsedRealtime())&&current(permit);
                 }
                 public boolean stillValid(ReviewShizukuBackActor.BackTarget candidate){
-                    if(candidate!=target||!consumed||!sourceStillChild()||!permit.backValid(ports.elapsedRealtime()))return false;
+                    if(candidate!=target||!consumed||!current(permit)||!permit.backValid(ports.elapsedRealtime()))return false;
                     finalGate[0]=ports.elapsedRealtime();return finalGate[0]>=due&&current(permit);
                 }
             });
@@ -172,33 +155,16 @@ final class LiveRewardsInput {
             dispatched=result!=null&&result.invocationAttempted();
             if(result==null||!result.commandExitZero()||!actor.knownClean()||!ports.knownClean())
                 return stopped(permit,dispatched,finalGate[0],"BACK_NOT_CONFIRMED");
-            for(int i=0;i<2;i++){
-                if(!current(permit))return stopped(permit,dispatched,finalGate[0],"RETURN_AUTHORITY_LOST");
-                var back=ports.visit(permit.source());
-                if(!visitReady(back,permit))return stopped(permit,dispatched,finalGate[0],"RETURN_SOURCE_UNKNOWN");
-                if(back.kind()==BingNavigationSnapshot.LiveVisitKind.ORIGINAL_REWARDS
-                        &&ports.page(permit,back.source())==VisitPage.ORIGINAL_REWARDS)
-                    return returned(permit,back.source().ready(),dispatched,finalGate[0],"ORIGINAL_REWARDS_AFTER_BACK");
-                if(i==0)ports.pause(250);
-            }
-            return stopped(permit,dispatched,finalGate[0],"RETURN_NOT_READY");
+            if(!current(permit))return stopped(permit,dispatched,finalGate[0],"RETURN_AUTHORITY_LOST");
+            // A known command exit is not a page or completion claim. The coordinator observes next.
+            return new ReturnReceipt(permit,true,knownClean(),null,dispatched,finalGate[0],"BACK_COMMAND_CONFIRMED",lastBackResult);
         }catch(InterruptedException canceled){Thread.currentThread().interrupt();return stopped(permit,dispatched,finalGate[0],"CANCELED");}
         catch(Exception unknown){return stopped(permit,dispatched,finalGate[0],"RETURN_REJECTED");}
-    }
-    private boolean visitReady(BingNavigationSnapshot.LiveVisitResult result,LiveActionPermit permit){
-        return result!=null&&result.source()!=null&&result.source().matchesOriginal(permit.source())
-                &&result.source().fresh(ports.elapsedRealtime())&&current(permit)
-                &&(result.kind()==BingNavigationSnapshot.LiveVisitKind.ORIGINAL_REWARDS||result.kind()==BingNavigationSnapshot.LiveVisitKind.BOUND_CHILD);
-    }
-    private ReturnReceipt returned(LiveActionPermit permit,BingNavigationSnapshot.Ready source,boolean dispatched,long gate,String reason){
-        if(source==null||!permit.source().sameSource(source)||!source.fresh(ports.elapsedRealtime())||!current(permit))
-            return stopped(permit,dispatched,gate,"RETURN_SOURCE_CHANGED");
-        return new ReturnReceipt(permit,true,knownClean(),source,dispatched,gate,reason,lastBackResult);
     }
     private ReturnReceipt stopped(LiveActionPermit permit,boolean dispatched,long gate,String reason){
         return new ReturnReceipt(permit,false,knownClean(),null,dispatched,gate,reason,lastBackResult);
     }
-    /** WM identity and positive passive page semantics must enclose the same source interval. */
+    /** Legacy passive diagnostics only; the five-second return path never calls this classifier. */
     static VisitPage classifyVisit(LiveActionPermit permit,BingNavigationSnapshot.LiveVisitSource before,
             LiveVisitGuard.Report guard,BingNavigationSnapshot.LiveVisitResult after,long now){
         if(permit==null||!permit.current(now)||before==null||guard==null||after==null||after.source()==null||!guard.qualified()

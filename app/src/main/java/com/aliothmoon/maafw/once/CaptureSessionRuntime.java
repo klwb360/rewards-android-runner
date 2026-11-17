@@ -39,6 +39,8 @@ final class CaptureSessionRuntime {
             this.graph=graph;this.entry=entry;this.closed=closed;
         }
         boolean current(){return held&&!entry.requested.get();}
+        // Only the exact graph's completed registry-and-epoch release clears held.
+        boolean released(){return !held;}
         void arm(){ROOT.arm(entry,(end,task)->DEADLINES.schedule(task,Math.max(0,end-SystemClock.elapsedRealtime()),TimeUnit.MILLISECONDS),SystemClock::elapsedRealtime);}
         void boundDeadline(long deadline){
             if(!held||deadline<0||deadline>entry.deadline)throw new SecurityException("Alignment deadline cannot extend the session");

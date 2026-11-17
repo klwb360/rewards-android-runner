@@ -16,9 +16,11 @@ public class LiveRewardsInputTest {
         final LiveRunAuthority authority=LiveRunAuthority.synthetic(new Object(),new RealCaptureClaim.ProcessEpoch(),clock,()->true);
         final LiveRewardsLedger ledger;
         final LiveRewardsInput input;
-        int taps,backs,visits,pages,rebinds,pauses;long successful=-1,backAt=-1;
+        int taps,backs,visits,pages,rebinds,pauses,templateCalls;long successful=-1,backAt=-1;
         boolean child=true,returned,clean=true,rebind=true,unknownVisit,blocked,cancelDuringWait,changeSourceAtFinal,unknownTap,unknownBack,closeFailure;
         boolean secondRebindFails,backStaysChild,clockBackwards,sameTemplateChild;
+        boolean forbidPageReads,dayChangesDuringWait,cleanupLostDuringWait,backCloseFailure,backRotationChanged,cancelAtBackFinal;
+        int backExit;
         int task=79,identity;
         Rig()throws Exception{ledger=LiveRewardsLedger.synthetic(clock.day,UUID.randomUUID().toString());authority.attachLedger(ledger);input=LiveRewardsInput.synthetic(authority,this);}
         LiveActionPermit permit(LiveRewardsTypes.Kind kind)throws Exception{
@@ -37,20 +39,25 @@ public class LiveRewardsInputTest {
         public long elapsedRealtime(){return clock.now;}
         public void pause(long millis){
             pauses++;assertTrue(millis>0&&millis<=250);
-            if(successful>=0&&clock.now<successful+3_000){assertEquals(0,backs);assertEquals(0,visits);assertEquals(0,pages);}
+            if(successful>=0&&clock.now<successful+5_000){assertEquals(0,backs);assertEquals(0,visits);assertEquals(0,pages);}
             clock.now+=millis;if(clockBackwards)clock.now-=2*millis;
             if(cancelDuringWait)authority.cancel();
+            if(dayChangesDuringWait)clock.day="2026-11-17";
+            if(cleanupLostDuringWait)clean=false;
         }
         public boolean current(){return authority.current();}public boolean knownClean(){return clean;}
-        public BingNavigationSnapshot.Ready template(){return LiveNavigationSnapshotTest.original(changeSourceAtFinal&&rebinds>1?task+1:task,clock.now);}
+        public BingNavigationSnapshot.Ready template(){
+            if(forbidPageReads)throw new AssertionError("Return must not request a template or page");
+            templateCalls++;return LiveNavigationSnapshotTest.original(changeSourceAtFinal&&rebinds>1?task+1:task,clock.now);
+        }
         public boolean beforeTap(LiveActionPermit permit){rebinds++;return rebind&&!(secondRebindFails&&rebinds==2);}
         public BingNavigationSnapshot.LiveVisitResult visit(BingNavigationSnapshot.Ready original){
-            visits++;assertTrue("Page sampled before successful-command dwell",clock.now>=successful+3_000);
+            visits++;if(forbidPageReads)throw new AssertionError("Return must not request navigation");
             return unknownVisit?BingNavigationSnapshot.LiveVisitResult.unknown(BingNavigationSnapshot.LiveVisitGate.STRICT_SOURCE)
                     :LiveNavigationSnapshotTest.visit(task,clock.now,child&&!returned&&!sameTemplateChild,original);
         }
         public LiveRewardsInput.VisitPage page(LiveActionPermit permit,BingNavigationSnapshot.LiveVisitSource source){
-            pages++;assertTrue(clock.now>=successful+3_000);
+            pages++;if(forbidPageReads)throw new AssertionError("Return must not inspect page semantics");
             return blocked?LiveRewardsInput.VisitPage.BLOCKED:child&&!returned?LiveRewardsInput.VisitPage.BOUND_CHILD:LiveRewardsInput.VisitPage.ORIGINAL_REWARDS;
         }
         public ReviewShizukuTapActor tapActor(LiveActionPermit permit){
@@ -69,13 +76,14 @@ public class LiveRewardsInputTest {
         public ReviewShizukuBackActor backActor(LiveActionPermit permit){
             return ReviewShizukuBackActor.liveFixture(()->new ReviewShizukuBackActor.Session(){
                 public boolean stillReady(){return true;}
-                public ReviewShizukuBackActor.DisplayShape display(){return new ReviewShizukuBackActor.DisplayShape(523,1000,0);}
+                public ReviewShizukuBackActor.DisplayShape display(){return new ReviewShizukuBackActor.DisplayShape(523,1000,backRotationChanged?1:0);}
                 public ReviewShizukuBackActor.PendingBack dispatch(ReviewShizukuBackActor.BackTarget target,ReviewShizukuBackActor.FinalGate gate)throws Exception{
+                    if(cancelAtBackFinal)authority.cancel();
                     gate.requireValid();backAt=clock.now;backs++;if(unknownBack)throw new Exception("Synthetic unknown return");
                     if(!backStaysChild)returned=true;
                     return new ReviewShizukuBackActor.PendingBack(){
-                        public boolean waitForExit(long millis){clock.now+=80;return true;}public int exitCode(){return 0;}
-                        public void destroy(){}public void close(){}
+                        public boolean waitForExit(long millis){clock.now+=80;return true;}public int exitCode(){return backExit;}
+                        public void destroy(){}public void close()throws Exception{if(backCloseFailure)throw new Exception("Synthetic Back cleanup");}
                     };
                 }
             },permit,()->clock.now);
@@ -85,13 +93,17 @@ public class LiveRewardsInputTest {
     @Test public void waitsFromSuccessfulCommandThenReturnsOnce()throws Exception{
         var r=new Rig();var p=r.permit(LiveRewardsTypes.Kind.DAILY);var tap=r.tap(p);
         assertTrue(tap.success());assertTrue(tap.invocationAttempted());assertEquals(1_125,tap.successfulElapsed());assertEquals(2,r.rebinds);
-        var returned=r.input.returnAfterTap(p,tap);assertTrue(returned.reason(),returned.ready());assertTrue(returned.backAttempted());
-        assertEquals(1,r.taps);assertEquals(1,r.backs);assertEquals(tap.successfulElapsed()+3_000,r.backAt);assertTrue(returned.backGateElapsed()>=r.backAt);
+        int templates=r.templateCalls;r.forbidPageReads=true;
+        var returned=r.input.returnAfterTap(p,tap);assertTrue(returned.reason(),returned.commandConfirmed());assertTrue(returned.backAttempted());
+        assertEquals("BACK_COMMAND_CONFIRMED",returned.reason());assertNull(returned.source());assertTrue(returned.matchesPermit(p));
+        assertEquals(1,r.taps);assertEquals(1,r.backs);assertEquals(tap.successfulElapsed()+5_000,r.backAt);assertTrue(returned.backGateElapsed()>=r.backAt);
+        assertEquals(templates,r.templateCalls);assertEquals(0,r.visits);assertEquals(0,r.pages);assertEquals(2,r.rebinds);
         assertFalse(r.input.returnAfterTap(p,tap).backAttempted());assertEquals(1,r.backs);
     }
-    @Test public void automaticReturnSkipsBackAfterFullDelay()throws Exception{
+    @Test public void theApprovedReturnDoesNotInspectOrSpecialCaseAutomaticNavigation()throws Exception{
         var r=new Rig();r.child=false;var p=r.permit(LiveRewardsTypes.Kind.MORE);var tap=r.tap(p);var returned=r.input.returnAfterTap(p,tap);
-        assertTrue(returned.ready());assertFalse(returned.backAttempted());assertEquals(0,r.backs);assertEquals(tap.successfulElapsed()+3_000,r.clock.now);
+        assertTrue(returned.commandConfirmed());assertTrue(returned.backAttempted());assertEquals(1,r.backs);assertEquals(tap.successfulElapsed()+5_000,r.backAt);
+        assertEquals(0,r.visits);assertEquals(0,r.pages);assertNull(returned.source());
     }
     @Test public void childHtmlInsideOriginalTemplateStillRequiresOneBack()throws Exception{
         var r=new Rig();r.sameTemplateChild=true;var p=r.permit(LiveRewardsTypes.Kind.DAILY);var tap=r.tap(p);var returned=r.input.returnAfterTap(p,tap);
@@ -115,9 +127,10 @@ public class LiveRewardsInputTest {
         var r=new Rig();r.changeSourceAtFinal=true;var p=r.permit(LiveRewardsTypes.Kind.DAILY);var tap=r.tap(p);
         assertFalse(tap.success());assertFalse(tap.invocationAttempted());assertEquals(0,r.taps);assertTrue(p.tapAttempted());
     }
-    @Test public void unknownSourceOrBlockedPageNeverPressesBack()throws Exception{
+    @Test public void returnDoesNotInvokeFormerUnknownSourceOrPageGuards()throws Exception{
         for(boolean unknown:new boolean[]{true,false}){var r=new Rig();r.unknownVisit=unknown;r.blocked=!unknown;
-            var p=r.permit(LiveRewardsTypes.Kind.DAILY);var tap=r.tap(p);assertFalse(r.input.returnAfterTap(p,tap).ready());assertEquals(0,r.backs);}
+            var p=r.permit(LiveRewardsTypes.Kind.DAILY);var tap=r.tap(p);r.forbidPageReads=true;
+            assertTrue(r.input.returnAfterTap(p,tap).commandConfirmed());assertEquals(1,r.backs);assertEquals(0,r.visits);assertEquals(0,r.pages);}
     }
     @Test public void cancelDuringWaitStopsWithoutReadingPage()throws Exception{
         var r=new Rig();r.cancelDuringWait=true;var p=r.permit(LiveRewardsTypes.Kind.DAILY);var tap=r.tap(p);
@@ -132,8 +145,8 @@ public class LiveRewardsInputTest {
             var p=r.permit(LiveRewardsTypes.Kind.DAILY);var tap=r.tap(p);assertFalse(tap.success());assertFalse(tap.knownClean());
             assertTrue(tap.invocationAttempted());assertEquals(1,r.taps);assertFalse(r.input.knownClean());assertFalse(r.input.returnAfterTap(p,tap).ready());assertEquals(0,r.backs);}
     }
-    @Test public void unknownOrFailedReturnNeverHasASecondBack()throws Exception{
-        for(boolean unknown:new boolean[]{true,false}){var r=new Rig();r.unknownBack=unknown;r.backStaysChild=!unknown;
+    @Test public void unknownOrNonzeroBackNeverHasASecondAttempt()throws Exception{
+        for(boolean unknown:new boolean[]{true,false}){var r=new Rig();r.unknownBack=unknown;r.backExit=unknown?0:1;
             var p=r.permit(LiveRewardsTypes.Kind.MORE);var tap=r.tap(p);var returned=r.input.returnAfterTap(p,tap);
             assertFalse(returned.ready());assertTrue(returned.backAttempted());assertEquals(1,r.backs);
             assertFalse(r.input.returnAfterTap(p,tap).backAttempted());assertEquals(1,r.backs);}
@@ -151,11 +164,52 @@ public class LiveRewardsInputTest {
         try{ReviewShizukuBackActor.forLiveRun(null,p);fail("Synthetic production Back");}catch(SecurityException expected){}
         assertTrue(ReadOnlyCheckpoint.blocksLiveInput());
     }
-    @Test public void backCapabilityRejects2999AndAccepts3000()throws Exception{
-        var early=new Rig();var p=early.permit(LiveRewardsTypes.Kind.DAILY);var tapped=early.tap(p);early.clock.now=tapped.successfulElapsed()+2_999;
+    @Test public void backCapabilityRejects4999AndAccepts5000()throws Exception{
+        var early=new Rig();var p=early.permit(LiveRewardsTypes.Kind.DAILY);var tapped=early.tap(p);early.clock.now=tapped.successfulElapsed()+4_999;
         assertFalse(p.claimBackActor(early.clock.now));assertFalse(p.consumeBack(early.clock.now));assertFalse(p.backValid(early.clock.now));
-        var due=new Rig();var q=due.permit(LiveRewardsTypes.Kind.MORE);var other=due.tap(q);due.clock.now=other.successfulElapsed()+3_000;
+        var due=new Rig();var q=due.permit(LiveRewardsTypes.Kind.MORE);var other=due.tap(q);due.clock.now=other.successfulElapsed()+5_000;
         assertTrue(q.claimBackActor(due.clock.now));assertTrue(q.consumeBack(due.clock.now));assertTrue(q.backValid(due.clock.now));
+    }
+    @Test public void dayChangeOrCleanupLossDuringTheDwellPreventsBack()throws Exception{
+        for(boolean changedDay:new boolean[]{true,false}){
+            var r=new Rig();r.dayChangesDuringWait=changedDay;r.cleanupLostDuringWait=!changedDay;
+            var p=r.permit(LiveRewardsTypes.Kind.DAILY);var tap=r.tap(p);r.forbidPageReads=true;
+            assertFalse(r.input.returnAfterTap(p,tap).commandConfirmed());assertEquals(0,r.backs);assertEquals(0,r.visits);
+        }
+    }
+    @Test public void finalCancelAndDisplayRotationStillPreventDispatch()throws Exception{
+        for(boolean rotation:new boolean[]{true,false}){
+            var r=new Rig();r.backRotationChanged=rotation;r.cancelAtBackFinal=!rotation;
+            var p=r.permit(LiveRewardsTypes.Kind.DAILY);var tap=r.tap(p);r.forbidPageReads=true;
+            var returned=r.input.returnAfterTap(p,tap);assertFalse(returned.commandConfirmed());assertFalse(returned.backAttempted());assertEquals(0,r.backs);
+        }
+    }
+    @Test public void interruptedThreadCannotBackEvenIfFiveSecondsAlreadyElapsed()throws Exception{
+        var r=new Rig();var p=r.permit(LiveRewardsTypes.Kind.MORE);var tap=r.tap(p);r.clock.now+=5_000;
+        Thread.currentThread().interrupt();
+        try{assertFalse(r.input.returnAfterTap(p,tap).commandConfirmed());assertEquals(0,r.backs);}
+        finally{Thread.interrupted();}
+    }
+    @Test public void backCleanupUnknownStopsWithoutRepeatingOrCallingPages()throws Exception{
+        var r=new Rig();r.backCloseFailure=true;var p=r.permit(LiveRewardsTypes.Kind.DAILY);var tap=r.tap(p);r.forbidPageReads=true;
+        var returned=r.input.returnAfterTap(p,tap);assertFalse(returned.commandConfirmed());assertTrue(returned.backAttempted());assertFalse(returned.knownClean());
+        assertFalse(r.input.knownClean());assertEquals(1,r.backs);assertFalse(r.input.returnAfterTap(p,tap).backAttempted());assertEquals(1,r.backs);
+    }
+    @Test public void backCommandConfirmationDoesNotAssertThatThePageReturned()throws Exception{
+        var r=new Rig();r.backStaysChild=true;var p=r.permit(LiveRewardsTypes.Kind.DAILY);var tap=r.tap(p);r.forbidPageReads=true;
+        var returned=r.input.returnAfterTap(p,tap);assertTrue(returned.commandConfirmed());assertNull(returned.source());assertEquals(1,r.backs);
+        assertEquals(0,r.visits);assertEquals(0,r.pages);
+    }
+    @Test public void mismatchedReceiptAndExpiredRunCannotBack()throws Exception{
+        var r=new Rig();var p=r.permit(LiveRewardsTypes.Kind.DAILY);var tap=r.tap(p);var q=r.permit(LiveRewardsTypes.Kind.MORE);
+        assertFalse(r.input.returnAfterTap(q,tap).commandConfirmed());assertEquals(0,r.backs);
+        r.clock.now=r.authority.deadline();assertFalse(r.input.returnAfterTap(p,tap).commandConfirmed());assertEquals(0,r.backs);
+    }
+    @Test public void aDelayedCallerUsesTheSealedSuccessfulCommandTimeWithoutAnotherDwell()throws Exception{
+        var r=new Rig();var p=r.permit(LiveRewardsTypes.Kind.DAILY);var tap=r.tap(p);
+        r.clock.now=tap.successfulElapsed()+20_000;r.forbidPageReads=true;
+        var result=r.input.returnAfterTap(p,tap);assertTrue(result.commandConfirmed());assertEquals(0,r.pauses);
+        assertEquals(tap.successfulElapsed()+20_000,r.backAt);assertEquals(tap.successfulElapsed(),p.successfulTapElapsed());
     }
     @Test public void oldProcessSpentObjectsAreNeitherResetNorReplaced()throws Exception{
         var tapField=ReviewShizukuTapActor.class.getDeclaredField("PROCESS_SPENT");tapField.setAccessible(true);

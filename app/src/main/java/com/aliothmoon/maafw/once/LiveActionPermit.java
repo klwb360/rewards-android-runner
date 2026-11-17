@@ -4,7 +4,7 @@ import java.io.IOException;
 
 /** A current native BEFORE observation rebound to one run/task and its durable pending record. */
 final class LiveActionPermit {
-    static final long RETURN_DELAY_MILLIS=3_000L;
+    static final long RETURN_DELAY_MILLIS=5_000L;
     private final LiveRunAuthority.CardScope scope;
     private final LiveRewardsTypes.Observation before;
     private final LiveRewardsLedger ledger;
