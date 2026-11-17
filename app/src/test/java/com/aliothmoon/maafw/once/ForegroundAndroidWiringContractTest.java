@@ -16,7 +16,7 @@ public final class ForegroundAndroidWiringContractTest {
         throw new IllegalStateException("Project source root required for wiring contract");
     }
     private static String source(String name)throws Exception{return Files.readString(ROOT.resolve("app/src/main/java/com/aliothmoon/maafw/once/"+name));}
-    @Test public void afterServiceIsPrivateSameProcessAndAddsNoPermission()throws Exception{
+    @Test public void afterServiceStaysPrivateWithOnlyApprovedForegroundPermissions()throws Exception{
         var f=DocumentBuilderFactory.newInstance();f.setNamespaceAware(true);
         var doc=f.newDocumentBuilder().parse(ROOT.resolve("capture-review/src/main/AndroidManifest.xml").toFile());
         String android="http://schemas.android.com/apk/res/android";int found=0;
@@ -32,6 +32,7 @@ public final class ForegroundAndroidWiringContractTest {
         var permissions=new java.util.HashSet<String>();var nodes=doc.getElementsByTagName("uses-permission");
         for(int i=0;i<nodes.getLength();i++){String name=((org.w3c.dom.Element)nodes.item(i)).getAttributeNS(android,"name");if(!name.isEmpty())permissions.add(name);}
         assertEquals(java.util.Set.of("moe.shizuku.manager.permission.API_V23","android.permission.FOREGROUND_SERVICE",
+                "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
                 "android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"),permissions);
     }
     @Test public void runtimeRoutesBothTrustedAfterPhasesAndKeepsCheckinDisabled()throws Exception{

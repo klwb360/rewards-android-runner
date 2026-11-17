@@ -40,7 +40,11 @@ public class LiveRewardsEntryTest {
         String runtime=source("LiveRewardsRuntime");
         assertTrue(runtime.contains("VisibleCaptureAuthority.issueLiveRewardsApproval("));
         assertTrue(runtime.contains("activity.rootHiddenScalar()&&activity.hiddenWithSoleTask()"));
-        assertTrue(runtime.contains("if(!allResourcesClosed()){stage=\"CLEANUP_UNKNOWN\""));
+        assertTrue(runtime.contains("if(!nativeWorkClosed()){"));
+        assertTrue(runtime.contains("nativeWorkClosed()&&(foreground==null||foreground.destroyed())"));
+        String release=body(runtime,"private void finishAfterForeground()", "private void publishTerminalReports()");
+        int cleanGuard=release.indexOf("if(closed||!workerReturned||!allResourcesClosed())return;");
+        assertTrue(cleanGuard>=0);assertTrue(cleanGuard<release.indexOf("root.releaseIfClosed()"));
         assertTrue(runtime.contains("root.releaseIfClosed()"));
         assertTrue(runtime.contains("finally{recordTap(permit,result);}"));
         assertTrue(runtime.contains("finally{recordReturn(permit,receipt,result);}"));
