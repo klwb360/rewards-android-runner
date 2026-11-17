@@ -46,11 +46,12 @@ final class LiveRewardsRuntime {
     private Path artifacts;
     private Object artifactKey;
     private volatile String stage="NEW",failure="NONE";
-    private volatile boolean workerReturned,closed,released,constructionUnknown;
+    private volatile boolean workerReturned,closed,released,constructionUnknown,reportPublished,releaseReceiptPublished;
     private boolean notified;
     private int tapCalls,tapSuccesses,returnCalls,returnSuccesses,markedImages,cropImages,tapDispatches,backDispatches,backSuccesses;
     private boolean inputUnknown;
-    private long startedElapsed,finishedElapsed=-1;
+    private long startedElapsed,finishedElapsed=-1,releasedElapsed=-1;
+    private String reportSha256;
 
     private LiveRewardsRuntime(DormantCaptureConfirmationActivity activity,
             VisibleCaptureAuthority.LiveRewardsApproval approval,BingNavigationSnapshot.Shape shape){
@@ -110,7 +111,7 @@ final class LiveRewardsRuntime {
             navigation=new LiveRewardsNavigation(activity.getApplicationContext(),authority,activity.getTaskId(),
                     activity.getComponentName().flattenToString(),shape,this::hiddenCurrent);
             perception=new LiveRewardsPerception(activity.getApplicationContext(),authority,navigation,this::hiddenCurrent,this::publishArtifact,ledger);
-            input=new LiveRewardsInput(activity.getApplicationContext(),authority,navigation,perception::visitGuard,perception::rebind);
+            input=new LiveRewardsInput(activity.getApplicationContext(),authority,navigation,perception::rebind);
             coordinator=new LiveRewardsCoordinator(authority,ledger,new LiveRewardsCoordinator.Ports(){
                 public LiveRewardsTypes.Preflight preflight(LiveRunAuthority exact)throws Exception{
                     if(exact!=authority)throw new SecurityException("Exact run required");
@@ -122,13 +123,13 @@ final class LiveRewardsRuntime {
                 public LiveRewardsInput.TapReceipt tap(LiveActionPermit permit)throws Exception{
                     requireHidden();stage="TAP";tapCalls++;
                     LiveRewardsInput.TapReceipt result=null;
-                    try{result=input.tap(permit);if(result!=null&&result.success()&&result.knownClean())tapSuccesses++;return result;}
+                    try{result=input.tap(permit);return result;}
                     finally{recordTap(permit,result);}
                 }
                 public LiveRewardsInput.ReturnReceipt returnAfterTap(LiveActionPermit permit,LiveRewardsInput.TapReceipt receipt)throws Exception{
-                    requireHidden();stage="VISIT_AND_RETURN";returnCalls++;
+                    requireHidden();stage="WAIT_AND_RETURN";returnCalls++;
                     LiveRewardsInput.ReturnReceipt result=null;
-                    try{result=input.returnAfterTap(permit,receipt);if(result!=null&&result.ready()&&result.knownClean())returnSuccesses++;return result;}
+                    try{result=input.returnAfterTap(permit,receipt);if(result!=null&&result.commandConfirmed()&&result.knownClean())returnSuccesses++;return result;}
                     finally{recordReturn(permit,receipt,result);}
                 }
                 public void pause(long millis)throws InterruptedException{
@@ -148,7 +149,11 @@ final class LiveRewardsRuntime {
         }catch(Error unknown){failure="ERROR_UNKNOWN";constructionUnknown=true;stage="CLEANUP_UNKNOWN";latchCancel();}
         finally{
             finishedElapsed=SystemClock.elapsedRealtime();workerReturned=true;
-            try{if(artifacts!=null)writeFile(artifacts,"REPORT.json",reportJson().toString().getBytes(StandardCharsets.UTF_8));}
+            try{if(artifacts!=null){
+                byte[] bytes=reportJson().toString().getBytes(StandardCharsets.UTF_8);
+                verifyArtifactRoot();writeFile(artifacts,"REPORT.json",bytes);verifyArtifactRoot();
+                reportSha256=CardNativeMockReceipt.digest(bytes);reportPublished=true;
+            }}
             catch(Exception failed){failure="REPORT_PUBLICATION_FAILED";}
             closeOnOwner();
         }
@@ -167,7 +172,7 @@ final class LiveRewardsRuntime {
     private static String safeEnum(String value){return value!=null&&value.matches("[A-Z0-9_]{1,128}")?value:"UNQUALIFIED";}
     private void recordTap(LiveActionPermit permit,LiveRewardsInput.TapReceipt receipt)throws org.json.JSONException{
         var actor=receipt==null?null:receipt.actorResult();boolean invoked=actor!=null&&actor.invocationAttempted();
-        if(invoked)tapDispatches++;
+        if(invoked)tapDispatches++;if(actor!=null&&actor.commandExitZero())tapSuccesses++;
         inputUnknown|=receipt==null||!receipt.knownClean()||actor!=null&&actor.kind()==ReviewShizukuTapActor.Kind.DISPATCH_UNKNOWN;
         actions.add(new JSONObject().put("taskKey",permit.task().key()).put("action","TAP")
                 .put("invocationAttempted",invoked).put("invocationKnown",receipt!=null).put("commandExitZero",actor!=null&&actor.commandExitZero())
@@ -185,13 +190,16 @@ final class LiveRewardsRuntime {
         long decision=SystemClock.elapsedRealtime();
         actions.add(new JSONObject().put("taskKey",permit.task().key()).put("action","RETURN")
                 .put("invocationAttempted",invoked).put("invocationKnown",receipt!=null).put("commandExitZero",actor!=null&&actor.commandExitZero())
-                .put("knownClean",receipt!=null&&receipt.knownClean()).put("ready",receipt!=null&&receipt.ready())
+                .put("knownClean",receipt!=null&&receipt.knownClean()).put("backCommandConfirmed",receipt!=null&&receipt.commandConfirmed())
+                .put("reason",safeEnum(receipt==null?"NO_RETURN_RECEIPT":receipt.reason()))
+                .put("actorKind",actor==null?"NO_ACTOR_RESULT":actor.kind().name())
+                .put("actorReason",actor==null?"NO_ACTOR_RESULT":actor.reason().name())
                 .put("successfulTapElapsed",success).put("backGateElapsed",gate)
                 .put("returnDecisionElapsed",decision).put("decisionSinceSuccessfulTap",success>=0&&decision>=success?decision-success:-1)
                 .put("elapsedSinceSuccessfulTap",success>=0&&gate>=success?gate-success:-1));
-        if(receipt!=null&&receipt.ready()&&(success<0||decision<success||decision-success<3000))
+        if(receipt!=null&&receipt.commandConfirmed()&&(success<0||decision<success||decision-success<LiveRewardsInput.RETURN_DELAY_MS))
             throw new SecurityException("Early return decision rejected");
-        if(invoked&&(success<0||gate<success||gate-success<3000))
+        if(invoked&&(success<0||gate<success||gate-success<LiveRewardsInput.RETURN_DELAY_MS))
             throw new SecurityException("Early return rejected");
     }
     private JSONObject reportJson()throws org.json.JSONException{
@@ -206,8 +214,8 @@ final class LiveRewardsRuntime {
                 .put("tapCalls",tapCalls).put("tapCommandSuccesses",tapSuccesses).put("returnCalls",returnCalls)
                 .put("tapDispatchAttempts",tapDispatches).put("backDispatchAttempts",backDispatches).put("backCommandSuccesses",backSuccesses)
                 .put("inputOutcomeUnknown",inputUnknown)
-                .put("returnReady",returnSuccesses).put("captures",cropImages).put("markedImages",markedImages)
-                .put("startedElapsed",startedElapsed).put("finishedElapsed",finishedElapsed).put("minimumVisitDelayMs",3000)
+                .put("returnCommandConfirmed",returnSuccesses).put("captures",cropImages).put("markedImages",markedImages)
+                .put("startedElapsed",startedElapsed).put("finishedElapsed",finishedElapsed).put("minimumVisitDelayMs",LiveRewardsInput.RETURN_DELAY_MS)
                 .put("visitDelayStartsAt","SUCCESSFUL_TAP_COMMAND_RETURN").put("accountCreditVerified",false)
                 .put("rawTextIncluded",false).put("rawDataUploaded",false).put("oldRecordsReset",false)
                 .put("outcomes",outcomes).put("artifacts",artifactsIndex).put("actions",actionIndex);
@@ -287,17 +295,42 @@ final class LiveRewardsRuntime {
         if(!workerStarted.get()&&canceled.get()){workerReturned=true;stage="CANCELED";}
         if(closed||!workerReturned)return;
         if(!allResourcesClosed()){stage="CLEANUP_UNKNOWN";notifyFinished();return;}
-        closed=true;if(root!=null)root.releaseIfClosed();released=true;loop.quitSafely();notifyFinished();
+        closed=true;
+        try{
+            if(root==null)throw new SecurityException("Exact live root required");
+            root.releaseIfClosed();
+            if(!root.released())throw new SecurityException("Root release unconfirmed");
+        }catch(RuntimeException unknown){constructionUnknown=true;failure="ROOT_RELEASE_UNCONFIRMED";stage="CLEANUP_UNKNOWN";notifyFinished();return;}
+        released=true;releasedElapsed=SystemClock.elapsedRealtime();loop.quitSafely();
+        try{writeReleaseReceipt();releaseReceiptPublished=true;}
+        catch(Exception failed){failure="RELEASE_PUBLICATION_FAILED";}
+        notifyFinished();
+    }
+    private boolean releaseConfirmed(){return workerReturned&&closed&&released&&root!=null&&root.released()&&allResourcesClosed();}
+    private void writeReleaseReceipt()throws Exception{
+        if(!releaseConfirmed()||!reportPublished||reportSha256==null||!reportSha256.matches("[a-f0-9]{64}")
+                ||finishedElapsed<0||releasedElapsed<finishedElapsed)
+            throw new SecurityException("Released terminal report required");
+        verifyArtifactRoot();
+        JSONObject receipt=new JSONObject().put("schemaVersion",1).put("profile",PROFILE).put("runId",runId).put("day",authority.day())
+                .put("terminal",true).put("released",true).put("rootEpochReleased",true).put("cleanup","CONFIRMED")
+                .put("reportFile","REPORT.json").put("reportSha256",reportSha256)
+                .put("reportFinishedElapsed",finishedElapsed).put("releasedElapsed",releasedElapsed).put("failure",safeEnum(failure))
+                .put("minimumVisitDelayMs",LiveRewardsInput.RETURN_DELAY_MS)
+                .put("rawTextIncluded",false).put("rawDataUploaded",false).put("oldRecordsReset",false);
+        if(!releaseConfirmed())throw new SecurityException("Release proof changed");
+        writeFile(artifacts,"RELEASE.json",receipt.toString().getBytes(StandardCharsets.UTF_8));verifyArtifactRoot();
     }
     private void notifyFinished(){if(notified)return;notified=true;activity.liveRewardsFinished(this,fixedSummary());}
     boolean finishedAndReleased(){return workerReturned&&closed&&released;}
     private String perceptionState(){return perception==null?"NOT_CREATED":safeEnum(perception.safeState());}
     String fixedSummary(){return "profile="+PROFILE+" stage="+stage+" terminal="+workerReturned+" released="+released
             +" cleanup="+(allResourcesClosed()?"CONFIRMED":"UNKNOWN")+" failure="+safeEnum(failure)
+            +" reportPublished="+reportPublished+" releaseReceiptPublished="+releaseReceiptPublished
             +" perceptionState="+perceptionState()
-            +" tapCalls="+tapCalls+" tapCommandSuccesses="+tapSuccesses+" returnCalls="+returnCalls+" returnReady="+returnSuccesses
+            +" tapCalls="+tapCalls+" tapCommandSuccesses="+tapSuccesses+" returnCalls="+returnCalls+" returnCommandConfirmed="+returnSuccesses
             +" tapDispatchAttempts="+tapDispatches+" backDispatchAttempts="+backDispatches+" backCommandSuccesses="+backSuccesses+" inputOutcomeUnknown="+inputUnknown
-            +" captures="+cropImages+" marks="+markedImages+" fullScreenCaptures=0 minimumVisitDelayMs=3000"
+            +" captures="+cropImages+" marks="+markedImages+" fullScreenCaptures=0 minimumVisitDelayMs="+LiveRewardsInput.RETURN_DELAY_MS
             +" waitFrom=SUCCESSFUL_TAP_COMMAND_RETURN accountCreditVerified=false rawDataUploaded=false oldRecordsReset=false artifacts="+runId
             +(summary==null?"":" "+summary.fixedSummary().substring(("profile="+PROFILE+" ").length()));}
 }

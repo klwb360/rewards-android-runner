@@ -14,9 +14,11 @@ public class LiveRewardsCoordinatorTest {
         final List<LiveRewardsTypes.Task> tasks;
         final List<LiveRewardsTypes.Kind> reports=new ArrayList<>();
         final List<LiveRewardsTypes.Kind> observedKinds=new ArrayList<>(),tappedKinds=new ArrayList<>();
-        boolean completeAfter=true,progress,autoReturned,unknownBefore,unknownAfter,tapFailure,returnFailure,
+        boolean completeAfter=true,progress,unknownBefore,unknownAfter,tapFailure,returnFailure,
                 lateAfter,compact,ambiguousAfter,regionComplete,cancelAfterTap;
         boolean cleanUiTimeout,cleanCropTimeout;
+        boolean replayPriorReturn;
+        LiveRewardsInput.ReturnReceipt previousReturn;
         LiveRunAuthority.CardScope expiredScope;
         LiveRunAuthority.UiPermit retiredUi;
         LiveRunAuthority.CropPermit retiredCrop;
@@ -69,10 +71,12 @@ public class LiveRewardsCoordinatorTest {
         }
         public LiveRewardsInput.ReturnReceipt returnAfterTap(LiveActionPermit permit,LiveRewardsInput.TapReceipt tapped)throws Exception{
             returnCalls++;assertNotEquals(LiveRewardsTypes.Kind.CHECK_IN,permit.kind());
-            long due=tapped.successfulElapsed()+3_000;assertEquals(permit.successfulTapElapsed(),tapped.successfulElapsed());
+            long due=tapped.successfulElapsed()+LiveRewardsInput.RETURN_DELAY_MS;assertEquals(permit.successfulTapElapsed(),tapped.successfulElapsed());
             f.clock.now=Math.max(f.clock.now,due);
-            if(!autoReturned){assertTrue(permit.claimBackActor(f.clock.now));assertTrue(permit.consumeBack(f.clock.now));assertTrue(permit.backValid(f.clock.now));}
-            return LiveRewardsInput.ReturnReceipt.synthetic(permit,!returnFailure,true,returnFailure?null:f.source());
+            assertTrue(permit.claimBackActor(f.clock.now));assertTrue(permit.consumeBack(f.clock.now));assertTrue(permit.backValid(f.clock.now));
+            var receipt=LiveRewardsInput.ReturnReceipt.synthetic(permit,!returnFailure,true,null);
+            if(replayPriorReturn&&previousReturn!=null)return previousReturn;
+            previousReturn=receipt;return receipt;
         }
         public void report(LiveRewardsTypes.Task task,LiveRewardsTypes.Outcome outcome,String reason,
                 LiveRewardsTypes.Observation before,LiveRewardsTypes.Observation after){
@@ -137,9 +141,9 @@ public class LiveRewardsCoordinatorTest {
         rig.regionComplete=true;var result=rig.run();assertEquals(0,rig.tapCalls);assertEquals(1,rig.observeCalls);
         assertEquals(Integer.valueOf(2),result.counts().get(LiveRewardsTypes.Outcome.REGION_COMPLETE_SKIP));
     }
-    @Test public void automaticReturnToRewardsDoesNotSpendBack()throws Exception{
-        var rig=new Rig(List.of(more("M")));rig.autoReturned=true;var result=rig.run();assertFalse(result.stopped());
-        assertEquals(0,result.backs());assertEquals(1,result.taps());
+    @Test public void backCommandWithoutAPageReceiptStillRequiresFreshAfterObservation()throws Exception{
+        var rig=new Rig(List.of(more("M")));var result=rig.run();assertFalse(result.stopped());
+        assertEquals(1,result.backs());assertEquals(1,result.taps());assertEquals(1,rig.afterCalls);
     }
     @Test public void unknownSourceAndUnconfirmedInputStopTheWholeRun()throws Exception{
         var unknown=new Rig(List.of(daily("D"),more("M")));unknown.unknownBefore=true;
@@ -211,5 +215,28 @@ public class LiveRewardsCoordinatorTest {
             assertEquals(List.of(LiveRewardsTypes.Kind.DAILY,LiveRewardsTypes.Kind.MORE),rig.reports);
             assertEquals(2,rig.tapCalls);assertEquals(2,rig.returnCalls);assertEquals(2,rig.afterCalls);
         }
+    }
+    @Test public void resumedCheckInAndDailyAttemptsStaySpentWhileFreshDailyAndMoreContinue()throws Exception{
+        var sign=new LiveRewardsTypes.Task(LiveRewardsTypes.Kind.CHECK_IN,LiveCardIdentity.hashText("CHECK_IN"),0,
+                LiveRewardsTypes.hash("SIGN_TITLE"),5,true,false,2);
+        var attemptedDaily=daily("PRIOR_DAILY");var prior=LiveRewardsLedger.synthetic(LiveCoreFixture.DAY,LiveCoreFixture.RUN);
+        for(var t:List.of(sign,attemptedDaily)){
+            prior.begin(t);prior.burnTap(t);prior.finish(t,t.kind()==LiveRewardsTypes.Kind.CHECK_IN?LiveRewardsTypes.Outcome.UNCONFIRMED:LiveRewardsTypes.Outcome.STOPPED);
+        }
+        var saved=journalSnapshot(prior);var resumed=prior.syntheticNextRun("00000000-0000-4000-8000-000000000002");
+        var signSeed=LivePreflightHistory.checkInSeed();var dailySeed=LivePreflightHistory.unreadable(attemptedDaily);
+        var next=LiveCoreFixture.task(LiveRewardsTypes.Kind.DAILY,2,"NEXT_DAILY");
+        var rig=new Rig(List.of(signSeed,dailySeed,next,more("NEXT_MORE")),resumed);var result=rig.run();
+        assertFalse(result.reason(),result.stopped());assertEquals(Integer.valueOf(2),result.counts().get(LiveRewardsTypes.Outcome.ALREADY_ATTEMPTED_SKIP));
+        assertEquals(Integer.valueOf(2),result.counts().get(LiveRewardsTypes.Outcome.OBSERVED_COMPLETE));
+        assertEquals(2,rig.tapCalls);assertEquals(2,rig.returnCalls);assertEquals(4,rig.observeCalls);assertFalse(rig.observedKinds.contains(LiveRewardsTypes.Kind.CHECK_IN));
+        assertEquals(List.of(LiveRewardsTypes.Kind.DAILY,LiveRewardsTypes.Kind.MORE),rig.tappedKinds);
+        assertTrue(journalSnapshot(prior).entrySet().containsAll(saved.entrySet()));
+    }
+    @Test public void anotherCardsBackReceiptCannotAuthorizeAfterObservation()throws Exception{
+        var rig=new Rig(List.of(daily("D"),more("M")));rig.replayPriorReturn=true;
+        var result=rig.run();assertTrue(result.stopped());assertEquals("RETURN_UNCONFIRMED",result.reason());
+        assertEquals(2,rig.tapCalls);assertEquals(2,rig.returnCalls);assertEquals(1,rig.afterCalls);
+        assertEquals(Integer.valueOf(1),result.counts().get(LiveRewardsTypes.Outcome.OBSERVED_COMPLETE));
     }
 }

@@ -97,8 +97,8 @@ final class LiveRewardsCoordinator {
                 if(task.kind()!=LiveRewardsTypes.Kind.CHECK_IN){
                     final LiveRewardsInput.ReturnReceipt returned;
                     try{returned=ports.returnAfterTap(permit,tapped);}finally{if(permit.backAttempted())backs++;}
-                    if(returned==null||!returned.ready()||!returned.knownClean()||!ports.knownClean()
-                            ||returned.source()==null||!permit.matchesBeforeSource(returned.source()))throw stop("RETURN_UNCONFIRMED");
+                    if(returned==null||!returned.commandConfirmed()||!returned.matchesPermit(permit)
+                            ||!permit.backAttempted()||!returned.knownClean()||!ports.knownClean())throw stop("RETURN_UNCONFIRMED");
                 }
                 LiveRewardsTypes.Outcome outcome=LiveRewardsTypes.Outcome.UNCONFIRMED;String outcomeReason="TASK_NOT_CONFIRMED";
                 long afterStarted=authority.now(),previousFinished=-1;scope.startAfterWindow(afterStarted);

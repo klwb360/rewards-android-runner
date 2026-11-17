@@ -41,10 +41,10 @@ public class LiveRunAuthorityTest {
         assertTrue(p.claimTapActor(f.clock.now));assertTrue(p.consumeTap(f.clock.now));assertTrue(p.tapValid(f.clock.now));
         f.clock.now=1250;p.tapSucceeded(f.clock.now);assertFalse(p.tapValid(f.clock.now));
         try{p.tapSucceeded(1300);fail();}catch(SecurityException expected){assertEquals(1250,p.successfulTapElapsed());}
-        f.clock.now=4249;assertFalse(p.claimBackActor(f.clock.now));
-        f.clock.now=4250;assertFalse(p.claimBackActor(f.clock.now));assertFalse(p.consumeBack(f.clock.now));assertFalse(p.backValid(f.clock.now));
+        f.clock.now=6249;assertFalse(p.claimBackActor(f.clock.now));
+        f.clock.now=6250;assertFalse(p.claimBackActor(f.clock.now));assertFalse(p.consumeBack(f.clock.now));assertFalse(p.backValid(f.clock.now));
     }
-    @Test public void exactThreeSecondsAllowsOneDurableReturnWithoutExpiredBeforeFrame()throws Exception{
+    @Test public void dueReturnAllowsOneDurableBackEvenAfterTheBeforeFrameExpires()throws Exception{
         var f=new LiveCoreFixture();var p=f.permit(LiveCoreFixture.task(LiveRewardsTypes.Kind.MORE,1,"A"));
         assertTrue(p.claimTapActor(f.clock.now));assertTrue(p.consumeTap(f.clock.now));p.tapSucceeded(f.clock.now);
         f.clock.now=20_000;assertFalse(p.before().fresh(f.clock.now));assertTrue(p.current(f.clock.now));
@@ -54,7 +54,7 @@ public class LiveRunAuthorityTest {
     @Test public void signInCanNeverIssueOrConsumeBack()throws Exception{
         var f=new LiveCoreFixture();var p=f.permit(LiveCoreFixture.task(LiveRewardsTypes.Kind.CHECK_IN,0,"SIGN"));
         assertTrue(p.claimTapActor(f.clock.now));assertTrue(p.consumeTap(f.clock.now));p.tapSucceeded(f.clock.now);
-        f.clock.now+=3000;assertFalse(p.claimBackActor(f.clock.now));assertFalse(p.consumeBack(f.clock.now));assertFalse(p.backValid(f.clock.now));
+        f.clock.now+=5000;assertFalse(p.claimBackActor(f.clock.now));assertFalse(p.consumeBack(f.clock.now));assertFalse(p.backValid(f.clock.now));
     }
     @Test public void preflightCropNeverCreatesAnActionPermit()throws Exception{
         var f=new LiveCoreFixture();f.attach();var t=LiveCoreFixture.task(LiveRewardsTypes.Kind.DAILY,1,"A");
