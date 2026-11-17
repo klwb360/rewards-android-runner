@@ -32,6 +32,8 @@ final class LiveRewardsPerception {
     private boolean nativeClean=true,swipeClean=true;
     private volatile String safeState="NEW";
     private volatile LiveUiDiagnostic lastUiDiagnostic;
+    private volatile LiveReadPreparation.Snapshot lastReadPreparation;
+    private int readAttemptIndex;
     LiveRewardsPerception(Context context,LiveRunAuthority authority,LiveRewardsNavigation navigation,
             BooleanSupplier hiddenCurrent,ArtifactSink sink,LiveRewardsLedger ledger){
         if(context==null||authority==null||!authority.live()||navigation==null||hiddenCurrent==null||sink==null||ledger==null||!ledger.production()
@@ -45,6 +47,14 @@ final class LiveRewardsPerception {
     String safeState(){return safeState;}
     JSONObject lastUiDiagnostic()throws org.json.JSONException{
         var exact=lastUiDiagnostic;return exact==null?null:new JSONObject(exact.json());
+    }
+    JSONObject lastReadPreparation()throws org.json.JSONException{
+        try{var exact=lastReadPreparation;return exact==null?null:new JSONObject(exact.json());}
+        catch(Throwable diagnosticUnavailable){return null;}
+    }
+    private LiveReadPreparation preparation(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Phase phase,LiveRunAuthority.UiPermit permit){
+        try{return new LiveReadPreparation(++readAttemptIndex,scope.task().kind().name(),phase==null?"UNKNOWN":phase.name(),permit.index(),scope.preflight(),scope.scan());}
+        catch(Throwable diagnosticUnavailable){return null;}
     }
     private void state(String fixed){safeState=fixed!=null&&fixed.matches("[A-Z0-9_]{1,128}")?fixed:"INVALID_FIXED_STATE";}
     private static String safeNativeReason(String reason){return reason!=null&&reason.matches("[A-Z][A-Z0-9_]{0,79}")?reason:"INVALID_NATIVE_REASON";}
@@ -184,14 +194,19 @@ final class LiveRewardsPerception {
     }
     private static long elapsed(long start){return start<0?0:Math.max(0,now()-start);}
     private Frame readUi(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Phase phase)throws Exception{
-        state("UI_SOURCE_BEFORE");
+        lastReadPreparation=null;state("UI_SOURCE_BEFORE");
         require(scope);timeBudget(scope,phase);var permit=scope.claimUi(new Object(),now());
         BingNavigationSnapshot.Ready[] before={null};long[] beforeAt={-1};
+        var preparation=preparation(scope,phase,permit);
         var read=AndroidLiveUiReader.read(context,nonce(),Math.min(permit.deadline(),scope.observationDeadline(phase)),
                 ()->current(scope),()->{
-                    before[0]=navigation.template(()->permit.current(now())&&current(scope));beforeAt[0]=now();
-                    return permit.consume(now())&&permit.current(now())&&current(scope);
-                },permit);
+                    before[0]=navigation.template(()->permit.current(now())&&current(scope));beforeAt[0]=now();if(preparation!=null)preparation.sourceGateReturned();
+                    if(preparation!=null)preparation.enter(LiveReadPreparation.Stage.UI_READ_BURN);
+                    boolean consumed=permit.consume(now());if(preparation!=null)preparation.uiReadBurnReturned(consumed);
+                    if(consumed&&preparation!=null)preparation.enter(LiveReadPreparation.Stage.SOURCE_CURRENT);
+                    return consumed&&permit.current(now())&&current(scope);
+                },permit,preparation);
+        lastReadPreparation=read.preparation();
         var report=read.protocolReport();
         var diagnostic=LiveUiDiagnostic.from(read);lastUiDiagnostic=diagnostic;state(diagnostic.safeState());
         if(!read.knownClean())throw new SecurityException("Live UI cleanup unconfirmed");
@@ -331,16 +346,21 @@ final class LiveRewardsPerception {
     }
     /** Called only after the three-second passive wait. The helper itself is UI-read-only. */
     LiveVisitGuard.Report visitGuard(LiveActionPermit action)throws Exception{
-        state("VISIT_BEGIN");
+        lastReadPreparation=null;state("VISIT_BEGIN");
         if(action==null||action.scope().run()!=authority||!action.live()||action.kind()==LiveRewardsTypes.Kind.CHECK_IN
                 ||action.successfulTapElapsed()<0||now()-action.successfulTapElapsed()<3_000)throw new SecurityException("Due bound visit required");
         var scope=action.scope();require(scope);var permit=scope.claimUi(new Object(),now());
         BingNavigationSnapshot.LiveVisitSource[] before={null};long[] beforeAt={-1};
+        var preparation=preparation(scope,null,permit);
         var read=AndroidLiveUiReader.readVisit(context,nonce(),permit.deadline(),()->current(scope),()->{
             var visit=navigation.visit(action.source());before[0]=visit.source();beforeAt[0]=now();
             if(before[0]==null||!before[0].fresh(beforeAt[0]))throw new SecurityException("Bound visit source unavailable");
-            return permit.consume(now())&&permit.current(now())&&current(scope);
-        },permit);
+            if(preparation!=null)preparation.sourceGateReturned();if(preparation!=null)preparation.enter(LiveReadPreparation.Stage.UI_READ_BURN);
+            boolean consumed=permit.consume(now());if(preparation!=null)preparation.uiReadBurnReturned(consumed);
+            if(consumed&&preparation!=null)preparation.enter(LiveReadPreparation.Stage.SOURCE_CURRENT);
+            return consumed&&permit.current(now())&&current(scope);
+        },permit,preparation);
+        lastReadPreparation=read.preparation();
         var report=read.visitReport();
         state("VISIT_"+read.fixedStatus().name()+"_"+(report==null?"NONE":report.source().reason().name()+"_"+report.hint().name()));
         if(!read.knownClean()||read.fixedStatus()!=AndroidLiveUiReader.FixedStatus.READ_COMPLETE||report==null||!report.source().qualified())

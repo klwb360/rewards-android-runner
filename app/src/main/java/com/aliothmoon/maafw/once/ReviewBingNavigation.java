@@ -32,6 +32,9 @@ final class ReviewBingNavigation {
     private LiveRunAuthority liveRunAuthority;
     private java.util.function.BooleanSupplier liveRunHidden;
     private int liveRunPairs;
+    private volatile LiveNavigationDiagnostic lastLiveNavigationDiagnostic;
+    private LiveNavigationDiagnostic.ExceptionKind lastFixedException=LiveNavigationDiagnostic.ExceptionKind.NOT_OBSERVED;
+    LiveNavigationDiagnostic lastLiveNavigationDiagnostic(){return lastLiveNavigationDiagnostic;}
     enum FixedStatus { NOT_INVOKED, AUTHORITY_REJECTED, PROCESS_NULL, STREAM_MISSING, BUFFER_LIMIT, READ_TIMEOUT, EXIT_NONZERO, IO_UNKNOWN, READ_COMPLETE, CLEANUP_UNKNOWN }
     enum PairGate { NOT_INVOKED, PERMIT_REJECTED, AUTHORITY_REJECTED, BUDGET_REJECTED, WINDOWS_READ, ACTIVITIES_READ, POST_AUTHORITY, PARSED }
     record FixedRead(FixedStatus status,int bytes,boolean invoked,boolean exitObserved,int exitCode,boolean quiet,boolean knownClean) {
@@ -45,7 +48,8 @@ final class ReviewBingNavigation {
         String summary(){return "navigationReadPair="+pair+" readGate="+gate+" windowsRead="+windows+" activitiesRead="+activities
             +" parserFirstGate="+parserGate+" strictMetadataGate="+readOnlyGate+" metadataKnownClean="+knownClean+" topResumedDiagnostic="+top;}
     }
-    private volatile FixedRead lastFixed=FixedRead.notRun();
+    private final FixedRead diagnosticNotRun=FixedRead.notRun();
+    private volatile FixedRead lastFixed=diagnosticNotRun;
     private volatile ReadDiagnostic lastDiagnostic=new ReadDiagnostic(0,PairGate.NOT_INVOKED,FixedRead.notRun(),FixedRead.notRun(),
         BingNavigationSnapshot.FirstGate.NOT_APPLIED,BingNavigationSnapshot.ReadOnlyGate.NOT_APPLIED,true);
     private volatile BingNavigationSnapshot.RecoveryResult lastRecovery;
@@ -158,25 +162,55 @@ final class ReviewBingNavigation {
     }
     record LiveRead(BingNavigationSnapshot.Result template,BingNavigationSnapshot.LiveVisitResult visit,boolean clean){ }
     LiveRead readLiveRun(BingNavigationSnapshot.Shape shape,BingNavigationSnapshot.Ready original){
+        lastLiveNavigationDiagnostic=null;
+        long diagnosticStarted=LiveNavigationDiagnostic.clock();
+        var diagnostic=LiveNavigationDiagnostic.begin(original==null?LiveNavigationDiagnostic.Call.TEMPLATE:LiveNavigationDiagnostic.Call.VISIT);
         byte[] windows=null,activities=null;
         BingNavigationSnapshot.Result template=BingNavigationSnapshot.Result.unknown();
         BingNavigationSnapshot.LiveVisitResult visit=BingNavigationSnapshot.LiveVisitResult.unknown(BingNavigationSnapshot.LiveVisitGate.INPUT);
         try{
-            if(liveRunAuthority==null||!liveRunCurrent()||++liveRunPairs>4096||!authorityMatches(shape))return new LiveRead(template,visit,knownClean());
-            long lower=SystemClock.elapsedRealtime();windows=readFixed(true);
+            LiveNavigationDiagnostic.metadataStarted(diagnostic,-1);
+            LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.AUTHORITY_REJECTED);
+            if(liveRunAuthority==null||!liveRunCurrent())return new LiveRead(template,visit,knownClean());
+            LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.BUDGET_REJECTED);
+            LiveNavigationDiagnostic.metadataStarted(diagnostic,++liveRunPairs);
+            if(liveRunPairs>4096)return new LiveRead(template,visit,knownClean());
+            LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.AUTHORITY_REJECTED);
+            if(!authorityMatches(shape))return new LiveRead(template,visit,knownClean());
+            LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.WINDOWS_READ);
+            long lower=SystemClock.elapsedRealtime();
+            try{windows=readFixed(true);}
+            finally{try{LiveNavigationDiagnostic.fixed(diagnostic,true,lastFixed,lastFixedException,LiveNavigationDiagnostic.elapsed(lower,LiveNavigationDiagnostic.clock()));}catch(Throwable ignored){}}
             if(windows==null||!liveRunCurrent()||!authorityMatches(shape))return new LiveRead(template,visit,knownClean());
-            activities=readFixed(false);
+            LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.ACTIVITIES_READ);
+            long activitiesStarted=LiveNavigationDiagnostic.clock();
+            try{activities=readFixed(false);}
+            finally{try{LiveNavigationDiagnostic.fixed(diagnostic,false,lastFixed,lastFixedException,LiveNavigationDiagnostic.elapsed(activitiesStarted,LiveNavigationDiagnostic.clock()));}catch(Throwable ignored){}}
             if(activities==null||!liveRunCurrent()||!authorityMatches(shape)||!knownClean())return new LiveRead(template,visit,knownClean());
             String w=new String(windows,java.nio.charset.StandardCharsets.UTF_8),a=new String(activities,java.nio.charset.StandardCharsets.UTF_8);
             long observed=SystemClock.elapsedRealtime();var profile=new BingNavigationSnapshot.Profile(bingUid,systemUiUid,shape);
             if(original==null){
                 var parsed=BingNavigationSnapshot.parseCurrentTemplate(w,a,profile,readOnlyGuard,lower,observed);
                 template=new BingNavigationSnapshot.Result(parsed.status(),parsed.source()==null?null:parsed.source().ready(),parsed.readOnlyGate(),parsed.firstGate());
-            }else visit=BingNavigationSnapshot.parseLiveVisit(w,a,profile,readOnlyGuard,original,lower,observed);
+                LiveNavigationDiagnostic.parser(diagnostic,template);
+            }else{
+                visit=BingNavigationSnapshot.parseLiveVisit(w,a,profile,readOnlyGuard,original,lower,observed);
+                LiveNavigationDiagnostic.visitParser(diagnostic,visit);
+            }
+            LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.POST_AUTHORITY);
             if(!liveRunCurrent()||!authorityMatches(shape))return new LiveRead(BingNavigationSnapshot.Result.unknown(),
                     BingNavigationSnapshot.LiveVisitResult.unknown(BingNavigationSnapshot.LiveVisitGate.STRICT_SOURCE),knownClean());
+            LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.PARSED);
             return new LiveRead(template,visit,knownClean());
-        }finally{if(windows!=null)Arrays.fill(windows,(byte)0);if(activities!=null)Arrays.fill(activities,(byte)0);}
+        }catch(RuntimeException|Error failure){LiveNavigationDiagnostic.metadataException(diagnostic,failure);throw failure;}
+        finally{
+            if(windows!=null)Arrays.fill(windows,(byte)0);if(activities!=null)Arrays.fill(activities,(byte)0);
+            try{
+                long elapsed=LiveNavigationDiagnostic.elapsed(diagnosticStarted,LiveNavigationDiagnostic.clock());
+                LiveNavigationDiagnostic.metadataElapsed(diagnostic,elapsed);
+                lastLiveNavigationDiagnostic=LiveNavigationDiagnostic.finish(diagnostic,elapsed);
+            }catch(Throwable ignored){lastLiveNavigationDiagnostic=null;}
+        }
     }
     private boolean process(){return Looper.myLooper()!=Looper.getMainLooper()&&android.os.Process.myUid()>=10000
         &&"com.aliothmoon.maafw.productrewardsworking.capturereview".equals(context.getPackageName())
@@ -390,6 +424,8 @@ final class ReviewBingNavigation {
             :new String[]{"/system/bin/dumpsys","activity","activities"});
     }
     private byte[] readFixedCommand(String[] command){
+        lastFixed=diagnosticNotRun;
+        lastFixedException=LiveNavigationDiagnostic.ExceptionKind.NONE;
         byte[] bytes=new byte[262144];IRemoteProcess process=null;InputStream input=null;
         ParcelFileDescriptor stdout=null,stdin=null,stderr=null;boolean invoked=false,quiet=false,clean=false,exitObserved=false;
         int count=0,exit=-1;FixedStatus status=FixedStatus.AUTHORITY_REJECTED;
@@ -420,8 +456,14 @@ final class ReviewBingNavigation {
             if(!liveRunCurrent()){status=FixedStatus.READ_TIMEOUT;throw new IllegalStateException();}
             input.close();input=null;if(stdin!=null){stdin.close();stdin=null;}if(stderr!=null){stderr.close();stderr=null;}clean=true;
             status=FixedStatus.READ_COMPLETE;return Arrays.copyOf(bytes,count);
-        }catch(Exception failure){if(failure instanceof InterruptedException)Thread.currentThread().interrupt();
+        }catch(Exception failure){
+            try{lastFixedException=LiveNavigationDiagnostic.kind(failure);}catch(Throwable ignored){lastFixedException=LiveNavigationDiagnostic.ExceptionKind.NOT_OBSERVED;}
+            if(failure instanceof InterruptedException)Thread.currentThread().interrupt();
             if(status==FixedStatus.AUTHORITY_REJECTED||status==FixedStatus.READ_COMPLETE)status=FixedStatus.IO_UNKNOWN;return null;}
+        catch(Error failure){
+            try{lastFixedException=LiveNavigationDiagnostic.kind(failure);}catch(Throwable ignored){lastFixedException=LiveNavigationDiagnostic.ExceptionKind.NOT_OBSERVED;}
+            throw failure;
+        }
         finally{
             Arrays.fill(bytes,(byte)0);
             if(invoked&&!clean){

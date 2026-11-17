@@ -207,9 +207,13 @@ final class LiveRewardsRuntime {
         JSONArray artifactsIndex=new JSONArray();for(JSONObject file:files)artifactsIndex.put(file);
         JSONArray actionIndex=new JSONArray();for(JSONObject action:actions)actionIndex.put(action);
         JSONObject uiDiagnostic=perception==null?null:perception.lastUiDiagnostic();
+        JSONObject readPreparation=perception==null?null:perception.lastReadPreparation();
+        JSONObject navigationDiagnostic=navigation==null?null:navigation.lastNavigationDiagnostic();
         JSONObject value=new JSONObject().put("profile",PROFILE).put("runId",runId).put("day",authority==null?"UNKNOWN":authority.day())
                 .put("stage",stage).put("failure",safeEnum(failure)).put("perceptionState",perceptionState())
-                .put("lastUiDiagnostic",uiDiagnostic==null?JSONObject.NULL:uiDiagnostic).put("terminal",workerReturned)
+                .put("lastUiDiagnostic",uiDiagnostic==null?JSONObject.NULL:uiDiagnostic)
+                .put("lastReadPreparation",readPreparation==null?JSONObject.NULL:readPreparation)
+                .put("lastNavigationDiagnostic",navigationDiagnostic==null?JSONObject.NULL:navigationDiagnostic).put("terminal",workerReturned)
                 .put("cleanup",allResourcesClosed()?"CONFIRMED":"UNKNOWN").put("fullScreenCaptures",0)
                 .put("tapCalls",tapCalls).put("tapCommandSuccesses",tapSuccesses).put("returnCalls",returnCalls)
                 .put("tapDispatchAttempts",tapDispatches).put("backDispatchAttempts",backDispatches).put("backCommandSuccesses",backSuccesses)
