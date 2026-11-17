@@ -29,19 +29,32 @@ final class AndroidLiveUiReader {
         PROTOCOL_REJECTED, IO_UNKNOWN, READ_COMPLETE, CLEANUP_UNKNOWN }
     record Result(LiveUiProtocol.Report protocolReport,LiveVisitGuard.Report visitReport, FixedStatus fixedStatus,
                   boolean invoked, boolean knownClean, int acquiredBytes, boolean processQuiet,
-                  boolean exitObserved, int exitCode) { }
+                  boolean exitObserved, int exitCode,LiveReadPreparation.Snapshot preparation) {
+        Result(LiveUiProtocol.Report protocolReport,LiveVisitGuard.Report visitReport,FixedStatus fixedStatus,
+                boolean invoked,boolean knownClean,int acquiredBytes,boolean processQuiet,boolean exitObserved,int exitCode){
+            this(protocolReport,visitReport,fixedStatus,invoked,knownClean,acquiredBytes,processQuiet,exitObserved,exitCode,null);
+        }
+    }
     static boolean knownClean() { return quarantine == null; }
     static boolean processKnownClean() { return knownClean(); }
 
     static Result read(Context context,String nonce,long absoluteDeadline,BooleanSupplier current,
-            DispatchGate finalGate,LiveRunAuthority.UiPermit permit){return readBound(context,nonce,absoluteDeadline,bounded(current,permit),finalGate,permit,false);}
+            DispatchGate finalGate,LiveRunAuthority.UiPermit permit){return readBound(context,nonce,absoluteDeadline,bounded(current,permit),finalGate,permit,false,null);}
+    static Result read(Context context,String nonce,long absoluteDeadline,BooleanSupplier current,
+            DispatchGate finalGate,LiveRunAuthority.UiPermit permit,LiveReadPreparation preparation){
+        return readBound(context,nonce,absoluteDeadline,bounded(current,permit),finalGate,permit,false,preparation);
+    }
     static Result readVisit(Context context,String nonce,long absoluteDeadline,BooleanSupplier current,
-            DispatchGate finalGate,LiveRunAuthority.UiPermit permit){return readBound(context,nonce,absoluteDeadline,bounded(current,permit),finalGate,permit,true);}
+            DispatchGate finalGate,LiveRunAuthority.UiPermit permit){return readBound(context,nonce,absoluteDeadline,bounded(current,permit),finalGate,permit,true,null);}
+    static Result readVisit(Context context,String nonce,long absoluteDeadline,BooleanSupplier current,
+            DispatchGate finalGate,LiveRunAuthority.UiPermit permit,LiveReadPreparation preparation){
+        return readBound(context,nonce,absoluteDeadline,bounded(current,permit),finalGate,permit,true,preparation);
+    }
     private static BooleanSupplier bounded(BooleanSupplier current,LiveRunAuthority.UiPermit permit){
         return current==null||permit==null?null:()->permit.current(SystemClock.elapsedRealtime())&&current.getAsBoolean();
     }
     private static Result readBound(Context context,String nonce,long absoluteDeadline,BooleanSupplier current,
-            DispatchGate finalGate,LiveRunAuthority.UiPermit permit,boolean visitMode){
+            DispatchGate finalGate,LiveRunAuthority.UiPermit permit,boolean visitMode,LiveReadPreparation preparation){
         byte[] bytes = new byte[OverviewUiProtocol.MAX_LINE + 1];
         IRemoteProcess process = null;
         InputStream input = null;
@@ -53,24 +66,36 @@ final class AndroidLiveUiReader {
         long started = SystemClock.elapsedRealtime();
         long deadline = Math.min(absoluteDeadline, started + 9000);
         if(permit!=null)deadline=Math.min(deadline,permit.deadline());
+        LiveReadPreparation trace=preparation;
+        try{
+            if(trace==null)trace=new LiveReadPreparation();
+            trace.begin(started,deadline,visitMode?LiveReadPreparation.Mode.LIVE_VISIT_V1:LiveReadPreparation.Mode.LIVE_REWARDS_UI_V1,SystemClock::elapsedRealtime);
+        }catch(Throwable diagnosticUnavailable){trace=null;}
         try {
             if (context == null || current == null || finalGate == null
                     || !NativeUiStructureProtocol.validNonce(nonce) || deadline <= started || permit == null || !permit.live())
                 throw new Stop(FixedStatus.INVALID_REQUEST);
+            if(trace!=null)trace.enter(LiveReadPreparation.Stage.AUTHORITY_INITIAL);
             if (!authority(context) || !live(current, deadline)) throw new Stop(status);
+            if(trace!=null)trace.enter(LiveReadPreparation.Stage.APK_VERIFY);
             String apk = verifiedApk(context);
             if (apk == null) throw new Stop(status);
+            if(trace!=null)trace.enter(LiveReadPreparation.Stage.BINDER);
             var binder = Shizuku.getBinder();
             if (binder == null || !binder.isBinderAlive()) throw new Stop(status);
             var service = IShizukuService.Stub.asInterface(binder);
             if (service == null) throw new Stop(status);
             String[] command = {"/system/bin/app_process", "-cp", apk, "/system/bin", HELPER, nonce, Long.toString(deadline), visitMode?"LIVE_VISIT_V1":"LIVE_REWARDS_UI_V1"};
+            if(trace!=null)trace.enter(LiveReadPreparation.Stage.AUTHORITY_RECHECK);
             if (!authority(context) || !live(current, deadline)) throw new Stop(status);
+            if(trace!=null)trace.enter(LiveReadPreparation.Stage.CLAIM_READER);
             if (!permit.claimReader(SystemClock.elapsedRealtime())) throw new Stop(FixedStatus.ALREADY_CLAIMED);
             status = FixedStatus.GATE_REJECTED;
             // The root gate atomically persists the durable UI_READ burn and rechecks its epoch.
             // Only local freshness and cached binder checks follow this gate; no new authority read.
+            if(trace!=null)trace.enter(LiveReadPreparation.Stage.SOURCE_GATE);
             if (!finalGate.allowDispatch()) throw new Stop(status);
+            if(trace!=null)trace.enter(LiveReadPreparation.Stage.POST_GATE);
             boolean sameBinder = binder == Shizuku.getBinder();
             boolean binderAlive = binder.isBinderAlive();
             boolean stillCurrent = current.getAsBoolean();
@@ -80,10 +105,12 @@ final class AndroidLiveUiReader {
                     ? FixedStatus.READ_TIMEOUT : FixedStatus.CANCELLED);
             invoked = true;
             status = FixedStatus.PROCESS_NULL;
+            if(trace!=null)trace.enter(LiveReadPreparation.Stage.NEW_PROCESS,dispatched);
             process = service.newProcess(command, null, null);
             if (process == null) throw new Stop(status);
             descriptorsClosed = false;
             status = FixedStatus.STREAM_MISSING;
+            if(trace!=null)trace.enter(LiveReadPreparation.Stage.STREAMS);
             stdout = process.getInputStream();
             stdin = process.getOutputStream();
             stderr = process.getErrorStream();
@@ -92,6 +119,7 @@ final class AndroidLiveUiReader {
             if (stdout == null) throw new Stop(status);
             input = new ParcelFileDescriptor.AutoCloseInputStream(stdout); stdout = null;
             status = FixedStatus.IO_UNKNOWN;
+            if(trace!=null)trace.enter(LiveReadPreparation.Stage.READ);
             for (;;) {
                 if (!live(current, deadline)) throw new Stop(SystemClock.elapsedRealtime() >= deadline
                         ? FixedStatus.READ_TIMEOUT : FixedStatus.CANCELLED);
@@ -106,37 +134,44 @@ final class AndroidLiveUiReader {
                 if (quiet && input.available() == 0) break;
                 if (available == 0) Thread.sleep(5);
             }
+            if(trace!=null)trace.enter(LiveReadPreparation.Stage.EXIT);
             exit = process.exitValue(); exitObserved = true;
             if (exit != 0) throw new Stop(FixedStatus.EXIT_NONZERO);
+            if(trace!=null)trace.enter(LiveReadPreparation.Stage.AUTHORITY_FINAL);
             if (!live(current, deadline) || !authority(context)) throw new Stop(FixedStatus.CANCELLED);
             // Require one complete ASCII frame and reject diagnostics, trailing bytes and extra lines.
+            if(trace!=null)trace.enter(LiveReadPreparation.Stage.PROTOCOL);
             if (!validFrame(bytes, count)) throw new Stop(FixedStatus.PROTOCOL_REJECTED);
             try {
                 String frame=new String(bytes,0,count-1,StandardCharsets.US_ASCII);
                 if(visitMode)visitReport=LiveVisitGuard.parse(frame,nonce,dispatched,deadline,SystemClock.elapsedRealtime());
                 else report=LiveUiProtocol.parse(frame,nonce,dispatched,deadline,SystemClock.elapsedRealtime());
-            } catch (RuntimeException invalid) { throw new Stop(FixedStatus.PROTOCOL_REJECTED); }
+            } catch (RuntimeException invalid) { if(trace!=null)trace.exception(invalid);throw new Stop(FixedStatus.PROTOCOL_REJECTED); }
             status = FixedStatus.READ_COMPLETE;
         } catch (Stop stopped) {
-            status = stopped.status;
+            if(trace!=null)trace.controlledStop();status = stopped.status;
         } catch (Exception failure) {
+            if(trace!=null){
+                if(failure instanceof PackageManager.NameNotFoundException)trace.exception(LiveReadPreparation.ExceptionKind.PACKAGE_NOT_FOUND);else trace.exception(failure);
+            }
             if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
             status = FixedStatus.IO_UNKNOWN;
         } finally {
+            if(trace!=null)trace.beginCleanup();
             Arrays.fill(bytes, (byte) 0);
             boolean closed = true;
             // Each close is independent: one failure must not skip another descriptor.
-            try { if (input != null) input.close(); } catch (Exception ignored) { closed = false; }
-            try { if (stdout != null) stdout.close(); } catch (Exception ignored) { closed = false; }
-            try { if (stdin != null) stdin.close(); } catch (Exception ignored) { closed = false; }
-            try { if (stderr != null) stderr.close(); } catch (Exception ignored) { closed = false; }
+            try { if (input != null) input.close(); } catch (Exception ignored) { if(trace!=null)trace.cleanupException(ignored);closed = false; }
+            try { if (stdout != null) stdout.close(); } catch (Exception ignored) { if(trace!=null)trace.cleanupException(ignored);closed = false; }
+            try { if (stdin != null) stdin.close(); } catch (Exception ignored) { if(trace!=null)trace.cleanupException(ignored);closed = false; }
+            try { if (stderr != null) stderr.close(); } catch (Exception ignored) { if(trace!=null)trace.cleanupException(ignored);closed = false; }
             if (invoked) {
                 try {
                     if (process != null && !quiet) {
                         process.destroy();
                         quiet = process.waitForTimeout(500, "MILLISECONDS");
                     }
-                } catch (Exception ignored) { quiet = false; }
+                } catch (Exception ignored) { if(trace!=null)trace.cleanupException(ignored);quiet = false; }
                 descriptorsClosed = closed && process != null;
                 // Process exit alone cannot attest UiAutomation disconnection. Missing/unknown
                 // cleanup is permanently quarantined even when destroy reports a quiet process.
@@ -147,7 +182,8 @@ final class AndroidLiveUiReader {
         }
         boolean clean = knownClean() && (!invoked || quiet && descriptorsClosed);
         if (!clean) { status = FixedStatus.CLEANUP_UNKNOWN; report = null;visitReport=null; }
-        return new Result(report,visitReport, status, invoked, clean, count, quiet || !invoked, exitObserved, exit);
+        var completed=trace==null?null:trace.finish(status.name(),invoked,clean,count,quiet||!invoked,exitObserved,exit);
+        return new Result(report,visitReport, status, invoked, clean, count, quiet || !invoked, exitObserved, exit,completed);
     }
     /** Pure post-gate decision, evaluated after the gate and any local epoch predicate. */
     static boolean dispatchAllowed(long now, long deadline, boolean current, boolean interrupted,
