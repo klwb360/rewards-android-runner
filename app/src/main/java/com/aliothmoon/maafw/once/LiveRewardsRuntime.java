@@ -150,9 +150,9 @@ final class LiveRewardsRuntime {
             perception=new LiveRewardsPerception(activity.getApplicationContext(),authority,navigation,this::hiddenCurrent,this::publishArtifact,ledger);
             input=new LiveRewardsInput(activity.getApplicationContext(),authority,navigation,perception::rebind);
             coordinator=new LiveRewardsCoordinator(authority,ledger,new LiveRewardsCoordinator.Ports(){
-                public LiveRewardsTypes.Preflight preflight(LiveRunAuthority exact)throws Exception{
+                public LiveRewardsTypes.Preflight preflightRegion(LiveRunAuthority exact,LiveRewardsTypes.Kind kind)throws Exception{
                     if(exact!=authority)throw new SecurityException("Exact run required");
-                    requireHidden();stage="PREFLIGHT";return perception.preflight();
+                    requireHidden();stage="PREFLIGHT";return perception.preflightRegion(exact,kind);
                 }
                 public LiveRewardsTypes.Observation observe(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Phase phase,LiveRewardsTypes.Task task)throws Exception{
                     requireHidden();stage=phase.name();return perception.observe(scope,phase,task);

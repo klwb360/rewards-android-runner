@@ -177,8 +177,20 @@ final class ReviewBingNavigation {
         try{return liveRunAuthority.live()&&liveRunAuthority.current()&&liveRunHidden!=null&&liveRunHidden.getAsBoolean();}
         catch(RuntimeException unknown){return false;}
     }
-    record LiveRead(BingNavigationSnapshot.Result template,BingNavigationSnapshot.LiveVisitResult visit,boolean clean){ }
+    record LiveRead(BingNavigationSnapshot.Result template,BingNavigationSnapshot.LiveVisitResult visit,
+            boolean clean,boolean displayRecheckAllowed){
+        private LiveRead(BingNavigationSnapshot.Result template,BingNavigationSnapshot.LiveVisitResult visit,boolean clean){
+            this(template,visit,clean,false);
+        }
+    }
     LiveRead readLiveRun(BingNavigationSnapshot.Shape shape,BingNavigationSnapshot.Ready original){
+        return readLiveRun(shape,original,null);
+    }
+    LiveRead readLiveObservation(BingNavigationSnapshot.Shape shape,BingNavigationSnapshot.Ready anchor){
+        return readLiveRun(shape,null,anchor);
+    }
+    private LiveRead readLiveRun(BingNavigationSnapshot.Shape shape,BingNavigationSnapshot.Ready original,
+            BingNavigationSnapshot.Ready observationAnchor){
         lastLiveNavigationDiagnostic=null;
         long diagnosticStarted=LiveNavigationDiagnostic.clock();
         var diagnostic=LiveNavigationDiagnostic.begin(original==null?LiveNavigationDiagnostic.Call.TEMPLATE:LiveNavigationDiagnostic.Call.VISIT);
@@ -192,7 +204,7 @@ final class ReviewBingNavigation {
         try{
             LiveNavigationDiagnostic.metadataStarted(diagnostic,-1);
             LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.AUTHORITY_REJECTED);
-            if(liveRunAuthority==null||!liveRunCurrent())return new LiveRead(template,visit,knownClean());
+            if(liveRunAuthority==null||liveRunAuthority.diagnosticOnly()||!liveRunCurrent())return new LiveRead(template,visit,knownClean());
             LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.BUDGET_REJECTED);
             LiveNavigationDiagnostic.metadataStarted(diagnostic,++liveRunPairs);
             focusPair=liveRunPairs;
@@ -223,12 +235,16 @@ final class ReviewBingNavigation {
                 focusParsed=true;focusStatus=visit.kind()==BingNavigationSnapshot.LiveVisitKind.TRANSITION?"BING_TRANSITION":
                         visit.source()!=null?"READY":"UNKNOWN";focusGate=visit.gate().name();parserReady=visit.source()!=null;
             }
+            boolean recheck=observationAnchor!=null&&original==null&&template.status()==BingNavigationSnapshot.Status.UNKNOWN
+                    &&template.firstGate()==BingNavigationSnapshot.FirstGate.FOCUS_FORMAT
+                    &&focusWindows.status()==FixedStatus.READ_COMPLETE&&focusActivities.status()==FixedStatus.READ_COMPLETE
+                    &&BingNavigationSnapshot.onlyDisplayMissing(w,a,profile,readOnlyGuard,observationAnchor,lower,observed);
             LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.POST_AUTHORITY);
-            if(!liveRunCurrent()||!authorityMatches(shape))return new LiveRead(BingNavigationSnapshot.Result.unknown(),
+            if(liveRunAuthority.diagnosticOnly()||!liveRunCurrent()||!authorityMatches(shape))return new LiveRead(BingNavigationSnapshot.Result.unknown(),
                     BingNavigationSnapshot.LiveVisitResult.unknown(BingNavigationSnapshot.LiveVisitGate.STRICT_SOURCE),knownClean());
             LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.PARSED);
             returnedReady=parserReady;
-            return new LiveRead(template,visit,knownClean());
+            return new LiveRead(template,visit,knownClean(),recheck);
         }catch(RuntimeException|Error failure){LiveNavigationDiagnostic.metadataException(diagnostic,failure);throw failure;}
         finally{
             if(windows!=null)Arrays.fill(windows,(byte)0);if(activities!=null)Arrays.fill(activities,(byte)0);

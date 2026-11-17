@@ -8,12 +8,14 @@ import static org.junit.Assert.*;
 
 /** State-machine tests use only synthetic source grammar, pixels metadata and non-live receipts. */
 public class LiveRewardsCoordinatorTest {
-    private static final class Rig implements LiveRewardsCoordinator.Ports {
+    static class Rig implements LiveRewardsCoordinator.Ports {
         final LiveCoreFixture f;
         final LiveRewardsLedger ledger;
         final List<LiveRewardsTypes.Task> tasks;
         final List<LiveRewardsTypes.Kind> reports=new ArrayList<>();
         final List<LiveRewardsTypes.Kind> observedKinds=new ArrayList<>(),tappedKinds=new ArrayList<>();
+        final List<String> regionEvents=new ArrayList<>();
+        LiveRewardsTypes.Kind incompleteRegion,sourceFailureRegion,foreignRosterRegion;
         boolean completeAfter=true,progress,unknownBefore,unknownAfter,tapFailure,returnFailure,
                 lateAfter,compact,ambiguousAfter,regionComplete,cancelAfterTap;
         boolean cleanUiTimeout,cleanCropTimeout;
@@ -27,7 +29,14 @@ public class LiveRewardsCoordinatorTest {
         Rig(List<LiveRewardsTypes.Task> tasks,LiveRewardsLedger resumed)throws Exception{
             f=new LiveCoreFixture();this.tasks=tasks;ledger=resumed==null?f.ledger:resumed;
         }
-        public LiveRewardsTypes.Preflight preflight(LiveRunAuthority authority){return new LiveRewardsTypes.Preflight(tasks,true,true,true);}
+        public LiveRewardsTypes.Preflight preflightRegion(LiveRunAuthority authority,LiveRewardsTypes.Kind kind){
+            regionEvents.add("SCAN_"+kind);
+            if(kind==sourceFailureRegion)throw new SecurityException("Synthetic source lost");
+            var picked=new ArrayList<LiveRewardsTypes.Task>();
+            for(var task:tasks)if(task.kind()==kind)picked.add(task);
+            if(kind==foreignRosterRegion)picked.add(more("FOREIGN"));
+            return new LiveRewardsTypes.Preflight(picked,kind!=incompleteRegion,true,true);
+        }
         public boolean knownClean(){return true;}
         public void pause(long millis){assertTrue(millis>=0);f.clock.now+=millis;pauses++;}
         public LiveRewardsTypes.Observation observe(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Phase phase,LiveRewardsTypes.Task expected)throws Exception{
@@ -81,6 +90,7 @@ public class LiveRewardsCoordinatorTest {
         public void report(LiveRewardsTypes.Task task,LiveRewardsTypes.Outcome outcome,String reason,
                 LiveRewardsTypes.Observation before,LiveRewardsTypes.Observation after){
             assertTrue(reason.matches("[A-Z][A-Z0-9_]{0,79}"));reports.add(task.kind());
+            regionEvents.add("RESULT_"+task.kind()+"_"+outcome);
         }
         LiveRewardsCoordinator.Summary run(){return new LiveRewardsCoordinator(f.authority,ledger,this).run();}
     }
@@ -98,6 +108,30 @@ public class LiveRewardsCoordinatorTest {
         assertFalse(result.stopped());assertTrue(result.preflightPassed());assertEquals(3,result.taps());assertEquals(2,result.backs());
         assertEquals(2,rig.returnCalls);assertEquals(List.of(LiveRewardsTypes.Kind.CHECK_IN,LiveRewardsTypes.Kind.DAILY,LiveRewardsTypes.Kind.MORE),rig.reports);
         assertEquals(Integer.valueOf(3),result.counts().get(LiveRewardsTypes.Outcome.OBSERVED_COMPLETE));
+        assertEquals(List.of("SCAN_CHECK_IN","RESULT_CHECK_IN_OBSERVED_COMPLETE","SCAN_DAILY","RESULT_DAILY_OBSERVED_COMPLETE",
+                "SCAN_MORE","RESULT_MORE_OBSERVED_COMPLETE"),rig.regionEvents);
+    }
+    @Test public void laterSourceFailureKeepsEarlierClicksAndTheirResults()throws Exception{
+        var sign=LiveCoreFixture.task(LiveRewardsTypes.Kind.CHECK_IN,0,"SIGN");
+        var one=daily("FIRST");var two=LiveCoreFixture.task(LiveRewardsTypes.Kind.DAILY,2,"SECOND");var later=more("LATER");
+        var rig=new Rig(List.of(later,two,sign,one));rig.sourceFailureRegion=LiveRewardsTypes.Kind.MORE;
+        var result=rig.run();
+        assertTrue(result.stopped());assertFalse(result.preflightPassed());assertEquals(2,result.regionsReady());
+        assertEquals(3,result.planned());assertEquals(3,result.taps());assertEquals(2,result.backs());
+        assertEquals(List.of("SCAN_CHECK_IN","RESULT_CHECK_IN_OBSERVED_COMPLETE","SCAN_DAILY","RESULT_DAILY_OBSERVED_COMPLETE",
+                "RESULT_DAILY_OBSERVED_COMPLETE","SCAN_MORE"),rig.regionEvents);
+        for(var attempted:List.of(sign,one,two))assertTrue(rig.ledger.attempted(attempted));
+        assertFalse(rig.ledger.attempted(later));assertEquals(Integer.valueOf(3),result.counts().get(LiveRewardsTypes.Outcome.OBSERVED_COMPLETE));
+    }
+    @Test public void incompleteOrForeignDailyRosterCannotStartEvenItsFirstCard()throws Exception{
+        var one=daily("FIRST");var two=LiveCoreFixture.task(LiveRewardsTypes.Kind.DAILY,2,"SECOND");
+        for(boolean foreign:new boolean[]{false,true}){
+            var rig=new Rig(List.of(one,two,more("NEXT_REGION")));
+            if(foreign)rig.foreignRosterRegion=LiveRewardsTypes.Kind.DAILY;else rig.incompleteRegion=LiveRewardsTypes.Kind.DAILY;
+            var result=rig.run();assertTrue(result.stopped());assertEquals("PREFLIGHT_UNQUALIFIED_DAILY",result.reason());
+            assertEquals(0,result.taps());assertEquals(0,result.backs());assertEquals(List.of("SCAN_CHECK_IN","SCAN_DAILY"),rig.regionEvents);
+            assertFalse(rig.ledger.attempted(one));assertFalse(rig.ledger.attempted(two));
+        }
     }
     @Test public void unclearCompletionContinuesOtherCardsWithoutRetry()throws Exception{
         var rig=new Rig(List.of(daily("D"),more("M")));rig.completeAfter=false;var result=rig.run();
@@ -111,9 +145,12 @@ public class LiveRewardsCoordinatorTest {
         assertEquals(Integer.valueOf(0),result.counts().get(LiveRewardsTypes.Outcome.OBSERVED_COMPLETE));assertEquals(1,rig.afterCalls);
     }
     @Test public void signInCannotBorrowARegionProgressDeltaAsCompletion()throws Exception{
-        var sign=LiveCoreFixture.task(LiveRewardsTypes.Kind.CHECK_IN,0,"SIGN");var rig=new Rig(List.of(sign));
+        var sign=LiveCoreFixture.task(LiveRewardsTypes.Kind.CHECK_IN,0,"SIGN");var rig=new Rig(List.of(sign,daily("LATER"),more("NEXT")));
         rig.completeAfter=false;rig.progress=true;var result=rig.run();
         assertEquals(0,rig.returnCalls);assertEquals(Integer.valueOf(1),result.counts().get(LiveRewardsTypes.Outcome.UNCONFIRMED));
+        assertTrue(result.stopped());assertEquals("CHECK_IN_NOT_CONFIRMED",result.reason());
+        assertEquals(List.of("SCAN_CHECK_IN","RESULT_CHECK_IN_UNCONFIRMED"),rig.regionEvents);
+        assertEquals(1,result.taps());assertTrue(rig.ledger.attempted(sign));
     }
     @Test public void completionCompressionAndNewOrdinalUseUniqueTitleAndValueNotPosition()throws Exception{
         var rig=new Rig(List.of(daily("D")));rig.compact=true;var result=rig.run();
