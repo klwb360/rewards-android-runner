@@ -45,6 +45,7 @@ final class LiveRewardsRuntime {
     private LiveRewardsForegroundLease foreground;
     private final String runDay;
     private final boolean taskInputAllowed,singleTask;
+    private final LiveRewardsTaskSelection selection;
     private LiveRewardsCoordinator.Summary summary;
     private LiveRewardsTypes.Preflight readOnlyPreflight;
     private boolean readOnlyPreflightStarted,readOnlyPreflightReturned;
@@ -61,9 +62,11 @@ final class LiveRewardsRuntime {
     private String terminalWorkStage;
 
     private LiveRewardsRuntime(DormantCaptureConfirmationActivity activity,
-            VisibleCaptureAuthority.LiveRewardsApproval approval,BingNavigationSnapshot.Shape shape,String runDay){
+            VisibleCaptureAuthority.LiveRewardsApproval approval,BingNavigationSnapshot.Shape shape,String runDay,
+            LiveRewardsTaskSelection selection){
         this.activity=activity;this.approval=approval;this.shape=shape;this.runDay=runDay;taskInputAllowed=approval.taskInputAllowed;
         singleTask=approval.singleTask;
+        this.selection=selection;
     }
     static LiveRewardsRuntime start(DormantCaptureConfirmationActivity activity,
             DormantCaptureConfirmationActivity.LiveClick click,Object approvalOwner){
@@ -86,6 +89,9 @@ final class LiveRewardsRuntime {
         var approval=requestedTaskInputAllowed?VisibleCaptureAuthority.issueLiveRewardsApproval(activity,click,epoch,approvalOwner,now)
                 :VisibleCaptureAuthority.issueReadOnlyRewardsApproval(activity,click,epoch,approvalOwner,now);
         if(approval.taskInputAllowed!=requestedTaskInputAllowed)throw new SecurityException("Exact visible run purpose required");
+        var selection=requestedTaskInputAllowed&&!approval.singleTask
+                ? LiveRewardsUi.takeSelection(activity) : LiveRewardsTaskSelection.ALL;
+        if(!selection.current(approvedDay))throw new SecurityException("Task selection day changed");
         var manager=activity.getSystemService(DisplayManager.class);var display=manager==null?null:manager.getDisplay(Display.DEFAULT_DISPLAY);
         if(display==null||display.getState()!=Display.STATE_ON||display.getRotation()!=Surface.ROTATION_0)
             throw new SecurityException("Reviewed display required");
@@ -94,7 +100,7 @@ final class LiveRewardsRuntime {
         var bounds=wm.getMaximumWindowMetrics().getBounds();
         if(bounds.left!=0||bounds.top!=0||bounds.width()!=1440||bounds.height()!=2560)
             throw new SecurityException("Reviewed portrait shape required");
-        var run=new LiveRewardsRuntime(activity,approval,new BingNavigationSnapshot.Shape(bounds.width(),bounds.height(),0),approvedDay);
+        var run=new LiveRewardsRuntime(activity,approval,new BingNavigationSnapshot.Shape(bounds.width(),bounds.height(),0),approvedDay,selection);
         run.root=CaptureSessionRuntime.retainAlignment(run,approval.deadline,run::latchCancel,run::closeOnOwner,()->run.closed,run::postOwner);
         try{
             run.loop.start();run.owner=new Handler(run.loop.getLooper());run.root.arm();run.startedElapsed=approval.issued;
@@ -153,7 +159,7 @@ final class LiveRewardsRuntime {
             coordinator=new LiveRewardsCoordinator(authority,ledger,new LiveRewardsCoordinator.Ports(){
                 public LiveRewardsTypes.Preflight preflightRegion(LiveRunAuthority exact,LiveRewardsTypes.Kind kind)throws Exception{
                     if(exact!=authority)throw new SecurityException("Exact run required");
-                    requireHidden();stage="PREFLIGHT";return perception.preflightRegion(exact,kind);
+                    requireHidden();stage="PREFLIGHT";return perception.preflightRegion(exact,kind,selection);
                 }
                 public LiveRewardsTypes.Observation observe(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Phase phase,LiveRewardsTypes.Task task)throws Exception{
                     requireHidden();stage=phase.name();return perception.observe(scope,phase,task);
@@ -161,6 +167,8 @@ final class LiveRewardsRuntime {
                 public LiveRewardsInput.TapReceipt tap(LiveActionPermit permit)throws Exception{
                     requireHidden();
                     if(singleTask&&tapCalls!=0)throw new SecurityException("Single-task tap already attempted");
+                    if(!selection.includes(permit.task()) || selection.limited() && tapCalls>=2)
+                        throw new SecurityException("Tap outside confirmed task selection");
                     stage="TAP";tapCalls++;
                     LiveRewardsInput.TapReceipt result=null;
                     try{result=input.tap(permit);return result;}
@@ -169,6 +177,8 @@ final class LiveRewardsRuntime {
                 public LiveRewardsInput.ReturnReceipt returnAfterTap(LiveActionPermit permit,LiveRewardsInput.TapReceipt receipt)throws Exception{
                     requireHidden();
                     if(singleTask&&returnCalls!=0)throw new SecurityException("Single-task return already attempted");
+                    if(!selection.includes(permit.task()) || selection.limited() && returnCalls>=2)
+                        throw new SecurityException("Return outside confirmed task selection");
                     stage="WAIT_AND_RETURN";returnCalls++;
                     LiveRewardsInput.ReturnReceipt result=null;
                     try{result=input.returnAfterTap(permit,receipt);if(result!=null&&result.commandConfirmed()&&result.knownClean())returnSuccesses++;return result;}
@@ -183,7 +193,7 @@ final class LiveRewardsRuntime {
                         LiveRewardsTypes.Observation before,LiveRewardsTypes.Observation after){
                     recordOutcome(task,outcome,reason,before,after);
                 }
-            },singleTask);
+            },singleTask,selection);
             summary=coordinator.run();stage=summary.stopped()?"STOPPED":"COMPLETE";
         }catch(Exception failed){
             if(failed instanceof InterruptedException)Thread.currentThread().interrupt();
@@ -287,7 +297,7 @@ final class LiveRewardsRuntime {
                 .put("visitDelayStartsAt","SUCCESSFUL_TAP_COMMAND_RETURN").put("accountCreditVerified",false)
                 .put("rawTextIncluded",false).put("rawDataUploaded",false).put("oldRecordsReset",false)
                 .put("outcomes",outcomes).put("artifacts",artifactsIndex).put("actions",actionIndex);
-        if(summary!=null)value.put("summary",summary.fixedSummary()+(singleTask?" taskBudget=1":""));
+        if(summary!=null)value.put("summary",summary.fixedSummary()+(singleTask?" taskBudget=1":selection.limited()?" scope=MORE_PAIR taskBudget=2":""));
         return value;
     }
     private void publishArtifact(String taskKey,String phase,String filename,byte[] payload)throws Exception{

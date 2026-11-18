@@ -43,7 +43,7 @@ public class LiveRewardsEntryTest {
         assertTrue(issuer.indexOf("activity.singleTaskRewardsSelected()")>issuer.indexOf("!click.consume("));
         String runtime=source("LiveRewardsRuntime");
         assertTrue(runtime.contains("singleTask=approval.singleTask;"));
-        assertTrue(runtime.contains("},singleTask);"));
+        assertTrue(runtime.contains("},singleTask,selection);"));
         String tap=body(runtime,"public LiveRewardsInput.TapReceipt tap(","input.tap(permit)");
         String back=body(runtime,"public LiveRewardsInput.ReturnReceipt returnAfterTap(","input.returnAfterTap(permit,receipt)");
         assertTrue(tap.contains("if(singleTask&&tapCalls!=0)throw"));

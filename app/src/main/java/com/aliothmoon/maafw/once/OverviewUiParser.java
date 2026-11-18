@@ -115,22 +115,25 @@ final class OverviewUiParser {
     private static boolean exact(NativeUiBoundPointsParser.Node node, String value) {
         return value.equals(node.text()) || value.equals(node.description());
     }
-    private NativeUiBoundPointsParser.Node childTitle(NativeUiBoundPointsParser.Node parent, String title) {
+    private NativeUiBoundPointsParser.Node childTitle(NativeUiBoundPointsParser.Node parent, String title,
+                                                       OverviewUiRegions.Role role) {
         List<NativeUiBoundPointsParser.Node> matches=new ArrayList<>();
         for(var node:children(parent))if(exact(node,title))matches.add(node);
         if(matches.size()<2)return matches.isEmpty()?null:matches.get(0);
-        if(!"签入".equals(title)||matches.size()!=2){ambiguous=true;return null;}
-        return checkInHeaderTitle(parent,matches);
+        boolean weeklyHeader = role == OverviewUiRegions.Role.CHECK_IN || role == OverviewUiRegions.Role.DAILY_PROGRESS;
+        if (!weeklyHeader || matches.size() != 2) { ambiguous = true; return null; }
+        return pairedWeeklyTitle(parent, matches, title);
     }
     /** The live helper supplies actual class/clickability. Keep both nodes and distinguish
      * the observed text heading from its separately labelled right-hand button. */
-    private NativeUiBoundPointsParser.Node checkInHeaderTitle(NativeUiBoundPointsParser.Node parent,List<NativeUiBoundPointsParser.Node> matches){
+    private NativeUiBoundPointsParser.Node pairedWeeklyTitle(NativeUiBoundPointsParser.Node parent,
+            List<NativeUiBoundPointsParser.Node> matches, String title) {
         NativeUiBoundPointsParser.Node heading=null,button=null;
         for(var node:matches){
             if(node.parentIndex()!=parent.index()||!children(node).isEmpty()||!empty(node.resourceId())){ambiguous=true;return null;}
-            if(node.classRole()==NativeUiBoundPointsParser.ClassRole.TEXT&&!node.clickable()&&"签入".equals(node.text())&&empty(node.description())){
+            if(node.classRole()==NativeUiBoundPointsParser.ClassRole.TEXT&&!node.clickable()&&title.equals(node.text())&&empty(node.description())){
                 if(heading!=null){ambiguous=true;return null;}heading=node;
-            }else if(node.classRole()==NativeUiBoundPointsParser.ClassRole.BUTTON&&node.clickable()&&empty(node.text())&&"签入".equals(node.description())){
+            }else if(node.classRole()==NativeUiBoundPointsParser.ClassRole.BUTTON&&node.clickable()&&empty(node.text())&&title.equals(node.description())){
                 if(button!=null){ambiguous=true;return null;}button=node;
             }else{ambiguous=true;return null;}
         }
@@ -151,7 +154,7 @@ final class OverviewUiParser {
             if(heading.visible()&&button.visible()&&box(heading).overlaps(box(button))){ambiguous=true;return null;}
         }
         // Hidden metadata supplies no region. Mixed visibility must never expose the heading
-        // as a complete check-in candidate while its paired control is still offscreen.
+        // as a complete weekly heading while its paired control is still offscreen.
         return heading.visible()==button.visible()?heading:null;
     }
     private static boolean empty(String value){return value==null||value.isEmpty();}
@@ -159,7 +162,7 @@ final class OverviewUiParser {
         var container=uniqueId("dailySet");
         if (container==null || !visible(container)) return;
         if (container.parentIndex()!=panel.index() || !box(panel).contains(box(container))) { ambiguous=true; return; }
-        var title=childTitle(container,"每日活动");
+        var title=childTitle(container,"每日活动",OverviewUiRegions.Role.DAILY_ACTIVITIES);
         if (title==null || visible(title) && !box(container).contains(box(title))) return;
         int index=siblings.indexOf(container);
         // The page's 今日积分 counter belongs to this exact dailySet; never search/read's dailyActivities.
@@ -197,7 +200,7 @@ final class OverviewUiParser {
         for(int i=0;i<siblings.size();i++) {
             var candidate=siblings.get(i);
             if(candidate.resourceId()!=null && !candidate.resourceId().isEmpty()) continue;
-            var heading=childTitle(candidate,label);
+            var heading=childTitle(candidate,label,role);
             if(heading==null) continue;
             if(header!=null) { ambiguous=true;return; }
             header=candidate;title=heading;index=i;
