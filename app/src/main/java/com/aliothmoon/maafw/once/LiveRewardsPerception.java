@@ -42,6 +42,7 @@ final class LiveRewardsPerception {
     private boolean nativeClean=true,swipeClean=true;
     private volatile String safeState="NEW";
     private volatile LiveUiDiagnostic lastUiDiagnostic;
+    private volatile String lastCropDiagnostic="NONE";
     private volatile LiveReadPreparation.Snapshot lastReadPreparation;
     private int readAttemptIndex;
     LiveRewardsPerception(Context context,LiveRunAuthority authority,LiveRewardsNavigation navigation,
@@ -55,6 +56,7 @@ final class LiveRewardsPerception {
     boolean knownClean(){return nativeClean&&AndroidLiveUiReader.knownClean()&&AndroidCardRegionCapture.knownClean()
             &&swipeClean&&navigation.knownClean();}
     String safeState(){return safeState;}
+    String lastCropDiagnostic(){return lastCropDiagnostic;}
     JSONObject lastUiDiagnostic()throws org.json.JSONException{
         var exact=lastUiDiagnostic;return exact==null?null:new JSONObject(exact.json());
     }
@@ -383,14 +385,31 @@ final class LiveRewardsPerception {
     }
     static AndroidCardRegionCapture.Gate cropGate(BooleanSupplier fresh, BingNavigationSnapshot.Ready imageBefore,
             Supplier<BingNavigationSnapshot.Ready> readCurrent, ConsumeCropPermit consumePermit) {
+        return cropGate(fresh,imageBefore,readCurrent,consumePermit,()->false);
+    }
+    static AndroidCardRegionCapture.Gate cropGate(BooleanSupplier fresh, BingNavigationSnapshot.Ready imageBefore,
+            Supplier<BingNavigationSnapshot.Ready> readCurrent, ConsumeCropPermit consumePermit, BooleanSupplier onlyExpired) {
         return new AndroidCardRegionCapture.Gate() {
+            private void requireFresh() {
+                if(fresh.getAsBoolean())return;
+                if(onlyExpired.getAsBoolean())throw new AndroidCardRegionCapture.InsufficientBudget();
+                throw new SecurityException("Live crop source changed");
+            }
             public void requireCurrent() {
-                if (!fresh.getAsBoolean() || !imageBefore.sameSource(readCurrent.get()) || !fresh.getAsBoolean())
+                requireFresh();
+                if (!imageBefore.sameSource(readCurrent.get()))
                     throw new SecurityException("Live crop source changed");
+                requireFresh();
             }
             public boolean consume() throws java.io.IOException {
+                return consumeWithin(()->true);
+            }
+            public boolean consumeWithin(BooleanSupplier mayDispatch) throws java.io.IOException {
                 requireCurrent();
-                return consumePermit.consume() && fresh.getAsBoolean();
+                if(!mayDispatch.getAsBoolean())throw new AndroidCardRegionCapture.InsufficientBudget();
+                if(!consumePermit.consume())return false;
+                requireFresh();
+                return true;
             }
         };
     }
@@ -403,15 +422,23 @@ final class LiveRewardsPerception {
         timeBudget(scope,phase);var permit=scope.claimCrop(frame.permit(),phase,now());
         BooleanSupplier fresh=()->current(scope)&&permit.current(now())&&CardRevealProbeSource.beforeCrop(base,frame.before(),frame.beforeAt(),
                 frame.after(),imageBefore,shape,lower,permit.deadline(),now());
-        if(!fresh.getAsBoolean())throw new SecurityException("Live crop source-before rejected");
+        BooleanSupplier onlyExpired=()->{
+            long at=now();
+            return phase!=LiveRewardsTypes.Phase.BEFORE&&current(scope)&&permit.activeForRetirement(at)
+                    &&CardRevealProbeSource.expiredBeforeCrop(base,frame.before(),frame.beforeAt(),frame.after(),
+                    imageBefore,shape,lower,permit.deadline(),at);
+        };
+        if(!fresh.getAsBoolean()&&!onlyExpired.getAsBoolean())throw new SecurityException("Live crop source-before rejected");
         var read=AndroidCardRegionCapture.capture(context,nonce(),Math.min(permit.deadline(),scope.observationDeadline(phase)),roi,
                 shape.width(),shape.height(),shape.rotation(),permit,()->current(scope),
-                cropGate(fresh,imageBefore,()->navigation.template(fresh),()->permit.consume(now())));
+                cropGate(fresh,imageBefore,()->navigation.template(fresh),()->permit.consume(now()),onlyExpired));
+        lastCropDiagnostic=read.diagnostic();
         state("CROP_"+read.status().name()+"_"+(read.helperStatus()==null?"NONE":read.helperStatus().name()));
         byte[] png=read.png(),nativePng=null;
         try{
-            if(LivePerceptionBudget.crop(read.status(),read.helperStatus(),read.knownClean(),afterExpired(scope,phase))){
-                scope.discardCrop(permit,true);throw new AfterExpired();
+            if(LivePerceptionBudget.retireCrop(phase,read.status(),read.helperStatus(),read.knownClean(),afterExpired(scope,phase))){
+                scope.discardCrop(permit,true);
+                return unreadable(scope,phase,expected,"AFTER_CROP_BUDGET_EXHAUSTED",frame);
             }
             if(!read.knownClean()||read.status()!=AndroidCardRegionCapture.FixedStatus.CAPTURED||png==null)
                 throw new SecurityException("Live crop rejected: "+read.status().name());

@@ -19,10 +19,21 @@ final class CardRevealProbeSource {
     static boolean beforeCrop(OverviewUiProtocol.Report report,BingNavigationSnapshot.Ready before,
             long beforeAt,BingNavigationSnapshot.Ready afterUi,BingNavigationSnapshot.Ready imageBefore,
             BingNavigationSnapshot.Shape shape,long lower,long deadline,long now) {
+        return now<deadline&&boundSource(report,before,beforeAt,afterUi,imageBefore,shape,lower,now);
+    }
+    /** An expired, otherwise unchanged source can explain a discarded observation only. */
+    static boolean expiredBeforeCrop(OverviewUiProtocol.Report report,BingNavigationSnapshot.Ready before,
+            long beforeAt,BingNavigationSnapshot.Ready afterUi,BingNavigationSnapshot.Ready imageBefore,
+            BingNavigationSnapshot.Shape shape,long lower,long deadline,long now) {
+        return now>=deadline&&boundSource(report,before,beforeAt,afterUi,imageBefore,shape,lower,now);
+    }
+    private static boolean boundSource(OverviewUiProtocol.Report report,BingNavigationSnapshot.Ready before,
+            long beforeAt,BingNavigationSnapshot.Ready afterUi,BingNavigationSnapshot.Ready imageBefore,
+            BingNavigationSnapshot.Shape shape,long lower,long now) {
         return imageBefore!=null&&ui(report,before,beforeAt,afterUi,shape,now)
                 &&before.sameSource(imageBefore)&&imageBefore.fresh(now)
                 &&afterUi.observed()<=imageBefore.lower()&&imageBefore.observed()<=lower
-                &&lower<=now&&now<deadline&&NativeProgressPublication.frameFresh(now,lower);
+                &&lower<=now&&NativeProgressPublication.frameFresh(now,lower);
     }
     static boolean afterCrop(OverviewUiProtocol.Report report,BingNavigationSnapshot.Ready before,
             long beforeAt,BingNavigationSnapshot.Ready afterUi,BingNavigationSnapshot.Ready imageBefore,

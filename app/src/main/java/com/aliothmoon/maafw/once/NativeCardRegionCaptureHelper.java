@@ -28,7 +28,7 @@ public final class NativeCardRegionCaptureHelper {
     }
     public static void main(String[] args){
         long started=SystemClock.elapsedRealtime();CardRegionCaptureProtocol.Request request;
-        try{request=CardRegionCaptureProtocol.parseArguments(args,started);}catch(RuntimeException invalid){return;}
+        try{request=CardRegionCaptureProtocol.parseArguments(args,started,true);}catch(RuntimeException invalid){return;}
         Status status=Status.CAPTURE_FAILED;boolean nativeInvoked=false,closed=true;
         Object nativeResult=null,captureArgs=null;Method releaseArgs=null;
         HardwareBuffer buffer=null;Bitmap hardwareBitmap=null,softwareBitmap=null;Encoded encoded=null;

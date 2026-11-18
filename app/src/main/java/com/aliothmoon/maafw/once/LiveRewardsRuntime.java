@@ -492,6 +492,7 @@ final class LiveRewardsRuntime {
             +" cleanup="+(allResourcesClosed()?"CONFIRMED":"UNKNOWN")+" failure="+safeEnum(failure)
             +" reportPublished="+reportPublished+" releaseReceiptPublished="+releaseReceiptPublished
             +" perceptionState="+perceptionState()
+            +" cropDiagnostic="+(perception==null?"NONE":perception.lastCropDiagnostic())
             +" tapCalls="+tapCalls+" tapCommandSuccesses="+tapSuccesses+" returnCalls="+returnCalls+" returnCommandConfirmed="+returnSuccesses
             +" tapDispatchAttempts="+tapDispatches+" backDispatchAttempts="+backDispatches+" backCommandSuccesses="+backSuccesses+" inputOutcomeUnknown="+inputUnknown
             +" captures="+cropImages+" marks="+markedImages+" fullScreenCaptures=0 minimumVisitDelayMs="+LiveRewardsInput.RETURN_DELAY_MS

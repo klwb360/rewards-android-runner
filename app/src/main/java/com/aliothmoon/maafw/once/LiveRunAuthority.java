@@ -323,6 +323,9 @@ final class LiveRunAuthority {
                     ||!CardRegionCaptureProtocol.validCrop(roi,width,height,rotation))return false;
             this.roi=roi;shape=new BingNavigationSnapshot.Shape(width,height,rotation);requestBound=true;return true;
         }
+        // Ownership alone allows callers to discard an expired request. It cannot dispatch or read pixels.
+        boolean activeForRetirement(long now){return !discarded&&!finished&&scope.activeCrop==this
+                &&scope.crops[phase.ordinal()]==this&&scope.current(now)&&now>=issued;}
         boolean current(long now){return !discarded&&scope.current(now)&&now>=issued&&now<deadline
                 &&(scope.activeCrop==this&&!finished||finished&&scope.crops[phase.ordinal()]==this);}
         synchronized boolean consume(long now)throws IOException{
