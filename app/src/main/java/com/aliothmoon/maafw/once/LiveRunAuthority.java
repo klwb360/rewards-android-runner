@@ -182,11 +182,20 @@ final class LiveRunAuthority {
         private synchronized boolean uiCurrent(UiPermit exact,long now){return exact!=null&&exact.scope==this
                 &&(activeUi==exact&&!exact.finished||latestUi==exact&&exact.finished)&&now>=exact.issued&&now<exact.deadline&&current(now);}
         synchronized ScrollPermit claimScroll(UiPermit exact,ReviewShizukuSwipeActor.Direction direction,long now){
+            return claimScroll(exact,direction,null,now);
+        }
+        synchronized ScrollPermit claimScroll(UiPermit exact,ReviewShizukuSwipeActor.SwipeTarget target,long now){
+            if(!ReviewShizukuSwipeActor.valid(target)||task.kind()==LiveRewardsTypes.Kind.CHECK_IN&&!target.standard())
+                throw new SecurityException("Invalid live scroll geometry");
+            return claimScroll(exact,target.direction(),target,now);
+        }
+        private ScrollPermit claimScroll(UiPermit exact,ReviewShizukuSwipeActor.Direction direction,
+                ReviewShizukuSwipeActor.SwipeTarget target,long now){
             require(now);
             if(exact==null||latestUi!=exact||!exact.finished||!exact.current(now)||direction==null
                     ||activeUi!=null||activeScroll!=null||activeCrop!=null||swipes>=8)
                 throw new SecurityException("Fresh scroll observation required");
-            latestUi=null;activeScroll=new ScrollPermit(this,++swipes,direction,now,Math.min(deadline,exact.deadline));return activeScroll;
+            latestUi=null;activeScroll=new ScrollPermit(this,++swipes,direction,target,now,Math.min(deadline,exact.deadline));return activeScroll;
         }
         synchronized void finishScroll(ScrollPermit exact,ReviewShizukuSwipeActor.Result result,boolean clean,long now){
             if(exact==null||activeScroll!=exact||!exact.dispatchValid(now)||result==null||!result.commandExitZero()
@@ -275,8 +284,16 @@ final class LiveRunAuthority {
     }
     static final class ScrollPermit {
         private final CardScope scope;private final int index;private final ReviewShizukuSwipeActor.Direction direction;
+        private final ReviewShizukuSwipeActor.SwipeTarget target;
         private final long issued,deadline;private boolean actorAttempted,actorClaimed,consumed,burned,finished;
-        private ScrollPermit(CardScope scope,int index,ReviewShizukuSwipeActor.Direction direction,long issued,long deadline){this.scope=scope;this.index=index;this.direction=direction;this.issued=issued;this.deadline=deadline;}
+        private ScrollPermit(CardScope scope,int index,ReviewShizukuSwipeActor.Direction direction,
+                ReviewShizukuSwipeActor.SwipeTarget target,long issued,long deadline){
+            this.scope=scope;this.index=index;this.direction=direction;this.target=target;this.issued=issued;this.deadline=deadline;
+        }
+        boolean matchesTarget(ReviewShizukuSwipeActor.SwipeTarget candidate){
+            return ReviewShizukuSwipeActor.valid(candidate)&&candidate.direction()==direction
+                    &&(target==null?candidate.standard():target==candidate);
+        }
         boolean live(){return scope.run.live;}
         boolean current(long now){return !finished&&scope.activeScroll==this&&scope.current(now)&&now>=issued&&now<deadline;}
         synchronized boolean claimActor(long now){boolean first=!actorAttempted;actorAttempted=true;

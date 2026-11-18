@@ -414,7 +414,14 @@ final class LiveRewardsRuntime {
             writeForegroundReceipt();
             if(!taskInputAllowed)writeReadOnlyReceipt();
             writeFocusReceipt();
+            if(taskInputAllowed && !singleTask)writeScrollTrace();
         }catch(Throwable failed){failure="REPORT_PUBLICATION_FAILED";}
+    }
+    private void writeScrollTrace()throws Exception{
+        JSONObject trace=new JSONObject().put("schemaVersion",1).put("runId",runId).put("day",runDay)
+                .put("reportSha256",reportSha256)
+                .put("activityScrollTrace",perception==null?new JSONArray():perception.activityScrollTrace());
+        verifyArtifactRoot();writeFile(artifacts,"SCROLL.json",trace.toString().getBytes(StandardCharsets.UTF_8));verifyArtifactRoot();
     }
     private void writeReadOnlyReceipt()throws Exception{
         var exact=readOnlyPreflight;

@@ -5,12 +5,14 @@ import android.os.SystemClock;
 import com.aliothmoon.maafw.rewards.RewardRegionLocator.Box;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import org.json.JSONObject;
+import org.json.JSONArray;
 
 /** Production local-only UI -> reveal -> direct card crop -> native ROI OCR chain. */
 final class LiveRewardsPerception {
@@ -33,6 +35,7 @@ final class LiveRewardsPerception {
     private final BooleanSupplier hiddenCurrent;
     private final ArtifactSink sink;
     private final LivePreflightHistory history;
+    private final ArrayDeque<JSONObject> scrollTrace = new ArrayDeque<>();
     private List<LiveRewardsTypes.Task> cohort=List.of();
     private boolean nativeClean=true,swipeClean=true;
     private volatile String safeState="NEW";
@@ -133,7 +136,7 @@ final class LiveRewardsPerception {
         return attempted;
     }
     private Roster scan(LiveRewardsTypes.Kind kind)throws Exception{
-        var scope=authority.scanScope(kind);ReviewShizukuSwipeActor.Direction previous=null;
+        var scope=authority.scanScope(kind);ReviewShizukuSwipeActor.SwipeTarget previous=null;
         for(int attempt=0;attempt<=8;attempt++){
             long generation = navigation.recoveryGeneration();
             Frame frame=readUi(scope,LiveRewardsTypes.Phase.BEFORE);var base=frame.report().base();
@@ -152,10 +155,14 @@ final class LiveRewardsPerception {
             if(kind==LiveRewardsTypes.Kind.CHECK_IN&&roster.size()==1||kind!=LiveRewardsTypes.Kind.CHECK_IN&&count>=1&&roster.size()==count)
                 return new Roster(List.copyOf(roster),true);
             var shape=frame.after().profile().shape();
-            var selected=kind==LiveRewardsTypes.Kind.CHECK_IN?CardRevealProbeTarget.select(base,shape.width(),shape.height()):
-                    RemainingCardTarget.select(base,shape.width(),shape.height(),new RemainingCardChoice(role,1),previous).selection();
+            var activity=kind==LiveRewardsTypes.Kind.CHECK_IN?null:
+                    RemainingCardTarget.select(base,shape.width(),shape.height(),new RemainingCardChoice(role,1),
+                            previous==null?null:previous.direction());
+            var selected=activity==null?CardRevealProbeTarget.select(base,shape.width(),shape.height()):activity.selection();
             if(attempt==8||selected.state()!=CardRevealProbeTarget.State.SCROLL)return new Roster(List.copyOf(roster),false);
-            previous=selected.direction();scroll(scope,frame,previous);pause(scope,250);
+            previous=activity==null?new ReviewShizukuSwipeActor.SwipeTarget(shape.width(),shape.height(),shape.rotation(),selected.direction()):
+                    activity.swipeTarget(shape,previous);
+            scroll(scope,frame,previous);pause(scope,250);
         }
         return new Roster(List.of(),false);
     }
@@ -186,8 +193,37 @@ final class LiveRewardsPerception {
                 .put("realExecutions",0).toString().getBytes(StandardCharsets.UTF_8));
         return result;
     }
+    synchronized JSONArray activityScrollTrace() {
+        return new JSONArray(scrollTrace);
+    }
+
+    private synchronized void recordActivityPosition(LiveRewardsTypes.Task task, String phase, int ordinal, int swipes,
+            OverviewUiProtocol.Report report, int height, RemainingCardTarget.Result result,
+            ReviewShizukuSwipeActor.SwipeTarget planned, boolean identityMatched) throws org.json.JSONException {
+        Box card = null;
+        if (identityMatched && report.cards() != null) {
+            for (var item : report.cards().items()) {
+                if (item.index() == ordinal && item.role() == LiveTaskMatcher.role(task.kind())) {
+                    card = item.coarse();
+                    break;
+                }
+            }
+        }
+        var view = report.overview() == null ? null : report.overview().viewport();
+        var selection = result.selection();
+        var sample = new JSONObject().put("kind",task.kind().name()).put("phase",phase).put("ordinal",ordinal)
+                .put("swipes",swipes).put("state",selection.state().name())
+                .put("direction",selection.direction()==null?"NONE":selection.direction().name())
+                .put("plannedDistance",planned==null?0:planned.distance()).put("edgeGap",result.edgeGap())
+                .put("cardTop",card==null?-1:card.top()).put("cardBottom",card==null?-1:card.bottom())
+                .put("safeTop",view==null?-1:Math.max(view.top()+1,height/5))
+                .put("safeBottom",view==null?-1:Math.min(view.bottom()-1,height*9/10));
+        if (scrollTrace.size() == 96) scrollTrace.removeFirst();
+        scrollTrace.addLast(sample);
+    }
+
     private Located locate(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Phase phase,LiveRewardsTypes.Task expected)throws Exception{
-        CardRevealProbeTarget.Selection previousCandidate=null;ReviewShizukuSwipeActor.Direction previousSearch=null;
+        CardRevealProbeTarget.Selection previousCandidate=null;ReviewShizukuSwipeActor.SwipeTarget previousSearch=null;
         int swipes=0;long firstScroll=-1;
         long generation = navigation.recoveryGeneration();
         for(int count=0;count<20;count++){
@@ -204,16 +240,22 @@ final class LiveRewardsPerception {
             if(expected.kind()!=LiveRewardsTypes.Kind.CHECK_IN&&parent!=null&&parent.target()>0&&parent.current()==parent.target())
                 return new Located(frame,match,null,"REGION_COMPLETE_SKIP",swipes,elapsed(firstScroll));
             CardRevealProbeTarget.Selection selected;
+            ReviewShizukuSwipeActor.SwipeTarget activityMove=null;
             if(expected.kind()==LiveRewardsTypes.Kind.CHECK_IN)selected=CardRevealProbeTarget.select(base,shape.width(),shape.height());
             else{
                 // A missing identity is never replaced by the old ordinal. Ordinal 1 is search direction only.
                 int ordinal=match.state()==LiveTaskMatcher.State.UNIQUE?match.item().index():1;
-                var located=RemainingCardTarget.select(base,shape.width(),shape.height(),new RemainingCardChoice(LiveTaskMatcher.role(expected.kind()),ordinal),previousSearch);
-                selected=located.selection();
+                var activity=RemainingCardTarget.select(base,shape.width(),shape.height(),new RemainingCardChoice(LiveTaskMatcher.role(expected.kind()),ordinal),
+                        previousSearch==null?null:previousSearch.direction());
+                selected=activity.selection();
                 if(match.state()==LiveTaskMatcher.State.MISSING){
                     int known=expected.kind()==LiveRewardsTypes.Kind.DAILY?base.cards().dailyCount():base.cards().moreCount();
                     if(known>=0)return new Located(frame,match,null,"TASK_NOT_IN_CURRENT_ROSTER",swipes,elapsed(firstScroll));
                 }
+                if (selected.state()==CardRevealProbeTarget.State.SCROLL && swipes<8)
+                    activityMove=activity.swipeTarget(shape,previousSearch);
+                recordActivityPosition(expected,phase(scope,phase),ordinal,swipes,base,shape.height(),activity,
+                        activityMove,match.state()==LiveTaskMatcher.State.UNIQUE);
             }
             if(selected.state()==CardRevealProbeTarget.State.CANDIDATE){
                 if(match.state()!=LiveTaskMatcher.State.UNIQUE)return new Located(frame,match,null,"TASK_IDENTITY_UNAVAILABLE",swipes,elapsed(firstScroll));
@@ -226,7 +268,9 @@ final class LiveRewardsPerception {
             previousCandidate=null;
             if(selected.state()!=CardRevealProbeTarget.State.SCROLL||swipes>=8)
                 return new Located(frame,match,null,selected.state().name(),swipes,elapsed(firstScroll));
-            if(firstScroll<0)firstScroll=now();previousSearch=selected.direction();
+            if(firstScroll<0)firstScroll=now();
+            previousSearch=activityMove!=null?activityMove:
+                    new ReviewShizukuSwipeActor.SwipeTarget(shape.width(),shape.height(),shape.rotation(),selected.direction());
             scroll(scope,frame,previousSearch);swipes++;pause(scope,250);
         }
         return new Located(null,null,null,"UI_OBSERVATION_LIMIT",swipes,elapsed(firstScroll));
@@ -300,11 +344,13 @@ final class LiveRewardsPerception {
         state("UI_QUALIFIED");
         return new Frame(permit,report,before[0],beforeAt[0],after);
     }
-    private void scroll(LiveRunAuthority.CardScope scope,Frame frame,ReviewShizukuSwipeActor.Direction direction)throws Exception{
+    private void scroll(LiveRunAuthority.CardScope scope,Frame frame,ReviewShizukuSwipeActor.SwipeTarget target)throws Exception{
         state("SCROLL_BEGIN");
-        require(scope);if(frame==null||direction==null)throw new SecurityException("Current scroll frame required");
-        var source=frame.after();var shape=source.profile().shape();var permit=scope.claimScroll(frame.permit(),direction,now());
-        var target=new ReviewShizukuSwipeActor.SwipeTarget(shape.width(),shape.height(),shape.rotation(),direction);
+        require(scope);if(frame==null||target==null)throw new SecurityException("Current scroll frame required");
+        var source=frame.after();var shape=source.profile().shape();
+        if(target.fullDisplayWidth()!=shape.width()||target.fullDisplayHeight()!=shape.height()||target.rotation()!=shape.rotation())
+            throw new SecurityException("Scroll target requires the current display");
+        var permit=scope.claimScroll(frame.permit(),target,now());
         var actor=ReviewShizukuSwipeActor.forLiveRun(context,permit);
         var result=actor.swipe(target,new ReviewShizukuSwipeActor.DispatchGate(){
             private boolean valid(){return permit.current(now())&&current(scope)&&source.sameSource(navigation.template(()->permit.current(now())&&current(scope)));}
