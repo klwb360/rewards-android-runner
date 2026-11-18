@@ -13,6 +13,7 @@ final class ReviewShizukuSwipeActor {
     private static final ProcessFence PROCESS = new ProcessFence();
     static final int MAX_ACTORS = 2;
     static final int DURATION_MILLIS = 400;
+    static final int MIN_DISTANCE = 200;
     static final class ProcessFence {
         private final java.util.concurrent.atomic.AtomicInteger created=new java.util.concurrent.atomic.AtomicInteger();
         private final java.util.concurrent.atomic.AtomicInteger locateCreated=new java.util.concurrent.atomic.AtomicInteger();
@@ -24,13 +25,18 @@ final class ReviewShizukuSwipeActor {
     boolean knownClean(){return resourcesKnownClean;}
 
     enum Direction { UP, DOWN }
-    record SwipeTarget(int fullDisplayWidth, int fullDisplayHeight, int rotation, Direction direction) {
+    record SwipeTarget(int fullDisplayWidth, int fullDisplayHeight, int rotation, Direction direction, int distance) {
+        SwipeTarget(int fullDisplayWidth,int fullDisplayHeight,int rotation,Direction direction){
+            this(fullDisplayWidth,fullDisplayHeight,rotation,direction,standardDistance(fullDisplayHeight));
+        }
         SwipeTarget(int fullDisplayWidth,int fullDisplayHeight,int rotation){this(fullDisplayWidth,fullDisplayHeight,rotation,Direction.UP);}
+        static int standardDistance(int height){return (int)((long)height*4/5 - (long)height*7/20);}
+        boolean standard(){return distance==standardDistance(fullDisplayHeight);}
         int x(){return fullDisplayWidth/2;}
         int fromY(){return direction==Direction.DOWN?upperY():lowerY();}
         int toY(){return direction==Direction.DOWN?lowerY():upperY();}
-        private int lowerY(){return (int)((long)fullDisplayHeight*4/5);}
-        private int upperY(){return (int)((long)fullDisplayHeight*7/20);}
+        private int lowerY(){return upperY()+distance;}
+        private int upperY(){return (int)((long)fullDisplayHeight*7/20)+(standardDistance(fullDisplayHeight)-distance)/2;}
     }
     record DisplayShape(int width, int height, int rotation) {}
     enum Kind { REJECTED, COMMAND_EXITED, DISPATCH_UNKNOWN }
@@ -147,6 +153,8 @@ final class ReviewShizukuSwipeActor {
     }
     Result swipe(SwipeTarget target, DispatchGate gate) {
         if (!valid(target) || target.direction()!=allowedDirection || gate == null) return rejected(false, Reason.INVALID_INPUT);
+        if (liveRunPermit==null ? !target.standard() : !liveRunPermit.matchesTarget(target))
+            return rejected(false, Reason.INVALID_INPUT);
         // Never restore this budget, even for preflight failure or an uncertain gate.
         if (!spent.compareAndSet(false, true)) return rejected(false, Reason.ALREADY_SPENT);
         if(quarantined()||!scopeCurrent())return rejected(false,Reason.PREFLIGHT_UNAVAILABLE);
@@ -203,7 +211,7 @@ final class ReviewShizukuSwipeActor {
                 && (long)t.fullDisplayWidth() * t.fullDisplayHeight() <= 4L * 1024 * 1024
                 && t.rotation() == 0 && t.fullDisplayHeight()>t.fullDisplayWidth()
                 && t.x()>0&&t.x()<t.fullDisplayWidth()
-                && Math.abs(t.fromY()-t.toY())>=200
+                && t.distance()>=MIN_DISTANCE && t.distance()<=SwipeTarget.standardDistance(t.fullDisplayHeight())
                 && Math.min(t.fromY(),t.toY())>=(long)t.fullDisplayHeight()/5
                 && Math.max(t.fromY(),t.toY())<=(long)t.fullDisplayHeight()*17/20;
     }

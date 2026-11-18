@@ -4,7 +4,36 @@ import com.aliothmoon.maafw.rewards.RewardRegionLocator.Box;
 
 /** One exact structural slot. It never substitutes the whole activity container for a card. */
 final class RemainingCardTarget {
-    record Result(CardRevealProbeTarget.Selection selection,String reason,int dailyCount,int moreCount){}
+    record Result(CardRevealProbeTarget.Selection selection,String reason,int dailyCount,int moreCount,
+            int edgeGap,int verticalSlack){
+        Result(CardRevealProbeTarget.Selection selection,String reason,int dailyCount,int moreCount){
+            this(selection,reason,dailyCount,moreCount,0,0);
+        }
+        ReviewShizukuSwipeActor.SwipeTarget swipeTarget(BingNavigationSnapshot.Shape shape,
+                ReviewShizukuSwipeActor.SwipeTarget previous){
+            if(shape==null||selection.state()!=CardRevealProbeTarget.State.SCROLL||selection.direction()==null)
+                throw new IllegalStateException("Current scroll selection required");
+            int height=shape.height();
+            int full=ReviewShizukuSwipeActor.SwipeTarget.standardDistance(height);
+            int distance=full;
+            if(edgeGap>0){
+                // Move just past the violated edge. Leave room for the opposite border on tall cards.
+                int inset=Math.min(height/20,verticalSlack/2);
+                distance=Math.max(ReviewShizukuSwipeActor.MIN_DISTANCE,edgeGap+inset);
+            }
+            if(previous!=null && previous.fullDisplayWidth()==shape.width() && previous.fullDisplayHeight()==height
+                    && previous.rotation()==shape.rotation()){
+                if(previous.direction()!=selection.direction()){
+                    // Crossing the card brackets it between two observations. Reduce the return stride.
+                    distance=Math.min(distance,Math.max(ReviewShizukuSwipeActor.MIN_DISTANCE,previous.distance()/2));
+                }else if(edgeGap==0){
+                    // While searching without an edge, do not immediately undo a fine correction.
+                    distance=Math.min(distance,previous.distance());
+                }
+            }
+            return new ReviewShizukuSwipeActor.SwipeTarget(shape.width(),height,shape.rotation(),selection.direction(),Math.min(full,distance));
+        }
+    }
     static Result select(OverviewUiProtocol.Report report,int width,int height,RemainingCardChoice choice){
         return select(report,width,height,choice,null);
     }
@@ -46,8 +75,9 @@ final class RemainingCardTarget {
             return held(CardRevealProbeTarget.State.UNQUALIFIED,"INVALID_VIEWPORT",daily,more);
         int top=Math.max(view.top()+1,height/5),bottom=Math.min(view.bottom()-1,height*9/10);
         if(bottom<=top||coarse.height()+24>bottom-top)return held(CardRevealProbeTarget.State.TOO_LARGE,"CARD_TOO_LARGE",daily,more);
-        if(coarse.top()-12<top)return scroll(report,ReviewShizukuSwipeActor.Direction.DOWN,daily,more);
-        if(coarse.bottom()+12>bottom)return scroll(report,ReviewShizukuSwipeActor.Direction.UP,daily,more);
+        int slack=bottom-top-coarse.height()-24;
+        if(coarse.top()-12<top)return scroll(report,ReviewShizukuSwipeActor.Direction.DOWN,daily,more,top-(coarse.top()-12),slack);
+        if(coarse.bottom()+12>bottom)return scroll(report,ReviewShizukuSwipeActor.Direction.UP,daily,more,coarse.bottom()+12-bottom,slack);
         if(!selected.completeVisible())return held(CardRevealProbeTarget.State.UNQUALIFIED,"CARD_PARTIAL",daily,more);
         Box crop=new Box(coarse.left()-12,coarse.top()-12,coarse.right()+12,coarse.bottom()+12);
         if(crop.left()<=view.left()||crop.right()>=view.right()||crop.top()<=view.top()||crop.bottom()>=view.bottom()
@@ -85,11 +115,14 @@ final class RemainingCardTarget {
         case MORE_ACTIVITIES->4;
     };}
     private static Result scroll(OverviewUiProtocol.Report report,ReviewShizukuSwipeActor.Direction direction,int daily,int more){
+        return scroll(report,direction,daily,more,0,0);
+    }
+    private static Result scroll(OverviewUiProtocol.Report report,ReviewShizukuSwipeActor.Direction direction,int daily,int more,int gap,int slack){
         var hint=report.scrollHint();boolean allowed=direction==ReviewShizukuSwipeActor.Direction.UP
                 ?hint==OverviewUiProtocol.ScrollHint.DECLARED_FORWARD||hint==OverviewUiProtocol.ScrollHint.DECLARED_BOTH
                 :hint==OverviewUiProtocol.ScrollHint.DECLARED_BACKWARD||hint==OverviewUiProtocol.ScrollHint.DECLARED_BOTH;
         return new Result(new CardRevealProbeTarget.Selection(allowed?CardRevealProbeTarget.State.SCROLL:CardRevealProbeTarget.State.NO_DIRECTION,
-                null,null,allowed?direction:null),allowed?"SCROLL":"NO_DECLARED_DIRECTION",daily,more);
+                null,null,allowed?direction:null),allowed?"SCROLL":"NO_DECLARED_DIRECTION",daily,more,gap,slack);
     }
     private static Result held(CardRevealProbeTarget.State state,String reason,int daily,int more){return new Result(new CardRevealProbeTarget.Selection(state,null,null,null),reason,daily,more);}
     private RemainingCardTarget(){}
