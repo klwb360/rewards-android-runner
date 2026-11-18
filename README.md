@@ -1,138 +1,94 @@
-# Rewards Android 接手说明
+# Android 版 Bing Rewards Runner
 
-> 状态快照：2026-11-13。此目录是基于 MaaFwApp 的 Android 工作副本，仍处于开发和验证阶段。下面保留的 MaaFwApp 原说明是上游通用文档，不能视为本工作副本已经完成构建、安装或验收，也不能直接用上游克隆地址取得本次修改。
+在安卓设备上读取 Bing Rewards 页面，识别签入、每日活动和更多活动。程序用界面结构确定区域，用完整卡片的局部图像和设备端 OCR 定位任务，再按当日账本决定是否执行。APK 提供需单独确认的真实流程和独立只读入口。
 
-## 项目现状
-
-- Rewards 试验包使用独立的 capture-review 模块和 captureReviewDebug 变体。它共享 app/src/main 下的部分源码；不要把它与普通 app 模块的版本混为一谈。
-- capture-review 的源码配置为 V54。OwnState 只读状态汇总及四处修订已进入工作副本源码；保存的独立 Java 结果为 46 项测试通过，且受检源码与记录的哈希一致。这不是 Android 单测、构建、lint 或真机验收通过的证明。
-- 本机已有 APK 的输出元数据仍是 V53。最近一次 V54 汇总日志没有最终成功结果，因此 V54 的 Android 构建、lint、安装和设备行为均未确认；这次也没有检查当前设备上安装的是哪个版本。
-- experiments/offline-reading-v3 保存独立合成实验源码，不参与 Android 构建。离线 Reading v3 的持久化和残留检查尚未接入 Android 生产源码。较新的独立 Java 验证记录为 6 组、1,734 个合成断言；这不是 Android 集成测试，也不证明实际积分、恢复、迁移或重试能力。实验不得据此连接真实任务。
-- 当前源码中的 CaptureReleaseGate 将 REVIEWED_REAL_CAPTURE 设为 true，capture-review 的清单启用了投影服务。不要依据历史报告假定本版“默认关闭”。运行或安装前应重新审查权限、触发入口与用户授权。
-
-## 目录与依赖
-
-- capture-review：Rewards 试验构建目标，复用 app 中指定的源码、资源和测试。
-- app：MaaFwApp 主模块及共享的 Android 源码；once、readonly、rewards 等目录包含相关实现。
-- build-logic、gradle、annotation-api、ksp-processor、semi-icons、hidden-api：构建逻辑和辅助模块；macrobenchmark、testapp 为额外测试模块。
-- 本次公开源码有意不包含 OCR 的 det.onnx、rec.onnx、keys.txt：这些模型在原工作副本中存在，但其来源与再分发许可尚未确认。相关 OCR 功能在补齐经核准的模型之前不可用；不要假定仓库包含完整运行资源。原上游 M9A 测试资源和生成的 baseline profile 也未纳入，依赖这些文件的测试或优化需另行准备。
-- 本目录不含完整的可移植构建环境。需要 JDK 17、Android SDK（compileSdk 37，minSdk 28，targetSdk 36）、CMake 3.22.1，以及项目需要的 Gradle 9.4.1、Android Gradle Plugin 9.2.1、Kotlin 2.3.21 和相应依赖。部分构建还需要 NDK、MaaFramework 原生库、PI 资源和外部打包配方；具体约定见下方原说明及 INTEGRATION.md。
-- 当前调试配置要求通过 Gradle 属性 diagnosticKeystore 指定本机调试签名文件。签名文件、密码、local.properties、PI 配方和任何本机路径应由接手者安全配置，不要提交到仓库。
-- 之前的本机检查脚本位于项目目录之外，并依赖那台机器上的 SDK、JDK、依赖缓存和配方；不能假定复制本目录后仍可直接运行。新环境可能需要联网获取依赖，须遵守其网络和安全策略。
-
-## 后续构建和检查
-
-先准备并核对上述环境、签名文件、资源及必要权限。以下是当前模块定义的候选检查任务，须将占位路径换成本机配置；它们在本次交接中没有重新运行，也不保证在另一台机器上直接通过：
-
-    .\gradlew.bat -PdiagnosticKeystore="<本机调试签名文件>" :capture-review:testCaptureReviewDebugUnitTest
-    .\gradlew.bat -PdiagnosticKeystore="<本机调试签名文件>" :capture-review:assembleCaptureReviewDebug
-    .\gradlew.bat -PdiagnosticKeystore="<本机调试签名文件>" :capture-review:lintCaptureReviewDebug
-
-分别记录退出码及完整结果，确认测试、构建和 lint 三项的结果均针对同一份最终源码。仅在构建与权限边界核实后，另行安排设备验证；不要把历史 V53 APK 或独立 Java 测试当成 V54 验收。需要真实账户、截图、捕获权限或网络操作的步骤，应先确认授权和隐私边界。
-
-## 资料保护与交接
-
-只提交经过逐项检查的项目源码、必要构建文件和许可资料。不要提交账号或登录状态、令牌与密钥、签名文件、个人配置、原始界面数据、设备截图、私人报告、日志、APK、SDK/JDK、依赖缓存或构建输出。资源和测试素材也要检查来源、许可及是否包含个人信息；缺少的外部依赖应在交接时单独说明。不要删除、迁移或重置已有账户状态和账本来排查问题。
-
----
-
-# 以下为保留的 MaaFwApp 上游通用说明
-# MaaFwApp
-
-MaaFramework 的 Android GUI
-
-[![License](https://img.shields.io/github/license/Aliothmoon/MaaFwApp?style=flat-square&color=4a90d9)](./LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Android%209%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](https://github.com/Aliothmoon/MaaFwApp)
-[![API](https://img.shields.io/badge/minSdk-28-green?style=flat-square)](https://developer.android.com/google/play/requirements/target-sdk)
-[![Commit Activity](https://img.shields.io/github/commit-activity/m/Aliothmoon/MaaFwApp?style=flat-square&color=00d4aa)](https://github.com/Aliothmoon/MaaFwApp/commits)
-[![Stars](https://img.shields.io/github/stars/Aliothmoon/MaaFwApp?style=flat-square&color=ffca28)](https://github.com/Aliothmoon/MaaFwApp/stargazers)
-
-## 项目简介
-
-MaaFwApp 是基于 [MaaFramework](https://github.com/MaaXYZ/MaaFramework) 的 Android 通用 GUI。资源开发者通过 [Project Interface V2](https://github.com/MaaXYZ/MaaFramework/blob/main/docs/zh_cn/3.3-ProjectInterfaceV2%E5%8D%8F%E8%AE%AE.md) 描述任务、选项和界面文本，用户即可在手机上配置并运行自动化任务。
-
-MaaFramework 跑在 [Shizuku](https://shizuku.rikka.app/) 或 root 拉起的特权进程里，截屏和点击走本机 native controller，不经过 adb。
-
-MaaFwApp 本身不包含具体业务资源。Android 上要把资源在**构建期**打进 APK。接入步骤见 [资源接入](INTEGRATION.md)。
-
-## 主要功能
-
-### 任务与资源
-
-- 支持 Project Interface V2 的任务、选项（选择 / 开关 / 多选 / 输入）、预设、分组、`import`、`global_option` 与国际化。
-- 任务说明支持 Markdown、文件路径和 http(s) 链接；首启欢迎、关于页的联系方式 / 许可 / 仓库地址取自 PI 顶层字段。
-- 可同时保存多份运行配置，配置之间互相独立；同一配置里允许重复添加同一任务。
-- 支持 PI 声明的 agent（自定义识别器 / 动作）。
-
-### 运行与设备
-
-- 后台模式：在虚拟屏上跑任务，手机可正常使用，分辨率可选 720P / 1080P。
-- 前台模式：直接操作当前屏幕；可用悬浮球或音量键呼出操作面板。
-- 后台运行时可自动熄屏挂机；定时触发支持亮屏并输入数字 PIN。
-- 运行中在系统通知里显示进度。
-
-### 定时、通知与诊断
-
-- 支持按规则定时执行，可绑定到指定运行配置。
-- 任务结束可发系统通知，也可推到 Server酱、Telegram、Discord、钉钉、KOOK、SMTP、Bark、Qmsg、Gotify 和自定义 Webhook。
-- 每次运行的日志可回看、导出；另有应用错误日志。
-- 资源可在 PI 里配置 Sentry 遥测；只有资源提供了配置、且用户未关闭「帮助改进本项目」时才会发送。任务失败时会附带该任务期间的运行日志与出错截图。
-
-## 运行要求
-
-| 项目 | 要求 |
-|:---|:---|
-| 系统 | Android 9（API 28）及以上 |
-| 提权 | [Shizuku](https://shizuku.rikka.app/) 或 root，二选一，可在应用内切换 |
-| 资源 | 一份符合 Project Interface V2 的资源项目（已打进当前 APK） |
-
-不同资源可能还要求目标应用已安装、通知权限、电池白名单等，以对应资源项目的说明为准。没连上特权进程时只能看界面，不能跑任务。
+**后续开发基线为 V54 / PR #34**，版本名 `0.54-native-own-state`。雷电 Android 14（API 34、x86_64）上的两轮独立只读复查均已通过。基线分支保留实测源码；日常开发从包含本文档的 `main` 新建分支。[固定提交 `c8f90a6`](https://github.com/klwb360/rewards-android-runner/commit/c8f90a6e5a365d4c4a3abec8c50a636d04c64c88) · [基线分支](https://github.com/klwb360/rewards-android-runner/tree/baseline/v54-android14-20261118) · [PR #34](https://github.com/klwb360/rewards-android-runner/pull/34)
 
 ## 快速开始
 
-### 使用已打包的应用
+### 已有基线 APK，在雷电中验证只读流程
 
-1. 安装资源项目提供的 APK。
-2. 按提示授予通知、电池白名单等权限。
-3. 在应用里选择 Shizuku 或 root，完成授权并等到服务连上。
-4. 选择服务器（资源）、核对任务列表，开始运行。
+1. 准备雷电 Android 14 x86_64、Bing 和以 root 身份运行的 Shizuku。
+2. 如果已经安装验收版本，直接进入下一步。需要安装时，先用 `adb devices` 找到目标模拟器序列号。以下为 PowerShell 示例，替换 APK 路径和序列号。同签名覆盖安装使用 `-r` 保留数据；已有历史记录的设备应继续使用原签名。
 
-### 接入自己的资源项目
+   ```powershell
+   $apk = 'D:/rewards/Rewards-V54-PR34-Android14-x86_64.apk'
+   Get-FileHash -Algorithm SHA256 -LiteralPath $apk
+   adb -s emulator-5554 install -r $apk
+   ```
 
-1. 先按 [Project Interface V2 协议](https://github.com/MaaXYZ/MaaFramework/blob/main/docs/zh_cn/3.3-ProjectInterfaceV2%E5%8D%8F%E8%AE%AE.md) 写好 `interface.json` 和资源。开发和排查 Pipeline 请用 MaaFramework 提供的调试工具，不要把本应用当调试器。
-2. 拷贝 [`pi-profile.sample.yaml`](pi-profile.sample.yaml)，填资源路径和包名，放到本仓库之外。
-3. 在 `local.properties` 里写 `pi.profile=<配方的绝对路径>`（或设环境变量 `PI_PROFILE`）。
-4. 拉 MaaFramework 的 Android 产物并出包，详见 [资源接入](INTEGRATION.md)。
+   本机验收 APK 的 SHA-256 为 `66a2f3e2dd46a5510aab8390bacdfc556e2bbe7c36986b954813739069ed5095`。此指纹用于比对归档文件。其他签名或资源组合可生成不同指纹。
+3. 安装后，在 Shizuku 中确认 **Rewards只读** 已获授权。在 Bing 中登录并打开 Rewards 主页，等积分和活动区域加载，再切换到 **Rewards只读**。依次选择 **打开受控确认页（尚不采集） → 打开其余卡片模拟测试（尚不采集） → 打开独立只读预检（不点击任务） → 打开更多活动二次复查（只读） → 确认只读验证更多活动复查**。
+4. 确认后让程序自行读取。完成页显示 `stage=COMPLETE` 与 `released=true` 表示本轮结束且资源已释放。该入口只读界面结构，任务点击、返回、滚动和截图均为零。验收时可从本机导出的 `UI_RECHECK.json` 查看每次读取的结果，从 `RELEASE.json` 核对释放状态。导出到电脑下载目录由本机验收工具完成。
 
-换一份资源 = 换一份配方 + 重新出包，不必改本仓库的代码。
+**如何看第二次复查。** 两次读取共用五秒，第一次结束到第二次至少间隔一秒。两轮实测中，第一次均成功，第二次因余时不足而在启动读取器前停止（`SHARED_SECOND = INSUFFICIENT_BUDGET`）。随后在单独的五秒窗口，第二次读取均成功（`INDEPENDENT_SECOND = QUALIFIED`），收到了输出流结束、进程正常退出、管道关闭和原生清理凭据。该验收覆盖界面读取与释放；账户积分到账情况须另行核实。
 
-## 资源开发
+### 从源码构建
 
-- [Project Interface V2 协议](https://github.com/MaaXYZ/MaaFramework/blob/main/docs/zh_cn/3.3-ProjectInterfaceV2%E5%8D%8F%E8%AE%AE.md)
-- [MaaPracticeBoilerplate](https://github.com/MaaXYZ/MaaPracticeBoilerplate)
-- [把资源打进 MaaFwApp](INTEGRATION.md)
+示例使用 Windows PowerShell，在仓库根目录运行。
 
-## 从源码构建
-
-需要 JDK 17、Android SDK、Python 3。构建用 git 计算版本号：独立 checkout 跟随本仓库，作为 submodule 时跟随最外层主仓库。请在 clone 下来的仓库里执行：
-
-```bash
-git clone https://github.com/Aliothmoon/MaaFwApp.git
-cd MaaFwApp
-python scripts/setup_maa_framework.py
-./gradlew :app:installDebug          # Windows 用 .\gradlew.bat
+```powershell
+git clone https://github.com/klwb360/rewards-android-runner.git
+cd rewards-android-runner
+git switch -c work/my-change
 ```
 
-未配置 `pi.profile` 时构建不会失败，只是包里没有资源。Release 签名读 `KEYSTORE_PATH` 等环境变量或 `local.properties`；缺了就打出未签名包。
+1. 准备 JDK 17、Android SDK Platform 37、Android SDK Platform-Tools、与构建配置兼容的 NDK、CMake 3.22.1 和 Python 3。令 `JAVA_HOME` 指向 JDK，在本机 `local.properties` 配置 SDK 路径。Gradle Wrapper 会获取 Gradle 9.4.1；首次构建需要相应的依赖下载权限或已填充的本地缓存。
+2. 在仓库外创建 PI（Project Interface）配方，例如 `D:/rewards-local/pi-profile.yaml`。其中 `assets` 指向备好的 PI 资源目录。下面的 `app.id` 和变体后缀组合成原生入口核验的包名 `com.aliothmoon.maafw.productrewardsworking.capturereview`。[完整配方示例](pi-profile.sample.yaml) · [资源接入说明](INTEGRATION.md)
 
-## 相关项目
+   ```yaml
+   assets: D:/rewards-local/pi-assets
+   app:
+     id: productrewardsworking
+   ```
 
-- [MaaFramework](https://github.com/MaaXYZ/MaaFramework) — 基于图像识别的自动化框架
+   在仓库根目录的 `local.properties` 中设置 SDK、配方和雷电架构，将示例路径替换为本机路径。
 
-## 开源许可
+   ```properties
+   sdk.dir=D:/Android/Sdk
+   pi.profile=D:/rewards-local/pi-profile.yaml
+   build.debugAbi=x86_64
+   ```
 
-本项目基于 [GNU Affero General Public License v3.0](LICENSE) 开源。
+3. 准备雷电所需的 MaaFramework 原生库。涉及 OCR 时，还需将有权使用且与项目固定摘要一致的 `det.onnx`、`rec.onnx`、`keys.txt` 放入 `app/src/main/assets/bundle/model/ocr/`。这三个文件因来源和再分发许可尚待确认，由开发者在本机单独准备。下方脚本只准备原生库。[模型校验规则](app/src/main/java/com/aliothmoon/maafw/once/MaaOnceModelPolicy.java)
 
-## 致谢
+   ```powershell
+   python scripts/setup_maa_framework.py --tag v5.15.0 --abi x86_64
+   ```
 
-MaaFwApp 使用了 [MaaFramework](https://github.com/MaaXYZ/MaaFramework)、[Shizuku](https://github.com/RikkaApps/Shizuku) 等开源项目。
+4. 准备已存在的 Android 调试签名库，使用模块要求的标准调试别名 `androiddebugkey` 和调试口令。将下例路径换成签名库的绝对路径，然后针对同一份源码执行三项检查。[签名配置和构建目标](capture-review/build.gradle.kts)
+
+   ```powershell
+   $debugKey = 'D:/rewards-local/debug.keystore'
+   .\gradlew.bat "-PdiagnosticKeystore=$debugKey" :capture-review:testCaptureReviewDebugUnitTest :capture-review:assembleCaptureReviewDebug :capture-review:lintCaptureReviewDebug
+   ```
+
+   成功后 APK 位于 `capture-review/build/outputs/apk/captureReview/debug/capture-review-captureReview-debug.apk`。基线在备齐配方、资源和缓存的环境中完成离线单测、打包和 lint。共发现 2,713 项单测，其中 2,712 项通过，1 项符号链接测试受环境限制，仍待验证。lint 为 0 错误、922 条警告。公开仓库提供源码；签名、模型、APK、账户信息和设备原始诊断保留在本机。
+
+## 技术栈
+
+| 层次 | 本版采用的实现 |
+|---|---|
+| Android 应用 | Java、Kotlin 2.3.21、Android 原生 View 和 Jetpack Compose。构建配置为 minSdk 28、targetSdk 36、compileSdk 37，本版原生 Rewards 流程入口要求 API 34 及以上。 |
+| 设备端识别 | Shizuku 13.1.5 启动受控读取器，使用 Android UiAutomation 获取活动窗口结构。需要卡片图像时，只采集完整卡片的局部区域，MaaFramework 经 JNA 5.18.1 在设备上运行 OCR。 |
+| 原生与构建 | C++17 原生桥接、CMake 3.22.1、JDK 17、Gradle 9.4.1、Android Gradle Plugin 9.2.1。雷电基线使用 MaaFramework v5.15.0 的 x86_64 原生库。 |
+| 测试与验收 | JUnit 4 单测覆盖预算、来源校验、资源释放等分支。Android lint 做静态检查；模拟器中的独立入口验证实际读取、进程退出和设备端收据。 |
+
+## 项目结构
+
+| 位置 | 维护内容 |
+|---|---|
+| [capture-review/](capture-review/) | Rewards APK 的构建模块，含专用清单、包名后缀和 `captureReviewDebug` 变体。其构建脚本指定从 `app` 共享哪些源码与测试。 |
+| [app/…/once/](app/src/main/java/com/aliothmoon/maafw/once/) | 原生运行入口、授权、来源核对、界面读取、卡片局部 OCR、输入和清理收据。 |
+| [app/…/readonly/](app/src/main/java/com/aliothmoon/maafw/readonly/) · [app/…/rewards/](app/src/main/java/com/aliothmoon/maafw/rewards/) | 前者提供只读状态界面，后者包含卡片区域、边界和任务语义识别规则。 |
+| [RewardsCore](app/src/main/java/io/github/klwb360/rewards/core/RewardsCore.java) | 独立的 Java 任务、日期和状态持久化逻辑。当前安卓整轮执行由 `LiveRewardsRuntime` 与 `LiveRewardsCoordinator` 驱动。 |
+| [app/src/main/native/](app/src/main/native/) · [scripts/](scripts/) | Android 原生桥接和 MaaFramework 等构建资源的准备脚本。 |
+| [app/src/test/](app/src/test/) · [experiments/offline-reading-v3/](experiments/offline-reading-v3/) | 共享单元测试与独立的阅读实验。阅读实验在 Android 构建之外运行，合成断言只验证实验逻辑。 |
+| [build-logic/](build-logic/) · [gradle/](gradle/) | Android 构建约定、PI 资源打包、依赖版本与 Wrapper。`hidden-api`、`annotation-api`、`ksp-processor`、`semi-icons` 提供共用组件；`macrobenchmark`、`testapp` 用于专项测试。 |
+
+### 从哪里跟踪一轮执行
+
+- **更多活动的只读二次复查**从 `LiveMoreUiRecheck` 进入 `LiveRewardsPerception` 的生产读取路径。排查短预算、进程退出或 EOF 时，从 `AndroidLiveUiReader` 和 `LiveUiReadStream` 入手。[只读入口](app/src/main/java/com/aliothmoon/maafw/once/LiveMoreUiRecheck.java) · [界面读取器](app/src/main/java/com/aliothmoon/maafw/once/AndroidLiveUiReader.java)
+- **真实流程**经单独的可见确认后按签入、每日活动、更多活动执行。来源通过后，按区域进度、同卡状态和当日账本跳过已完成或已尝试项。签入在原页复查；活动卡点击成功后静置至少五秒，再返回一次。返回后重新读取并按任务身份匹配，避免列表重排引起重复操作。搜索、阅读和七日进度的点击不在这条流程内。[协调器](app/src/main/java/com/aliothmoon/maafw/once/LiveRewardsCoordinator.java) · [当日账本](app/src/main/java/com/aliothmoon/maafw/once/LiveRewardsLedger.java)
+
+本项目基于 MaaFwApp，使用 MaaFramework 和 Shizuku。上游通用功能、致谢和资源开发说明单独保留。[MaaFwApp 上游说明](MAAFWAPP.md) · [AGPL-3.0 许可证](LICENSE)
