@@ -11,8 +11,13 @@ final class LivePerceptionBudget {
         return crop(status,helper,true,expired||pastCaptureDeadline);
     }
     static boolean ui(AndroidLiveUiReader.FixedStatus status,NativeUiStructureProtocol.Reason helper,boolean clean,boolean expired){
-        return clean&&expired&&(status==AndroidLiveUiReader.FixedStatus.READ_TIMEOUT||status==AndroidLiveUiReader.FixedStatus.CANCELLED)
+        return clean&&expired&&status==AndroidLiveUiReader.FixedStatus.READ_TIMEOUT
                 &&(helper==null||helper==NativeUiStructureProtocol.Reason.OK||helper==NativeUiStructureProtocol.Reason.TIMEOUT);
+    }
+    static boolean retireUi(LiveRewardsTypes.Phase phase, AndroidLiveUiReader.Result read){
+        if(phase==null||phase==LiveRewardsTypes.Phase.BEFORE||!read.knownClean())return false;
+        return read.fixedStatus()==AndroidLiveUiReader.FixedStatus.INSUFFICIENT_BUDGET&&!read.invoked()
+                ||read.fixedStatus()==AndroidLiveUiReader.FixedStatus.BUDGET_RECEIPT&&read.invoked();
     }
     static boolean crop(AndroidCardRegionCapture.FixedStatus status,CardRegionCaptureProtocol.Status helper,boolean clean,boolean expired){
         if(!clean||!expired)return false;

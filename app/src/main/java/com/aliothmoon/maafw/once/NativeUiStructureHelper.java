@@ -29,7 +29,8 @@ public final class NativeUiStructureHelper {
         long start = SystemClock.elapsedRealtime(), deadline;
         if (args == null || !validReadyArguments(args) || !NativeUiStructureProtocol.validNonce(args[0])) return;
         boolean readyMode=args.length==3;
-        boolean liveMode=readyMode&&"LIVE_REWARDS_UI_V1".equals(args[2]);
+        boolean afterMode=readyMode&&"LIVE_REWARDS_AFTER_V1".equals(args[2]);
+        boolean liveMode=readyMode&&"LIVE_REWARDS_UI_V1".equals(args[2])||afterMode;
         boolean visitMode=readyMode&&"LIVE_VISIT_V1".equals(args[2]);
         boolean cardsMode=readyMode&&"OVERVIEW_CARDS_V1".equals(args[2])||liveMode||visitMode;
         boolean overviewMode=readyMode&&"OVERVIEW_V5".equals(args[2])||cardsMode;
@@ -44,6 +45,8 @@ public final class NativeUiStructureHelper {
             if (deadline <= start || deadline - start > 10000) return;
         } catch (RuntimeException ignored) { return; }
         long readEnd = Math.min(deadline, start + (readyMode?8000:5000)), acquired = start;
+        boolean liveReceipt=liveMode||visitMode;
+        if(afterMode)readEnd=Math.min(readEnd,LiveUiReadStream.workDeadline(deadline));
         NativeUiReadyDiagnostics.Idle idle=NativeUiReadyDiagnostics.Idle.NOT_REQUESTED;
         NativeUiReadyDiagnostics.Accumulator diagnostics=readyMode?new NativeUiReadyDiagnostics.Accumulator():null;
         NativeUiFieldDiagnostics.Accumulator fieldDiagnostics=fieldMode?new NativeUiFieldDiagnostics.Accumulator(locatedMode):null;
@@ -61,6 +64,10 @@ public final class NativeUiStructureHelper {
         HandlerThread thread = null;
         UiAutomation automation = null;
         boolean attemptedConnect = false, clean = true;
+        boolean structureRejected=false;
+        var treeRelease=LiveUiReadStream.Resource.NOT_OPENED;
+        var connectionRelease=LiveUiReadStream.Resource.NOT_OPENED;
+        var threadRelease=LiveUiReadStream.Resource.NOT_OPENED;
         ArrayDeque<Pending> pending = new ArrayDeque<>();
         List<NativeUiStructureParser.Node> records = new ArrayList<>();
         List<NativeUiBoundPointsParser.Node> boundRecords = new ArrayList<>();
@@ -69,8 +76,11 @@ public final class NativeUiStructureHelper {
         Rect bounds = new Rect();
         try {
             if (Process.myUid() != 0) throw new Stop(NativeUiStructureProtocol.Reason.NOT_ROOT);
+            if(afterMode && readEnd-SystemClock.elapsedRealtime()<LiveUiReadStream.IDLE_MILLIS)
+                throw new Stop(NativeUiStructureProtocol.Reason.TIMEOUT);
             checkTime(readEnd);
             thread = new HandlerThread("NativeUiStructure");
+            threadRelease=LiveUiReadStream.Resource.UNKNOWN;
             thread.start();
             Class<?> connectionType = Class.forName("android.app.IUiAutomationConnection");
             Object connection = Class.forName("android.app.UiAutomationConnection").getConstructor().newInstance();
@@ -78,6 +88,7 @@ public final class NativeUiStructureHelper {
                     .newInstance(thread.getLooper(), connection);
             checkTime(readEnd);
             attemptedConnect = true;
+            connectionRelease=LiveUiReadStream.Resource.UNKNOWN;
             UiAutomation.class.getMethod("connect", int.class).invoke(automation,
                     UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
             checkTime(readEnd);
@@ -98,7 +109,8 @@ public final class NativeUiStructureHelper {
                 throw new Stop(NativeUiStructureProtocol.Reason.WINDOW_CONFIG_UNAVAILABLE);
             }
             if(readyMode){
-                if(readEnd-SystemClock.elapsedRealtime()<3000){idle=NativeUiReadyDiagnostics.Idle.TIMEOUT;throw new Stop(NativeUiStructureProtocol.Reason.IDLE_TIMEOUT);}
+                if(readEnd-SystemClock.elapsedRealtime()<3000){idle=NativeUiReadyDiagnostics.Idle.TIMEOUT;
+                    throw new Stop(afterMode?NativeUiStructureProtocol.Reason.TIMEOUT:NativeUiStructureProtocol.Reason.IDLE_TIMEOUT);}
                 try{automation.waitForIdle(500,3000);idle=NativeUiReadyDiagnostics.Idle.IDLE_OBSERVED;}
                 catch(java.util.concurrent.TimeoutException timedOut){idle=NativeUiReadyDiagnostics.Idle.TIMEOUT;throw new Stop(NativeUiStructureProtocol.Reason.IDLE_TIMEOUT);}
                 catch(Throwable ignored){idle=NativeUiReadyDiagnostics.Idle.FAILED;throw new Stop(NativeUiStructureProtocol.Reason.IDLE_FAILED);}
@@ -106,6 +118,7 @@ public final class NativeUiStructureHelper {
             checkTime(readEnd);
             AccessibilityNodeInfo root = automation.getRootInActiveWindow();
             if (root == null) throw new Stop(NativeUiStructureProtocol.Reason.NO_ROOT);
+            treeRelease=LiveUiReadStream.Resource.UNKNOWN;
             pending.add(new Pending(root, 0, -1, 0));
             if (!packageMatches(root.getPackageName())) throw new Stop(NativeUiStructureProtocol.Reason.FOREIGN_ROOT);
             if (!root.isVisibleToUser()) throw new Stop(NativeUiStructureProtocol.Reason.WINDOW_UNAVAILABLE);
@@ -184,8 +197,11 @@ public final class NativeUiStructureHelper {
                 if(overviewMode){
                     if(liveMode||visitMode){var fixed=LiveUiParser.labels(boundRecords);boundRecords.clear();boundRecords.addAll(fixed);}
                     overview=OverviewUiParser.parse(boundRecords);
+                    if(liveMode)structureRejected=overview.status()!=OverviewUiRegions.Status.OBSERVED;
                     if(cardsMode)cards=RemainingCardUiParser.parse(boundRecords,overview);
+                    if(liveMode)structureRejected|=cards.status()!=RemainingCardUi.Status.OBSERVED;
                     if(visitMode)visitHint=LiveVisitGuard.classify(boundRecords,liveGuard,overview.status()==OverviewUiRegions.Status.OBSERVED&&cards.status()==RemainingCardUi.Status.OBSERVED);
+                    if(visitMode)structureRejected=visitHint==LiveVisitGuard.Hint.UNKNOWN;
                     if(overview.status()==OverviewUiRegions.Status.OBSERVED)scrollHint=OverviewUiParser.scrollHint(boundRecords,overviewScroll);
                     result=new NativeUiStructureParser.Result(
                         new NativeUiStructureParser.TaskResult(NativeUiStructureParser.Status.UNKNOWN,0,0,0,NativeUiStructureParser.Unit.UNESTABLISHED),
@@ -222,8 +238,9 @@ public final class NativeUiStructureHelper {
             records.clear();
             boundRecords.clear();
             overviewScroll.clear();
+            if(treeRelease==LiveUiReadStream.Resource.UNKNOWN && clean)treeRelease=LiveUiReadStream.Resource.RELEASED;
             if (attemptedConnect) {
-                try { UiAutomation.class.getMethod("disconnect").invoke(automation); }
+                try { UiAutomation.class.getMethod("disconnect").invoke(automation);connectionRelease=LiveUiReadStream.Resource.RELEASED; }
                 catch (Throwable ignored) { clean = false; }
             }
             if (thread != null) {
@@ -232,6 +249,7 @@ public final class NativeUiStructureHelper {
                     long remaining = deadline - SystemClock.elapsedRealtime();
                     if (remaining > 0) thread.join(Math.min(remaining, 250));
                     if (thread.isAlive()) clean = false;
+                    else threadRelease=LiveUiReadStream.Resource.RELEASED;
                 } catch (Throwable ignored) { clean = false; }
             }
             cleanup = clean ? (attemptedConnect ? NativeUiStructureProtocol.Cleanup.CONFIRMED
@@ -241,6 +259,18 @@ public final class NativeUiStructureHelper {
         // Cooperative deadline: synchronous Binder can block. Owner must fail closed/quarantine
         // uncertain process cleanup; this check never emits late success.
         if (finished >= deadline || finished - start > 10000) return;
+        if(afterMode && (finished>=readEnd||reason==NativeUiStructureProtocol.Reason.TIMEOUT)
+                ||liveReceipt&&cleanup==NativeUiStructureProtocol.Cleanup.UNKNOWN){
+            var reasonOnly=LiveUiReadStream.cleanupReason(reason,clean,
+                    diagnostics.blocked()||liveGuard.challenges>0||liveGuard.dialogs>0||visitHint==LiveVisitGuard.Hint.BLOCKED,
+                    structureRejected);
+            var mode=afterMode?LiveUiReadStream.Mode.AFTER:visitMode?LiveUiReadStream.Mode.VISIT:LiveUiReadStream.Mode.UI;
+            var receipt=new LiveUiReadStream.CleanupReceipt(args[0],mode,deadline,start,finished,
+                    reasonOnly,treeRelease,connectionRelease,threadRelease);
+            System.out.println(receipt.encode());
+            System.out.flush();
+            return;
+        }
         if (cleanup == NativeUiStructureProtocol.Cleanup.UNKNOWN) reason = NativeUiStructureProtocol.Reason.CLEANUP_UNKNOWN;
         if (reason != NativeUiStructureProtocol.Reason.OK) {
             search = NativeUiStructureProtocol.Task.unknown(); reading = NativeUiStructureProtocol.Task.unknown();
@@ -264,7 +294,7 @@ public final class NativeUiStructureHelper {
             System.out.flush();
         } catch (Throwable ignored) { /* No raw exception or partial report is published. */ }
     }
-    static boolean validReadyArguments(String[] args){return args!=null&&(args.length==2||args.length==3&&("READY_V49".equals(args[2])||"FORMAT_V50".equals(args[2])||"DIAGNOSTIC_V51".equals(args[2])||"DIAGNOSTIC_LOCATED_V52".equals(args[2])||"BOUND_POINTS_V53".equals(args[2])||"BOUND_REGIONS".equals(args[2])||"OVERVIEW_V5".equals(args[2])||"OVERVIEW_CARDS_V1".equals(args[2])||"LIVE_REWARDS_UI_V1".equals(args[2])||"LIVE_VISIT_V1".equals(args[2])));}
+    static boolean validReadyArguments(String[] args){return args!=null&&(args.length==2||args.length==3&&("READY_V49".equals(args[2])||"FORMAT_V50".equals(args[2])||"DIAGNOSTIC_V51".equals(args[2])||"DIAGNOSTIC_LOCATED_V52".equals(args[2])||"BOUND_POINTS_V53".equals(args[2])||"BOUND_REGIONS".equals(args[2])||"OVERVIEW_V5".equals(args[2])||"OVERVIEW_CARDS_V1".equals(args[2])||"LIVE_REWARDS_UI_V1".equals(args[2])||"LIVE_REWARDS_AFTER_V1".equals(args[2])||"LIVE_VISIT_V1".equals(args[2])));}
     private static boolean packageMatches(CharSequence value) {
         return value != null && value.length() == BING.length() && BING.contentEquals(value);
     }

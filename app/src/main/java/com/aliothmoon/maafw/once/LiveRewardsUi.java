@@ -13,14 +13,19 @@ final class LiveRewardsUi {
     static final String RUN="确认开始本轮真实流程";
     static final String OPEN_READ_ONLY="打开独立只读预检（不点击任务）";
     static final String RUN_READ_ONLY="确认开始只读预检（不点击任务）";
+    static final String OPEN_MORE_RECHECK="打开更多活动二次复查（只读）";
+    static final String RUN_MORE_RECHECK="确认只读验证更多活动复查";
     static final String OPEN_SINGLE_TASK="打开一次任务试点（尚不执行）";
     static final String RUN_SINGLE_TASK="确认只点击一个任务";
     static final String OPEN_MORE_PAIR="限定更多活动的两张卡片";
     static final String RUN_MORE_PAIR="确认仅补测这两张更多活动";
     private static final Object PAIR_FIELD = new Object();
+    private static final Object RECHECK_PAGE = new Object();
     private static final LiveRewardsTaskSelection.VisibleChoice visibleChoice = new LiveRewardsTaskSelection.VisibleChoice();
+    private static final LiveMoreUiRecheck.Choice recheckChoice = new LiveMoreUiRecheck.Choice();
 
     static LiveRewardsTaskSelection takeSelection(Activity activity) { return visibleChoice.take(activity); }
+    static boolean takeMoreUiRecheck(Activity activity) { return recheckChoice.take(activity); }
     private static LinearLayout page(Activity a,String text){
         ScrollView scroll=new ScrollView(a);LinearLayout box=new LinearLayout(a);
         box.setOrientation(LinearLayout.VERTICAL);box.setPadding(24,24,24,24);
@@ -92,14 +97,33 @@ final class LiveRewardsUi {
         button(a,box,"停止并关闭",true,close);
     }
     static void readOnlyChoice(Activity a,boolean ready,Runnable run,Runnable close){
+        if(a.getWindow().getDecorView().findViewWithTag(RECHECK_PAGE)!=null){
+            moreRecheckChoice(a,ready,run,close);
+            return;
+        }
         LinearLayout box=page(a,"独立只读预检：签入 → 每日活动 → 更多活动\n"
                 +"按区域滚动至完整卡片，核对界面结构、局部截图和安卓原生OCR结果。\n"
                 +"本入口不能生成任务点击或返回资格，不启动真实任务流程。\n"
                 +"来源不明确时停止；截图和无原文诊断只保存在本机。保留全部旧记录，不采集整屏。\n"
                 +"最长三十分钟；每区最多八张活动卡。预检结果不代表任务完成或积分到账。");
-        button(a,box,RUN_READ_ONLY,ready,run);button(a,box,"关闭",true,close);
+        button(a,box,RUN_READ_ONLY,ready,()->recheckChoice.confirm(a,false,run));
+        button(a,box,OPEN_MORE_RECHECK,ready,()->moreRecheckChoice(a,ready,run,close));
+        button(a,box,"关闭",true,close);
+    }
+    private static void moreRecheckChoice(Activity a,boolean ready,Runnable run,Runnable close){
+        LinearLayout box=page(a,"更多活动二次复查\n在当前 Rewards 页面只读取更多活动的界面结构。两次复查共用五秒，间隔至少一秒。"
+                +"如果第二次读取剩余时间不足且资源已清理，将单独验证一次有完整时间的第二次读取。\n"
+                +"全程不点击任务、不返回、不滑动，不采集截图。诊断仅保存在本机。");
+        box.setTag(RECHECK_PAGE);
+        button(a,box,RUN_MORE_RECHECK,ready,()->recheckChoice.confirm(a,true,run));
+        button(a,box,"关闭",true,close);
     }
     static void readOnlyRunning(Activity a,Runnable close){
+        if(recheckChoice.pending(a)){
+            var box=page(a,"正在只读检查更多活动复查时的界面结构和资源释放。");
+            button(a,box,"停止并关闭",true,close);
+            return;
+        }
         LinearLayout box=page(a,"正在进行独立只读预检。可能滚动并截取完整局部卡片，不点击任务、不按返回。\n可以停止并关闭；旧记录保持不变。");
         button(a,box,"停止并关闭",true,close);
     }
@@ -108,6 +132,11 @@ final class LiveRewardsUi {
         button(a,box,"关闭",true,close);
     }
     static void readOnlyStatus(Activity a,String summary,Runnable close){
+        if(summary!=null&&summary.contains(" uiRecheckStep=")){
+            var box=page(a,"更多活动界面结构只读复查已停止\n"+summary);
+            button(a,box,"关闭",true,close);
+            return;
+        }
         LinearLayout box=page(a,"独立只读预检已停止\n未执行真实任务点击或返回。\n"+summary);
         button(a,box,"关闭",true,close);
     }
