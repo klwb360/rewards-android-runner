@@ -30,9 +30,17 @@ final class LiveRewardsTypes {
     record ObservationData(Task task,BingNavigationSnapshot.Ready source,long acquiredElapsed,
             Box screenRoi,int cropWidth,int cropHeight,Box localTarget,double minimumConfidence,
             String captureHash,boolean nativeQualified,boolean clean,boolean uniqueMatch,
-            int counterCurrent,int counterTarget) {
+            int counterCurrent,int counterTarget,LiveTaskMatcher.RegionSnapshot regionSnapshot) {
+        ObservationData(Task task,BingNavigationSnapshot.Ready source,long acquiredElapsed,
+                Box screenRoi,int cropWidth,int cropHeight,Box localTarget,double minimumConfidence,
+                String captureHash,boolean nativeQualified,boolean clean,boolean uniqueMatch,
+                int counterCurrent,int counterTarget) {
+            this(task,source,acquiredElapsed,screenRoi,cropWidth,cropHeight,localTarget,minimumConfidence,
+                    captureHash,nativeQualified,clean,uniqueMatch,counterCurrent,counterTarget,null);
+        }
         ObservationData {
             if(task==null||source==null||acquiredElapsed<0||captureHash==null
+                    ||regionSnapshot!=null&&regionSnapshot.kind()!=task.kind()
                     ||!captureHash.isEmpty()&&!hashValue(captureHash)
                     ||!Double.isFinite(minimumConfidence)||minimumConfidence< -1||minimumConfidence>1
                     ||!((counterCurrent==-1&&counterTarget==-1)
