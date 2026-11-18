@@ -27,6 +27,30 @@ public class CardRegionCaptureProtocolTest {
     }
     private static void rejected(Runnable task){try{task.run();fail("Expected crop receipt rejection");}catch(IllegalArgumentException expected){}}
 
+    @Test public void lateHelperMayOnlyAcknowledgeItDidNotStartNativeCapture() {
+        var req = request();
+        long lateStart = req.deadline() + 1;
+        rejected(() -> CardRegionCaptureProtocol.parseArguments(req.arguments(), lateStart));
+        assertEquals(req, CardRegionCaptureProtocol.parseArguments(req.arguments(), lateStart, true));
+        rejected(() -> CardRegionCaptureProtocol.parseArguments(req.arguments(), lateStart + 60_000, true));
+
+        var cleanStop = new CardRegionCaptureProtocol.Report(req, lateStart, lateStart + 1,
+                Status.DEADLINE_EXCEEDED, Cleanup.CONFIRMED, false, 0, 0, null);
+        byte[] wire = CardRegionCaptureProtocol.encode(cleanStop);
+        var observed = CardRegionCaptureProtocol.parse(wire, wire.length, req, 100, lateStart + 10);
+        assertEquals(Status.DEADLINE_EXCEEDED, observed.status());
+        assertFalse(observed.nativeInvoked());
+        assertNull(observed.png());
+        for (var wrong : new String[][] {
+                {"|DEADLINE_EXCEEDED|", "|PERMISSION_DENIED|"},
+                {"|CONFIRMED|0|", "|CONFIRMED|1|"},
+                {"|CONFIRMED|0|", "|UNKNOWN|0|"}}) {
+            byte[] invalid = new String(wire, StandardCharsets.US_ASCII)
+                    .replace(wrong[0], wrong[1]).getBytes(StandardCharsets.US_ASCII);
+            rejected(() -> CardRegionCaptureProtocol.parse(invalid, invalid.length, req, 100, lateStart + 10));
+        }
+    }
+
     @Test public void cropMustBeStrictlyInsideAndNeverEmptyOrWholeDisplay(){
         assertTrue(CardRegionCaptureProtocol.validCrop(ROI,1440,2560,0));
         Box[] invalid={null,new Box(0,0,1440,2560),new Box(0,600,116,616),new Box(100,0,116,616),
@@ -122,7 +146,7 @@ public class CardRegionCaptureProtocolTest {
         metadata.write(pixels,pixels.length-12,12);assertFalse(CardRegionCaptureProtocol.validPng(metadata.toByteArray(),16,16));
         byte[] signature=pixels.clone();signature[0]=0;assertFalse(CardRegionCaptureProtocol.validPng(signature,16,16));
     }
-    private static byte[] png(int width,int height)throws Exception{
+    static byte[] png(int width,int height)throws Exception{
         ByteArrayOutputStream out=new ByteArrayOutputStream();out.write(new byte[]{(byte)137,80,78,71,13,10,26,10});
         ByteArrayOutputStream header=new ByteArrayOutputStream();DataOutputStream fields=new DataOutputStream(header);
         fields.writeInt(width);fields.writeInt(height);fields.write(new byte[]{8,6,0,0,0});chunk(out,"IHDR",header.toByteArray());

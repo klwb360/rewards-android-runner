@@ -43,10 +43,15 @@ final class CardRegionCaptureProtocol {
                 &&(long)roi.width()*roi.height()<=MAX_PIXELS;
     }
     static Request parseArguments(String[] args,long now){
+        return parseArguments(args,now,false);
+    }
+    static Request parseArguments(String[] args,long now,boolean cleanupReceiptAllowed){
         if(args==null||args.length!=9||now<0)throw invalid();
         Request request=new Request(args[0],number(args[1]),new Box(integer(args[5]),integer(args[6]),
                 integer(args[7]),integer(args[8])),integer(args[2]),integer(args[3]),integer(args[4]));
-        if(request.deadline()<=now||request.deadline()-now>MAX_HELPER_MS)throw invalid();
+        if(request.deadline()<=now){
+            if(!cleanupReceiptAllowed||now-request.deadline()>LiveCropStream.CLEANUP_MS)throw invalid();
+        }else if(request.deadline()-now>MAX_HELPER_MS)throw invalid();
         return request;
     }
     static byte[] encode(Report report){
@@ -84,10 +89,14 @@ final class CardRegionCaptureProtocol {
                     integer(f[5]),integer(f[6]),integer(f[7]));
             if(!actual.equals(expected))throw invalid();
             long started=number(f[2]),finished=number(f[3]);
-            if(started<dispatched||started>=expected.deadline()||finished<started||finished>now)throw invalid();
+            if(started<dispatched||dispatched>=expected.deadline()||finished<started||finished>now)throw invalid();
             Status status=Status.valueOf(f[12]);Cleanup cleanup=Cleanup.valueOf(f[13]);
             int nativeFlag=integer(f[14]),bytes=integer(f[15]),width=integer(f[16]),height=integer(f[17]);
             if(nativeFlag<0||nativeFlag>1||bytes<0||bytes>MAX_PNG)throw invalid();
+            // A JVM that started too late can attest only that it did no native work.
+            if(started>=expected.deadline() && (status!=Status.DEADLINE_EXCEEDED || cleanup!=Cleanup.CONFIRMED
+                    ||nativeFlag!=0||bytes!=0||width!=0||height!=0||finished-expected.deadline()>LiveCropStream.CLEANUP_MS))
+                throw invalid();
             int payloadLength=count-end-2;if(payloadLength!=4*((bytes+2)/3))throw invalid();
             payload=Arrays.copyOfRange(wire,end+1,count-1);
             for(byte value:payload){int c=value&255;if(!(c>='A'&&c<='Z'||c>='a'&&c<='z'||c>='0'&&c<='9'||c=='+'||c=='/'||c=='='))throw invalid();}
