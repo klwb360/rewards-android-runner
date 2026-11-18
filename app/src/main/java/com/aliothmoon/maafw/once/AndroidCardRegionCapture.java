@@ -291,12 +291,18 @@ final class AndroidCardRegionCapture {
             throw new Stop(FixedStatus.GATE_REJECTED);
         }
     }
-    private static int readPipe(ParcelFileDescriptor fd,byte[] bytes,int offset,int length)throws Exception{
+    static int readPipe(ParcelFileDescriptor fd,byte[] bytes,int offset,int length)throws Exception{
         StructPollfd poll=new StructPollfd();poll.fd=fd.getFileDescriptor();
         poll.events=(short)(OsConstants.POLLIN|OsConstants.POLLHUP|OsConstants.POLLERR);
         try{
             if(Os.poll(new StructPollfd[]{poll},25)==0)return 0;
             if((poll.revents&OsConstants.POLLNVAL)!=0)throw new IOException("Invalid crop pipe");
+            // The child stdout has a single consumer. On API 28/29, read only when
+            // poll proves pipe data or writer closure; an error event alone cannot authorize a blocking read.
+            if((poll.revents&(OsConstants.POLLIN|OsConstants.POLLHUP))==0){
+                if((poll.revents&OsConstants.POLLERR)!=0)throw new IOException("Child stdout pipe error");
+                return 0;
+            }
             int n=Os.read(poll.fd,bytes,offset,length);return n==0?-1:n;
         }catch(ErrnoException failure){
             if(failure.errno==OsConstants.EAGAIN||failure.errno==OsConstants.EINTR)return 0;

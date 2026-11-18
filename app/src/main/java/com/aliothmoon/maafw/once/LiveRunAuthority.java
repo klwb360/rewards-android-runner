@@ -25,6 +25,7 @@ final class LiveRunAuthority {
     private LiveRewardsLedger ledger;
     private BingNavigationSnapshot.Ready original;
     private int scopeSequence;
+    private volatile int uiRecheckScopes;
     private volatile boolean diagnosticOnly;
     private FocusDiagnosticPermit focusDiagnostic;
 
@@ -77,22 +78,31 @@ final class LiveRunAuthority {
         else if(!original.sameSource(source))throw new SecurityException("Original Rewards source changed");
     }
     synchronized CardScope scanScope(LiveRewardsTypes.Kind kind){
-        if(diagnosticOnly||kind==null||!current()||scans.containsKey(kind))throw new SecurityException("One region scan required");
+        if(diagnosticOnly||uiRecheckScopes!=0||kind==null||!current()||scans.containsKey(kind))throw new SecurityException("One region scan required");
         var task=new LiveRewardsTypes.Task(kind,LiveRewardsTypes.hash("SCAN_"+kind),kind==LiveRewardsTypes.Kind.CHECK_IN?0:1,"",0,false,false,-1);
         var scope=new CardScope(this,task,true,true,++scopeSequence,now());scans.put(kind,scope);return scope;
     }
     synchronized CardScope preflightScope(LiveRewardsTypes.Task task){return scope(task,true);}
     synchronized CardScope cardScope(LiveRewardsTypes.Task task){return scope(task,false);}
+    synchronized CardScope moreUiRecheckScope(boolean independent) {
+        if (taskInputAllowed || diagnosticOnly || ledger == null || !current() || !scans.isEmpty()
+                || !previews.isEmpty() || !cards.isEmpty() || uiRecheckScopes != (independent ? 1 : 0))
+            throw new SecurityException("Fresh read-only More UI recheck scope required");
+        var kind = LiveRewardsTypes.Kind.MORE;
+        var region = new LiveRewardsTypes.Task(kind, LiveRewardsTypes.hash("SCAN_" + kind), 1, "", 0, false, false, -1);
+        uiRecheckScopes++;
+        return new CardScope(this, region, true, true, ++scopeSequence, now(), independent ? 1 : 2);
+    }
     private CardScope scope(LiveRewardsTypes.Task task,boolean preview){
         if(!preview&&!taskInputAllowed)throw new SecurityException("Read-only run cannot issue task scopes");
-        if(diagnosticOnly||task==null||!current())throw new SecurityException("Current task required");var map=preview?previews:cards;
+        if(diagnosticOnly||uiRecheckScopes!=0||task==null||!current())throw new SecurityException("Current task required");var map=preview?previews:cards;
         if(map.size()>=17||map.containsKey(task.key()))throw new SecurityException("One scope per task required");
         long inKind=map.values().stream().filter(s->s.task.kind()==task.kind()).count();
         if(inKind>=(task.kind()==LiveRewardsTypes.Kind.CHECK_IN?1:8))throw new SecurityException("Per-region scope budget exhausted");
         var scope=new CardScope(this,task,preview,false,++scopeSequence,now());map.put(task.key(),scope);return scope;
     }
     synchronized FocusDiagnosticPermit claimFocusDiagnostics(long now){
-        if(taskInputAllowed||diagnosticOnly||focusDiagnostic!=null||ledger==null||!current()||now<issued||now>=deadline)
+        if(taskInputAllowed||diagnosticOnly||uiRecheckScopes!=0||focusDiagnostic!=null||ledger==null||!current()||now<issued||now>=deadline)
             throw new SecurityException("One read-only focus diagnostic sequence required");
         diagnosticOnly=true;focusDiagnostic=new FocusDiagnosticPermit(this,now);return focusDiagnostic;
     }
@@ -131,10 +141,10 @@ final class LiveRunAuthority {
         private final LiveRewardsTypes.Task task;
         private final Object owner=new Object();
         private final boolean preflight,scan;
-        private final int sequence;
+        private final int sequence, uiRecheckReads;
         private final long issued,deadline;
         private long afterDeadline=-1;
-        private int observations,swipes;
+        private int observations,swipes,uiRecheckPhases;
         private UiPermit activeUi,latestUi;
         private ScrollPermit activeScroll;
         private CropPermit activeCrop;
@@ -142,8 +152,20 @@ final class LiveRunAuthority {
         private final LiveRewardsTypes.Observation[] sealed=new LiveRewardsTypes.Observation[3];
         private LiveActionPermit action;
         private CardScope(LiveRunAuthority run,LiveRewardsTypes.Task task,boolean preflight,boolean scan,int sequence,long now){
-            this.run=run;this.task=task;this.preflight=preflight;this.scan=scan;this.sequence=sequence;issued=now;
+            this(run,task,preflight,scan,sequence,now,0);
+        }
+        private CardScope(LiveRunAuthority run,LiveRewardsTypes.Task task,boolean preflight,boolean scan,int sequence,long now,int uiRecheckReads){
+            this.run=run;this.task=task;this.preflight=preflight;this.scan=scan;this.sequence=sequence;this.uiRecheckReads=uiRecheckReads;issued=now;
             deadline=Math.min(run.deadline,add(now,MAX_CARD_MILLIS));
+        }
+        boolean uiRecheckOnly(){return uiRecheckReads>0;}
+        synchronized boolean claimUiRecheckPhase(LiveRewardsTypes.Phase phase){
+            if(!uiRecheckOnly()||!current(run.now())||afterDeadline<0||uiRecheckPhases!=observations
+                    ||activeUi!=null||uiRecheckPhases>=uiRecheckReads)return false;
+            var expected=uiRecheckReads==2&&uiRecheckPhases==0?LiveRewardsTypes.Phase.AFTER_1:LiveRewardsTypes.Phase.AFTER_2;
+            if(phase!=expected)return false;
+            uiRecheckPhases++;
+            return true;
         }
         Object owner(){return owner;}
         LiveRewardsTypes.Task task(){return task;}
@@ -161,11 +183,13 @@ final class LiveRunAuthority {
         synchronized long observationDeadline(LiveRewardsTypes.Phase phase){
             return phase==LiveRewardsTypes.Phase.BEFORE?deadline:afterDeadline<0?deadline:Math.min(deadline,afterDeadline);
         }
-        boolean current(long now){return !run.diagnosticOnly&&run.current()&&now>=issued&&now<deadline;}
+        boolean current(long now){return !run.diagnosticOnly&&run.current()&&now>=issued&&now<deadline
+                &&(!uiRecheckOnly()||run.uiRecheckScopes==(uiRecheckReads==2?1:2));}
         private void require(long now){if(!current(now))throw new SecurityException("Task scope expired or revoked");}
         synchronized UiPermit claimUi(Object observationOwner,long now){
             require(now);
-            if(observationOwner==null||activeUi!=null||activeScroll!=null||activeCrop!=null||observations>=24)
+            if(observationOwner==null||activeUi!=null||activeScroll!=null||activeCrop!=null||observations>=24
+                    ||uiRecheckOnly()&&uiRecheckPhases!=observations+1)
                 throw new SecurityException("Bounded next observation required");
             long limit=afterDeadline<0?deadline:Math.min(deadline,afterDeadline);
             if(now>=limit)throw new SecurityException("After observation budget exhausted");
@@ -192,7 +216,7 @@ final class LiveRunAuthority {
         private ScrollPermit claimScroll(UiPermit exact,ReviewShizukuSwipeActor.Direction direction,
                 ReviewShizukuSwipeActor.SwipeTarget target,long now){
             require(now);
-            if(exact==null||latestUi!=exact||!exact.finished||!exact.current(now)||direction==null
+            if(uiRecheckOnly()||exact==null||latestUi!=exact||!exact.finished||!exact.current(now)||direction==null
                     ||activeUi!=null||activeScroll!=null||activeCrop!=null||swipes>=8)
                 throw new SecurityException("Fresh scroll observation required");
             latestUi=null;activeScroll=new ScrollPermit(this,++swipes,direction,target,now,Math.min(deadline,exact.deadline));return activeScroll;

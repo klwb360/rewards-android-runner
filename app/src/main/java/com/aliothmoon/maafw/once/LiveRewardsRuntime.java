@@ -46,6 +46,7 @@ final class LiveRewardsRuntime {
     private final String runDay;
     private final boolean taskInputAllowed,singleTask;
     private final LiveRewardsTaskSelection selection;
+    private final LiveMoreUiRecheck uiRecheck;
     private LiveRewardsCoordinator.Summary summary;
     private LiveRewardsTypes.Preflight readOnlyPreflight;
     private boolean readOnlyPreflightStarted,readOnlyPreflightReturned;
@@ -63,10 +64,12 @@ final class LiveRewardsRuntime {
 
     private LiveRewardsRuntime(DormantCaptureConfirmationActivity activity,
             VisibleCaptureAuthority.LiveRewardsApproval approval,BingNavigationSnapshot.Shape shape,String runDay,
-            LiveRewardsTaskSelection selection){
+            LiveRewardsTaskSelection selection,boolean moreUiRecheck){
         this.activity=activity;this.approval=approval;this.shape=shape;this.runDay=runDay;taskInputAllowed=approval.taskInputAllowed;
         singleTask=approval.singleTask;
         this.selection=selection;
+        if(moreUiRecheck&&taskInputAllowed)throw new SecurityException("More UI recheck requires read-only approval");
+        uiRecheck=moreUiRecheck?new LiveMoreUiRecheck():null;
     }
     static LiveRewardsRuntime start(DormantCaptureConfirmationActivity activity,
             DormantCaptureConfirmationActivity.LiveClick click,Object approvalOwner){
@@ -91,6 +94,7 @@ final class LiveRewardsRuntime {
         if(approval.taskInputAllowed!=requestedTaskInputAllowed)throw new SecurityException("Exact visible run purpose required");
         var selection=requestedTaskInputAllowed&&!approval.singleTask
                 ? LiveRewardsUi.takeSelection(activity) : LiveRewardsTaskSelection.ALL;
+        boolean moreUiRecheck=!requestedTaskInputAllowed&&LiveRewardsUi.takeMoreUiRecheck(activity);
         if(!selection.current(approvedDay))throw new SecurityException("Task selection day changed");
         var manager=activity.getSystemService(DisplayManager.class);var display=manager==null?null:manager.getDisplay(Display.DEFAULT_DISPLAY);
         if(display==null||display.getState()!=Display.STATE_ON||display.getRotation()!=Surface.ROTATION_0)
@@ -100,7 +104,7 @@ final class LiveRewardsRuntime {
         var bounds=wm.getMaximumWindowMetrics().getBounds();
         if(bounds.left!=0||bounds.top!=0||bounds.width()!=1440||bounds.height()!=2560)
             throw new SecurityException("Reviewed portrait shape required");
-        var run=new LiveRewardsRuntime(activity,approval,new BingNavigationSnapshot.Shape(bounds.width(),bounds.height(),0),approvedDay,selection);
+        var run=new LiveRewardsRuntime(activity,approval,new BingNavigationSnapshot.Shape(bounds.width(),bounds.height(),0),approvedDay,selection,moreUiRecheck);
         run.root=CaptureSessionRuntime.retainAlignment(run,approval.deadline,run::latchCancel,run::closeOnOwner,()->run.closed,run::postOwner);
         try{
             run.loop.start();run.owner=new Handler(run.loop.getLooper());run.root.arm();run.startedElapsed=approval.issued;
@@ -214,12 +218,31 @@ final class LiveRewardsRuntime {
         navigation=new LiveRewardsNavigation(activity.getApplicationContext(),authority,activity.getTaskId(),
                 activity.getComponentName().flattenToString(),shape,this::hiddenCurrent);
         perception=new LiveRewardsPerception(activity.getApplicationContext(),authority,navigation,this::hiddenCurrent,this::publishArtifact,ledger);
+        if(uiRecheck!=null){
+            runMoreUiRecheck();
+            return;
+        }
         stage="PREFLIGHT";readOnlyPreflightStarted=true;
         try{readOnlyPreflight=perception.preflight();readOnlyPreflightReturned=true;}
         catch(Exception original){diagnoseReadOnlyRejection();throw original;}
         if(readOnlyPreflight==null||!readOnlyPreflight.completeScan()||!readOnlyPreflight.knownClean()||!readOnlyPreflight.sourceReady()
                 ||!nativeResourcesClosed()||!authority.current()||!navigation.current())
             throw new SecurityException("Read-only preflight unqualified");
+        stage="COMPLETE";
+    }
+    private void runMoreUiRecheck()throws Exception{
+        stage="MORE_UI_RECHECK";
+        uiRecheck.run(authority,new LiveMoreUiRecheck.Reader(){
+            public boolean read(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Phase phase)throws Exception{
+                requireHidden();
+                return perception.readMoreRecheckUi(scope,phase);
+            }
+            public String diagnostic(){return perception.lastUiReadDiagnostic();}
+            public boolean knownClean(){return nativeResourcesClosed();}
+        },Thread::sleep);
+        requireHidden();
+        if(!uiRecheck.verified()||!navigation.current()||!nativeResourcesClosed())
+            throw new SecurityException("Unqualified More UI recheck");
         stage="COMPLETE";
     }
     private void diagnoseReadOnlyRejection(){
@@ -422,7 +445,8 @@ final class LiveRewardsRuntime {
             verifyArtifactRoot();writeFile(artifacts,"REPORT.json",bytes);verifyArtifactRoot();
             reportSha256=CardNativeMockReceipt.digest(bytes);reportPublished=true;
             writeForegroundReceipt();
-            if(!taskInputAllowed)writeReadOnlyReceipt();
+            if(uiRecheck!=null)writeUiRecheckReceipt();
+            else if(!taskInputAllowed)writeReadOnlyReceipt();
             writeFocusReceipt();
             if(taskInputAllowed && !singleTask)writeScrollTrace();
         }catch(Throwable failed){failure="REPORT_PUBLICATION_FAILED";}
@@ -446,6 +470,21 @@ final class LiveRewardsRuntime {
                 .put("scrollAllowed",true).put("issuedElapsed",approval.issued).put("deadlineElapsed",approval.deadline)
                 .put("reportSha256",reportSha256).put("rawTextIncluded",false).put("rawDataUploaded",false).put("oldRecordsReset",false);
         verifyArtifactRoot();writeFile(artifacts,"READONLY.json",receipt.toString().getBytes(StandardCharsets.UTF_8));verifyArtifactRoot();
+    }
+    private void writeUiRecheckReceipt()throws Exception{
+        var attempts=new JSONArray();
+        for(var attempt:uiRecheck.attempts()){
+            attempts.put(new JSONObject().put("step",attempt.step().name()).put("phase",attempt.phase().name())
+                    .put("started",attempt.started()).put("deadline",attempt.deadline()).put("finished",attempt.finished())
+                    .put("result",attempt.result().name()).put("reader",attempt.diagnostic()));
+        }
+        var receipt=new JSONObject().put("schemaVersion",1).put("profile",PROFILE).put("runId",runId).put("day",runDay)
+                .put("purpose","MORE_AFTER_UI_RECHECK").put("taskInputAllowed",taskInputAllowed)
+                .put("taskScopeCount",authority==null?0:authority.taskScopeCount()).put("inputConstructed",input!=null)
+                .put("coordinatorConstructed",coordinator!=null).put("knownClean",nativeResourcesClosed())
+                .put("verified",uiRecheck.verified()).put("attempts",attempts).put("reportSha256",reportSha256)
+                .put("rawTextIncluded",false).put("rawDataUploaded",false).put("oldRecordsReset",false);
+        verifyArtifactRoot();writeFile(artifacts,"UI_RECHECK.json",receipt.toString().getBytes(StandardCharsets.UTF_8));verifyArtifactRoot();
     }
     private void writeFocusReceipt()throws Exception{
         JSONObject focus=navigation==null?null:navigation.focusDiagnostics();
@@ -493,6 +532,8 @@ final class LiveRewardsRuntime {
             +" reportPublished="+reportPublished+" releaseReceiptPublished="+releaseReceiptPublished
             +" perceptionState="+perceptionState()
             +" cropDiagnostic="+(perception==null?"NONE":perception.lastCropDiagnostic())
+            +" uiReadDiagnostic="+(perception==null?"NONE":perception.lastUiReadDiagnostic())
+            +(uiRecheck==null?"":" uiRecheckStep="+uiRecheck.step()+" uiRecheckResult="+uiRecheck.lastResult())
             +" tapCalls="+tapCalls+" tapCommandSuccesses="+tapSuccesses+" returnCalls="+returnCalls+" returnCommandConfirmed="+returnSuccesses
             +" tapDispatchAttempts="+tapDispatches+" backDispatchAttempts="+backDispatches+" backCommandSuccesses="+backSuccesses+" inputOutcomeUnknown="+inputUnknown
             +" captures="+cropImages+" marks="+markedImages+" fullScreenCaptures=0 minimumVisitDelayMs="+LiveRewardsInput.RETURN_DELAY_MS

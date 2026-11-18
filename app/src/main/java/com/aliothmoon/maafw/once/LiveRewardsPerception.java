@@ -30,7 +30,12 @@ final class LiveRewardsPerception {
     private record Located(Frame frame,LiveTaskMatcher.Match match,CardRevealProbeTarget.Selection selection,
             String reason,int swipes,long revealMillis){}
     record Roster(List<LiveRewardsTypes.Task> tasks,boolean known){}
-    private static final class AfterExpired extends Exception {private static final long serialVersionUID=1L;}
+    private static final class AfterExpired extends Exception {
+        private static final long serialVersionUID=1L;
+        final String reason;
+        AfterExpired(){this("AFTER_WINDOW_EXPIRED");}
+        AfterExpired(String reason){this.reason=reason;}
+    }
     private final Context context;
     private final LiveRunAuthority authority;
     private final LiveRewardsNavigation navigation;
@@ -43,6 +48,7 @@ final class LiveRewardsPerception {
     private volatile String safeState="NEW";
     private volatile LiveUiDiagnostic lastUiDiagnostic;
     private volatile String lastCropDiagnostic="NONE";
+    private volatile String lastUiReadDiagnostic="NONE";
     private volatile LiveReadPreparation.Snapshot lastReadPreparation;
     private int readAttemptIndex;
     LiveRewardsPerception(Context context,LiveRunAuthority authority,LiveRewardsNavigation navigation,
@@ -57,6 +63,7 @@ final class LiveRewardsPerception {
             &&swipeClean&&navigation.knownClean();}
     String safeState(){return safeState;}
     String lastCropDiagnostic(){return lastCropDiagnostic;}
+    String lastUiReadDiagnostic(){return lastUiReadDiagnostic;}
     JSONObject lastUiDiagnostic()throws org.json.JSONException{
         var exact=lastUiDiagnostic;return exact==null?null:new JSONObject(exact.json());
     }
@@ -188,7 +195,7 @@ final class LiveRewardsPerception {
             timeBudget(scope,phase);Located found=locate(scope,phase,expected);
             if(found.selection()==null)return unreadable(scope,phase,expected,found.reason(),found.frame());
             return captureAndRecognize(scope,phase,expected,found);
-        }catch(AfterExpired expired){return unreadable(scope,phase,expected,"AFTER_WINDOW_EXPIRED");}
+        }catch(AfterExpired expired){return unreadable(scope,phase,expected,expired.reason);}
     }
     private LiveRewardsTypes.Observation unreadable(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Phase phase,
             LiveRewardsTypes.Task expected,String reason)throws Exception{
@@ -302,6 +309,22 @@ final class LiveRewardsPerception {
         return readUi(scope, phase, phase == LiveRewardsTypes.Phase.BEFORE);
     }
 
+    boolean readMoreRecheckUi(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Phase phase)throws Exception{
+        if(scope==null||scope.run()!=authority||authority.taskInputAllowed()||!scope.uiRecheckOnly()||!scope.scan()
+                ||scope.task().kind()!=LiveRewardsTypes.Kind.MORE||scope.afterDeadline()<0
+                ||!scope.claimUiRecheckPhase(phase))
+            throw new SecurityException("Exact read-only more-activities recheck required");
+        try{
+            Frame frame=readUi(scope,phase);
+            if(region(frame.report().base(),OverviewUiRegions.Role.MORE_ACTIVITIES)==null)
+                throw new SecurityException("More activities region unavailable");
+            return true;
+        }catch(AfterExpired expired){
+            if("AFTER_UI_BUDGET_EXHAUSTED".equals(expired.reason))return false;
+            throw expired;
+        }
+    }
+
     private Frame readUi(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Phase phase, boolean allowRecovery)throws Exception{
         return readFreshUi(allowRecovery, recover -> readUiOnce(scope, phase, recover));
     }
@@ -321,7 +344,7 @@ final class LiveRewardsPerception {
     }
 
     private Frame readUiOnce(LiveRunAuthority.CardScope scope, LiveRewardsTypes.Phase phase, boolean allowRecovery) throws Exception {
-        lastReadPreparation=null;state("UI_SOURCE_BEFORE");
+        lastReadPreparation=null;lastUiReadDiagnostic="NONE";state("UI_SOURCE_BEFORE");
         require(scope);timeBudget(scope,phase);var permit=scope.claimUi(new Object(),now());
         BingNavigationSnapshot.Ready[] before={null};long[] beforeAt={-1};
         long generation = navigation.recoveryGeneration();
@@ -338,10 +361,14 @@ final class LiveRewardsPerception {
                     if(consumed&&preparation!=null)preparation.enter(LiveReadPreparation.Stage.SOURCE_CURRENT);
                     return consumed&&permit.current(now())&&current(scope);
                 },permit,preparation);
-        lastReadPreparation=read.preparation();
+        lastReadPreparation=read.preparation();lastUiReadDiagnostic=read.diagnostic();
         var report=read.protocolReport();
         var diagnostic=LiveUiDiagnostic.from(read);lastUiDiagnostic=diagnostic;state(diagnostic.safeState());
         if(!read.knownClean())throw new SecurityException("Live UI cleanup unconfirmed");
+        if(LivePerceptionBudget.retireUi(phase,read)){
+            scope.discardUi(permit,true);
+            throw new AfterExpired(read.invoked()?"AFTER_UI_CLEANUP_RECEIPT":"AFTER_UI_BUDGET_EXHAUSTED");
+        }
         if (allowRecovery && navigation.recoveryGeneration() != generation && !read.invoked()
                 && read.fixedStatus() == AndroidLiveUiReader.FixedStatus.GATE_REJECTED) {
             throw discardRecoveredUi(scope, permit, knownClean());
@@ -546,7 +573,7 @@ final class LiveRewardsPerception {
     }
     /** Called only after the three-second passive wait. The helper itself is UI-read-only. */
     LiveVisitGuard.Report visitGuard(LiveActionPermit action)throws Exception{
-        lastReadPreparation=null;state("VISIT_BEGIN");
+        lastReadPreparation=null;lastUiReadDiagnostic="NONE";state("VISIT_BEGIN");
         if(action==null||action.scope().run()!=authority||!action.live()||action.kind()==LiveRewardsTypes.Kind.CHECK_IN
                 ||action.successfulTapElapsed()<0||now()-action.successfulTapElapsed()<3_000)throw new SecurityException("Due bound visit required");
         var scope=action.scope();require(scope);var permit=scope.claimUi(new Object(),now());
@@ -560,7 +587,7 @@ final class LiveRewardsPerception {
             if(consumed&&preparation!=null)preparation.enter(LiveReadPreparation.Stage.SOURCE_CURRENT);
             return consumed&&permit.current(now())&&current(scope);
         },permit,preparation);
-        lastReadPreparation=read.preparation();
+        lastReadPreparation=read.preparation();lastUiReadDiagnostic=read.diagnostic();
         var report=read.visitReport();
         state("VISIT_"+read.fixedStatus().name()+"_"+(report==null?"NONE":report.source().reason().name()+"_"+report.hint().name()));
         if(!read.knownClean()||read.fixedStatus()!=AndroidLiveUiReader.FixedStatus.READ_COMPLETE||report==null||!report.source().qualified())
