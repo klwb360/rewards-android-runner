@@ -19,6 +19,8 @@ final class LiveRewardsPerception {
     @FunctionalInterface interface ArtifactSink { void write(String key,String phase,String filename,byte[] payload)throws Exception; }
     @FunctionalInterface interface UiAttempt<T> { T read(boolean allowRecovery) throws Exception; }
     @FunctionalInterface interface ConsumeCropPermit { boolean consume() throws java.io.IOException; }
+    @FunctionalInterface interface HistoryRead { boolean attempted(LiveRewardsTypes.Task seed) throws java.io.IOException; }
+    @FunctionalInterface interface PreviewRead { LiveRewardsTypes.Observation read(LiveRewardsTypes.Task seed) throws Exception; }
     static final class RecoveredUiFrame extends Exception {
         private static final long serialVersionUID = 1L;
         private RecoveredUiFrame() {}
@@ -27,7 +29,7 @@ final class LiveRewardsPerception {
             BingNavigationSnapshot.Ready before,long beforeAt,BingNavigationSnapshot.Ready after){}
     private record Located(Frame frame,LiveTaskMatcher.Match match,CardRevealProbeTarget.Selection selection,
             String reason,int swipes,long revealMillis){}
-    private record Roster(List<LiveRewardsTypes.Task> tasks,boolean known){}
+    record Roster(List<LiveRewardsTypes.Task> tasks,boolean known){}
     private static final class AfterExpired extends Exception {private static final long serialVersionUID=1L;}
     private final Context context;
     private final LiveRunAuthority authority;
@@ -91,7 +93,13 @@ final class LiveRewardsPerception {
     }
 
     LiveRewardsTypes.Preflight preflightRegion(LiveRunAuthority exact, LiveRewardsTypes.Kind kind) throws Exception {
-        if (exact != authority || kind == null) throw new SecurityException("Exact preflight run and region required");
+        return preflightRegion(exact, kind, LiveRewardsTaskSelection.ALL);
+    }
+
+    LiveRewardsTypes.Preflight preflightRegion(LiveRunAuthority exact, LiveRewardsTypes.Kind kind,
+            LiveRewardsTaskSelection selection) throws Exception {
+        if (exact != authority || kind == null || selection == null || !selection.includes(kind)
+                || !selection.current(authority.day())) throw new SecurityException("Exact preflight run and region required");
         state("PREFLIGHT_BEGIN_" + kind.name());
         cohort = List.of();
         if (kind == LiveRewardsTypes.Kind.CHECK_IN) {
@@ -105,21 +113,29 @@ final class LiveRewardsPerception {
         Roster roster = scan(kind);
         if (!roster.known()) return regionResult(roster.tasks(), false, "PREFLIGHT_ROSTER_INCOMPLETE");
         cohort = roster.tasks();
+        var result = recognizeRoster(cohort, selection, this::attemptedHistory,
+                seed -> observe(authority.preflightScope(seed), LiveRewardsTypes.Phase.BEFORE, seed));
+        return regionResult(result.tasks(), result.known(),
+                (result.known() ? "PREFLIGHT_READY_" : "PREFLIGHT_CARD_UNRECOGNIZED_") + kind.name());
+    }
+
+    static Roster recognizeRoster(List<LiveRewardsTypes.Task> cohort, LiveRewardsTaskSelection selection,
+            HistoryRead history, PreviewRead preview) throws Exception {
         List<LiveRewardsTypes.Task> recognized = new ArrayList<>();
         for (var seed : cohort) {
-            // Identical descriptors share a key and cannot each own a native preview.
-            // Preserve both rows so the coordinator records their duplicate skips.
-            if (!LiveTaskMatcher.uniqueInPlan(seed, cohort) || attemptedHistory(seed)) {
+            // Retain every peer for duplicate/compact disambiguation. Without a selected preview
+            // the structure supplies only its descriptor and points, never a verified title or tick.
+            if (!selection.includes(seed) || !LiveTaskMatcher.uniqueInPlan(seed, cohort) || history.attempted(seed)) {
                 recognized.add(LivePreflightHistory.unreadable(seed));
             } else {
-                var observed = observe(authority.preflightScope(seed), LiveRewardsTypes.Phase.BEFORE, seed);
+                var observed = preview.read(seed);
                 recognized.add(observed.task());
                 if (!observed.qualified() || !observed.data().uniqueMatch() || !observed.task().sameKey(seed)) {
-                    return regionResult(recognized, false, "PREFLIGHT_CARD_UNRECOGNIZED_" + kind.name());
+                    return new Roster(List.copyOf(recognized), false);
                 }
             }
         }
-        return regionResult(recognized, true, "PREFLIGHT_READY_" + kind.name());
+        return new Roster(List.copyOf(recognized), true);
     }
 
     private LiveRewardsTypes.Preflight regionResult(List<LiveRewardsTypes.Task> tasks, boolean complete, String status) {

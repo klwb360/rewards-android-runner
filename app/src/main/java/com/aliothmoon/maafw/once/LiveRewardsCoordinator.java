@@ -25,7 +25,7 @@ final class LiveRewardsCoordinator {
         void report(LiveRewardsTypes.Task task,LiveRewardsTypes.Outcome outcome,String reason,
                 LiveRewardsTypes.Observation before,LiveRewardsTypes.Observation after);
     }
-    record Summary(int regionsReady,int planned,Map<LiveRewardsTypes.Outcome,Integer> counts,
+    record Summary(int regionsReady,int requiredRegions,int planned,Map<LiveRewardsTypes.Outcome,Integer> counts,
                    int taps,int backs,boolean stopped,String reason) {
         Summary {
             EnumMap<LiveRewardsTypes.Outcome,Integer> copy=new EnumMap<>(LiveRewardsTypes.Outcome.class);
@@ -33,7 +33,7 @@ final class LiveRewardsCoordinator {
             counts=Collections.unmodifiableMap(copy);
             if(reason==null||!reason.matches("[A-Z][A-Z0-9_]{0,79}"))throw new IllegalArgumentException("Safe summary reason required");
         }
-        boolean preflightPassed(){return regionsReady==LiveRewardsTypes.Kind.values().length;}
+        boolean preflightPassed(){return regionsReady==requiredRegions;}
         String fixedSummary(){
             StringBuilder value=new StringBuilder("profile=LIVE_REWARDS_CYCLE_V1 preflightPassed="+preflightPassed()
                     +" regionsReady="+regionsReady+" planned="+planned+" tapAttempts="+taps+" backAttempts="+backs+" stopped="+stopped+" reason="+reason+" outcomes=");
@@ -45,6 +45,7 @@ final class LiveRewardsCoordinator {
     private final LiveRewardsLedger ledger;
     private final Ports ports;
     private final boolean singleTask;
+    private final LiveRewardsTaskSelection selection;
     private final AtomicBoolean started=new AtomicBoolean();
     private final EnumMap<LiveRewardsTypes.Outcome,Integer> counts=new EnumMap<>(LiveRewardsTypes.Outcome.class);
     private final Set<String> reported=new HashSet<>();
@@ -58,9 +59,16 @@ final class LiveRewardsCoordinator {
         this(authority, ledger, ports, false);
     }
     LiveRewardsCoordinator(LiveRunAuthority authority,LiveRewardsLedger ledger,Ports ports,boolean singleTask){
+        this(authority,ledger,ports,singleTask,LiveRewardsTaskSelection.ALL);
+    }
+    LiveRewardsCoordinator(LiveRunAuthority authority,LiveRewardsLedger ledger,Ports ports,boolean singleTask,
+            LiveRewardsTaskSelection selection){
         if(authority==null||ledger==null||ports==null)throw new IllegalArgumentException("Exact run ports required");
+        if(selection==null || singleTask && selection.limited() || !selection.current(authority.day()))
+            throw new IllegalArgumentException("Selection must match this run");
         this.authority=authority;this.ledger=ledger;this.ports=ports;authority.attachLedger(ledger);
         this.singleTask=singleTask;
+        this.selection=selection;
         for(var o:LiveRewardsTypes.Outcome.values())counts.put(o,0);
     }
     void cancel(){authority.cancel();}
@@ -69,6 +77,7 @@ final class LiveRewardsCoordinator {
         try{
             reason = singleTask ? "NO_ELIGIBLE_TASK" : "PLAN_FINISHED";
             for (var kind : LiveRewardsTypes.Kind.values()) {
+                if (!selection.includes(kind)) continue;
                 if (runRegion(kind)) {
                     reason = "SINGLE_TASK_FINISHED";
                     break;
@@ -90,6 +99,7 @@ final class LiveRewardsCoordinator {
                 ||scan.tasks().stream().anyMatch(task->task.kind()!=kind))throw stop("PREFLIGHT_UNQUALIFIED_"+kind.name());
         requireCurrent();
         List<LiveRewardsTypes.Task> tasks=new ArrayList<>(scan.tasks());
+        tasks.removeIf(task->!selection.includes(task));
         tasks.sort(Comparator.comparingInt(LiveRewardsTypes.Task::ordinal));
         regionsReady++;
         planned+=tasks.size();
@@ -113,6 +123,8 @@ final class LiveRewardsCoordinator {
             if(!before.qualified()||!before.data().uniqueMatch()||!before.task().sameKey(task)){
                 emit(task,LiveRewardsTypes.Outcome.UNREADABLE_SKIP,"CURRENT_TASK_UNREADABLE",before,null);continue;
             }
+            requireCurrent();
+            if(!selection.includes(before.task()) || selection.limited() && taps>=2)throw stop("TASK_OUTSIDE_SELECTION");
             ledger.begin(task);var permit=scope.actionPermit(before,ledger);
             final LiveRewardsInput.TapReceipt tapped;
             try{tapped=ports.tap(permit);}finally{if(permit.tapAttempted())taps++;}
@@ -196,7 +208,7 @@ final class LiveRewardsCoordinator {
             catch(Exception ignored){/* No further input or repair after an uncertain journal/report. */}
         }
     }
-    private Summary summary(String value,boolean stop){return new Summary(regionsReady,planned,counts,taps,backs,stop,value);}
+    private Summary summary(String value,boolean stop){return new Summary(regionsReady,selection.regionCount(),planned,counts,taps,backs,stop,value);}
     private static Stop stop(String reason){return new Stop(reason);}
     private static final class Stop extends Exception {
         private static final long serialVersionUID=1L;
