@@ -105,13 +105,11 @@ final class LiveRewardsPerception {
         Roster roster = scan(kind);
         if (!roster.known()) return regionResult(roster.tasks(), false, "PREFLIGHT_ROSTER_INCOMPLETE");
         cohort = roster.tasks();
-        if (cohort.stream().map(LiveRewardsTypes.Task::key).distinct().count() != cohort.size()) {
-            return regionResult(cohort, false, "PREFLIGHT_ROSTER_AMBIGUOUS");
-        }
-
         List<LiveRewardsTypes.Task> recognized = new ArrayList<>();
         for (var seed : cohort) {
-            if (attemptedHistory(seed)) {
+            // Identical descriptors share a key and cannot each own a native preview.
+            // Preserve both rows so the coordinator records their duplicate skips.
+            if (!LiveTaskMatcher.uniqueInPlan(seed, cohort) || attemptedHistory(seed)) {
                 recognized.add(LivePreflightHistory.unreadable(seed));
             } else {
                 var observed = observe(authority.preflightScope(seed), LiveRewardsTypes.Phase.BEFORE, seed);
@@ -141,8 +139,7 @@ final class LiveRewardsPerception {
             long generation = navigation.recoveryGeneration();
             Frame frame=readUi(scope,LiveRewardsTypes.Phase.BEFORE);var base=frame.report().base();
             if (navigation.recoveryGeneration() != generation) previous = null;
-            var role=LiveTaskMatcher.role(kind);int count=kind==LiveRewardsTypes.Kind.CHECK_IN?0:
-                    kind==LiveRewardsTypes.Kind.DAILY?base.cards().dailyCount():base.cards().moreCount();
+            var role=LiveTaskMatcher.role(kind);
             var region=region(base,role);boolean regionComplete=region!=null&&region.target()>0&&region.current()==region.target();
             if(kind!=LiveRewardsTypes.Kind.CHECK_IN&&regionComplete){
                 publish(scope.task(),"PREFLIGHT","RESULT.json",new JSONObject().put("kind",kind.name()).put("outcome","REGION_COMPLETE_SKIP")
@@ -152,7 +149,7 @@ final class LiveRewardsPerception {
             List<LiveRewardsTypes.Task> roster=new ArrayList<>();
             for(var item:frame.report().items())if(item.role()==role)roster.add(new LiveRewardsTypes.Task(kind,item.descriptorHash(),item.index(),"",
                     Math.max(0,item.points()),false,false,-1));
-            if(kind==LiveRewardsTypes.Kind.CHECK_IN&&roster.size()==1||kind!=LiveRewardsTypes.Kind.CHECK_IN&&count>=1&&roster.size()==count)
+            if(LiveTaskMatcher.regionSnapshot(frame.report(),kind)!=null)
                 return new Roster(List.copyOf(roster),true);
             var shape=frame.after().profile().shape();
             var activity=kind==LiveRewardsTypes.Kind.CHECK_IN?null:
@@ -224,6 +221,7 @@ final class LiveRewardsPerception {
 
     private Located locate(LiveRunAuthority.CardScope scope,LiveRewardsTypes.Phase phase,LiveRewardsTypes.Task expected)throws Exception{
         CardRevealProbeTarget.Selection previousCandidate=null;ReviewShizukuSwipeActor.SwipeTarget previousSearch=null;
+        LiveTaskMatcher.RegionSnapshot previousRoster=null;
         int swipes=0;long firstScroll=-1;
         long generation = navigation.recoveryGeneration();
         for(int count=0;count<20;count++){
@@ -231,6 +229,7 @@ final class LiveRewardsPerception {
             if (navigation.recoveryGeneration() != generation) {
                 // Stability must be demonstrated by two fresh frames after reacquiring focus.
                 previousCandidate = null;
+                previousRoster = null;
                 previousSearch = null;
                 generation = navigation.recoveryGeneration();
             }
@@ -259,13 +258,18 @@ final class LiveRewardsPerception {
             }
             if(selected.state()==CardRevealProbeTarget.State.CANDIDATE){
                 if(match.state()!=LiveTaskMatcher.State.UNIQUE)return new Located(frame,match,null,"TASK_IDENTITY_UNAVAILABLE",swipes,elapsed(firstScroll));
-                if (phase == LiveRewardsTypes.Phase.BEFORE && !LiveTaskMatcher.sameRoster(frame.report(), expected.kind(), cohort))
-                    return new Located(frame, match, null, "REGION_ROSTER_CHANGED", swipes, elapsed(firstScroll));
-                if(phase!=LiveRewardsTypes.Phase.BEFORE||selected.sameCandidate(previousCandidate))
+                var roster = LiveTaskMatcher.regionSnapshot(frame.report(), expected.kind());
+                if (roster == null) return new Located(frame,match,null,"REGION_ROSTER_INCOMPLETE",swipes,elapsed(firstScroll));
+                if (scope.preflight() && !roster.matchesPreflight(cohort))
+                    return new Located(frame,match,null,"PREFLIGHT_ROSTER_CHANGED",swipes,elapsed(firstScroll));
+                if (!LiveTaskMatcher.boundCurrentMatch(frame.report(), expected, cohort, match))
+                    return new Located(frame,match,null,"CURRENT_TASK_IDENTITY_AMBIGUOUS",swipes,elapsed(firstScroll));
+                if(phase!=LiveRewardsTypes.Phase.BEFORE||roster.equals(previousRoster)&&selected.sameCandidate(previousCandidate))
                     return new Located(frame,match,selected,"READY",swipes,elapsed(firstScroll));
-                previousCandidate=selected;pause(scope,250);continue;
+                previousCandidate=selected;previousRoster=roster;pause(scope,250);continue;
             }
             previousCandidate=null;
+            previousRoster=null;
             if(selected.state()!=CardRevealProbeTarget.State.SCROLL||swipes>=8)
                 return new Located(frame,match,null,selected.state().name(),swipes,elapsed(firstScroll));
             if(firstScroll<0)firstScroll=now();
@@ -439,13 +443,14 @@ final class LiveRewardsPerception {
                 if(title==null||title.isEmpty())title=expected.titleHash();
                 // A title-only compact match must also be confirmed again by fresh native OCR.
                 if(found.match().compact()&&!expected.titleHash().equals(title)){qualified=false;admissionReason="COMPACT_TITLE_HASH_CHANGED";}
+                if(qualified&&found.match().compact()&&!nativeResult.complete()){qualified=false;admissionReason="COMPACT_TICK_UNCONFIRMED";}
                 boolean complete=qualified&&nativeResult.complete();
                 var actual=new LiveRewardsTypes.Task(expected.kind(),expected.descriptorHash(),found.match().item().index(),title,
                         expected.kind()==LiveRewardsTypes.Kind.CHECK_IN?points:expected.points(),qualified,complete,day);
                 var counter=region(base,LiveTaskMatcher.role(expected.kind()));int c=counter==null?-1:counter.current(),t=counter==null?-1:counter.target();
                 Box target=qualified&&!complete?outcome.target():null;double confidence=qualified?outcome.confidence():-1;
                 var data=new LiveRewardsTypes.ObservationData(actual,source,read.helperStartedMs(),roi,roi.width(),roi.height(),target,confidence,hash,
-                        qualified,true,true,c,t);
+                        qualified,true,true,c,t,LiveTaskMatcher.regionSnapshot(frame.report(),expected.kind()));
                 var observation=scope.sealObservation(permit,data);
                 state("NATIVE_"+safeNativeReason(admissionReason));
                 if(nativeResult.diagnostics!=null)publish(expected,stage,"DIAGNOSTICS.json",nativeResult.diagnostics.getBytes(StandardCharsets.UTF_8));
@@ -465,18 +470,36 @@ final class LiveRewardsPerception {
         if(permit==null||permit.scope().run()!=authority||!permit.live()||!permit.current(now()))return false;
         var frame=readUi(permit.scope(),LiveRewardsTypes.Phase.BEFORE,false);var before=permit.before();
         if(!permit.matchesBeforeSource(frame.after()))throw new SecurityException("Live tap source changed");
-        var match=LiveTaskMatcher.find(frame.report(),before.task(),cohort);if(match.state()!=LiveTaskMatcher.State.UNIQUE||match.compact()){
-            state("TAP_REBIND_"+match.state().name());return false;
-        }
-        if (!LiveTaskMatcher.sameRoster(frame.report(), before.task().kind(), cohort)) {
-            state("TAP_REBIND_REGION_ROSTER_CHANGED");return false;
-        }
-        var shape=frame.after().profile().shape();var selected=before.task().kind()==LiveRewardsTypes.Kind.CHECK_IN?
-                CardRevealProbeTarget.select(frame.report().base(),shape.width(),shape.height()):RemainingCardTarget.select(frame.report().base(),shape.width(),shape.height(),
-                        new RemainingCardChoice(LiveTaskMatcher.role(before.task().kind()),match.item().index())).selection();
-        boolean accepted=selected.state()==CardRevealProbeTarget.State.CANDIDATE&&selected.crop().equals(before.data().screenRoi())
-                &&permit.current(now())&&current(permit.scope());
-        state(accepted?"TAP_REBIND_QUALIFIED":"TAP_REBIND_GEOMETRY_CHANGED");return accepted;
+        var shape=frame.after().profile().shape();
+        var binding=tapBinding(frame.report(),before.task(),cohort,before.data().regionSnapshot(),
+                before.data().screenRoi(),shape.width(),shape.height());
+        state("TAP_REBIND_"+binding.name());
+        return binding==TapBinding.QUALIFIED&&permit.current(now())&&current(permit.scope());
+    }
+
+    enum TapBinding { QUALIFIED, MISSING, AMBIGUOUS, COMPACT, ROSTER_CHANGED_SINCE_CROP,
+        TASK_IDENTITY_CHANGED, REGION_COMPLETE, GEOMETRY_CHANGED }
+
+    static TapBinding tapBinding(LiveUiProtocol.Report current, LiveRewardsTypes.Task expected,
+            List<LiveRewardsTypes.Task> cohort, LiveTaskMatcher.RegionSnapshot capturedRoster,
+            Box capturedRoi, int width, int height) {
+        var match = LiveTaskMatcher.find(current, expected, cohort);
+        if (match.state() == LiveTaskMatcher.State.MISSING) return TapBinding.MISSING;
+        if (match.state() == LiveTaskMatcher.State.AMBIGUOUS) return TapBinding.AMBIGUOUS;
+        if (match.compact()) return TapBinding.COMPACT;
+        var roster = LiveTaskMatcher.regionSnapshot(current, expected.kind());
+        if (roster == null || !roster.equals(capturedRoster)) return TapBinding.ROSTER_CHANGED_SINCE_CROP;
+        if (!LiveTaskMatcher.admits(current,expected,cohort) || match.item().index()!=expected.ordinal())
+            return TapBinding.TASK_IDENTITY_CHANGED;
+        var role=LiveTaskMatcher.role(expected.kind());
+        var parent=region(current.base(),role);
+        if (expected.kind()!=LiveRewardsTypes.Kind.CHECK_IN && parent!=null && parent.target()>0 && parent.current()==parent.target())
+            return TapBinding.REGION_COMPLETE;
+        var selected=expected.kind()==LiveRewardsTypes.Kind.CHECK_IN?
+                CardRevealProbeTarget.select(current.base(),width,height):RemainingCardTarget.select(current.base(),width,height,
+                        new RemainingCardChoice(role,match.item().index())).selection();
+        return selected.state()==CardRevealProbeTarget.State.CANDIDATE && selected.crop().equals(capturedRoi)
+                ? TapBinding.QUALIFIED : TapBinding.GEOMETRY_CHANGED;
     }
     /** Called only after the three-second passive wait. The helper itself is UI-read-only. */
     LiveVisitGuard.Report visitGuard(LiveActionPermit action)throws Exception{
