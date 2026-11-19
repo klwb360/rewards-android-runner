@@ -103,7 +103,6 @@ final class ReadingNewsCycle {
                 if (card.kind() == Kind.ARTICLE && !ledger.attempted(card.key())) {
                     VisitResult result = visit(ports, card);
                     if (result == VisitResult.AUTO_RETURN && completed < 2) return stop(Status.PILOT_UNCONFIRMED);
-                    if (result == VisitResult.CHANGED_BEFORE_DISPATCH) unreadable++;
                     if (ledger.used() >= ReadingNewsLedger.DAILY_LIMIT) return stop(Status.DAILY_LIMIT);
                     // Returning can reorder/repopulate the list. A pre-tap proof can never authorize a swipe.
                     CardProof returned = read(ports);
@@ -112,7 +111,7 @@ final class ReadingNewsCycle {
                         continue;
                     }
                     if (returned.kind() == Kind.AD) ads++;
-                    if (returned.kind() == Kind.UNKNOWN) unreadable++;
+                    else if (returned.kind() == Kind.UNKNOWN || result == VisitResult.CHANGED_BEFORE_DISPATCH) unreadable++;
                     card = returned;
                 } else {
                     switch (card.kind()) {

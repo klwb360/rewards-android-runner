@@ -53,6 +53,86 @@ public class NewsFeedModelTest {
         nodes.removeIf(v->v.index()==2);
         assertEquals(NewsFeedModel.Page.UNKNOWN,NewsFeedModel.inspect(nodes,1000,2000,-1,null).page());
     }
+    private static List<Node> collapsedList(){
+        var nodes=new ArrayList<Node>();
+        for(Node n:list(false)){
+            if(n.index()==0){nodes.add(n(0,-1,b(0,0,1000,2000),"android:id/content",null,false));continue;}
+            if(n.index()==1){
+                nodes.add(n(40,0,b(0,0,1000,2000),"com.microsoft.bing:id/container",null,false));
+                nodes.add(n(1,40,b(0,0,1000,2000),"compose_home_root",null,false));
+                nodes.add(n(41,1,b(0,0,1000,12),null,null,false));
+                nodes.add(n(44,1,b(480,0,520,31),null,null,false));
+                continue;
+            }
+            if(n.index()!=2)nodes.add(n);
+        }
+        return nodes;
+    }
+    @Test public void collapsedHomeBarAllowsOnlyTheFullCardCoveringTheOriginalAnchor(){
+        var nodes=collapsedList();
+        for(int anchor:List.of(-1,840,1180)){
+            var f=NewsFeedModel.inspect(nodes,1000,2000,anchor,null);
+            assertEquals(NewsFeedModel.Page.FEED,f.page());assertEquals("FEED_CANDIDATE",f.reason());
+            assertEquals(b(0,31,1000,1840),f.viewport());assertEquals(b(50,430,950,1250),f.card().box());
+            assertEquals(930,f.stride());
+        }
+        assertNull(NewsFeedModel.inspect(nodes,1000,2000,1500,null).card());
+    }
+    @Test public void missingHeaderNeedsOneCollapsedEdgeAndTheNativeBingContainerBranches(){
+        var missing=collapsedList();missing.removeIf(n->n.index()==41);
+        assertEquals(NewsFeedModel.Page.UNKNOWN,NewsFeedModel.inspect(missing,1000,2000,1180,null).page());
+        var duplicate=collapsedList();duplicate.add(n(42,1,b(0,0,1000,18),null,null,false));
+        assertEquals(NewsFeedModel.Page.UNKNOWN,NewsFeedModel.inspect(duplicate,1000,2000,1180,null).page());
+        var wrongFooter=collapsedList();
+        wrongFooter.replaceAll(node->node.index()==3?n(3,40,b(0,1840,1000,2000),"com.microsoft.bing:id/sa_main_footer",null,false):node);
+        assertEquals(NewsFeedModel.Page.UNKNOWN,NewsFeedModel.inspect(wrongFooter,1000,2000,1180,null).page());
+    }
+    @Test public void nestedAdvertisingControlsDoNotReplaceTheCardsImageOrBadgeSlot(){
+        var nodes=collapsedList();
+        nodes.add(n(45,10,b(100,930,222,1060),null,null,true));
+        nodes.add(n(46,45,b(120,970,198,1020),null,"",false));
+        nodes.add(n(47,10,b(820,930,930,1060),null,null,true));
+        var f=NewsFeedModel.inspect(nodes,1000,2000,1180,null);
+        assertEquals(NewsFeedModel.Page.FEED,f.page());
+        assertEquals(b(50,430,950,1250),f.card().box());assertEquals(b(80,460,920,920),f.card().image());
+        assertTrue(f.card().source().top()>=f.card().image().bottom());
+        assertTrue(f.card().source().right()<=f.card().box().left()+f.card().box().width()/5);
+        nodes.add(n(49,10,b(390,635,610,740),null,null,true));
+        assertCovered(f,NewsFeedModel.inspect(nodes,1000,2000,1180,null));
+    }
+    private static void assertCovered(NewsFeedModel.Frame before,NewsFeedModel.Frame after){
+        assertEquals(NewsFeedModel.Page.FEED,after.page());assertEquals("FEED_OCCLUDED",after.reason());
+        assertEquals(NewsFeedModel.Kind.UNKNOWN,after.card().kind());assertEquals(before.stride(),after.stride());
+        assertEquals(before.viewport(),after.viewport());assertEquals(before.card().layoutKey(),after.card().layoutKey());
+        assertEquals(before.card().box(),after.card().box());assertEquals(before.card().image(),after.card().image());
+        assertEquals(before.card().source(),after.card().source());assertEquals(before.atEnd(),after.atEnd());
+    }
+    @Test public void siblingOrExternalSurfaceCoveringTheFreshPhotoPointIsASingleCardSkip(){
+        var rows=list(false);rows.removeIf(n->n.index()>=5);
+        rows.add(n(5,4,b(50,260,950,990),null,null,false));item(rows,10,5,260,990,true);
+        rows.add(n(17,4,b(50,1040,950,1770),null,null,false));item(rows,21,17,1040,1770,true);
+        var first=NewsFeedModel.inspect(rows,1000,2000,600,null);
+        assertEquals(NewsFeedModel.Kind.ARTICLE,first.card().kind());
+        for(int parent:List.of(0,1,4,5)){
+            for(boolean clickable:List.of(false,true)){
+                rows.add(n(75,parent,b(440,470,560,570),null,null,clickable));
+                assertCovered(first,NewsFeedModel.inspect(rows,1000,2000,600,null));
+                var next=NewsFeedModel.inspect(rows,1000,2000,1400,null);
+                assertEquals("FEED_CANDIDATE",next.reason());assertEquals(NewsFeedModel.Kind.ARTICLE,next.card().kind());
+                rows.remove(rows.size()-1);
+            }
+        }
+    }
+    @Test public void hiddenSurfaceAndAdjacentControlDoNotCoverTheExactPhotoCenter(){
+        var rows=list(false);
+        rows.add(new Node(64,5,false,true,null,"","",390,635,610,740,NativeUiBoundPointsParser.ClassRole.BUTTON,true));
+        // The right bound is exclusive; this active sibling is beside the center at x=500.
+        rows.add(n(65,5,b(390,635,500,740),null,null,true));
+        var clear=NewsFeedModel.inspect(rows,1000,2000,840,null);
+        assertEquals("FEED_CANDIDATE",clear.reason());assertEquals(NewsFeedModel.Kind.ARTICLE,clear.card().kind());
+        rows.add(n(66,5,b(390,635,501,740),null,null,true));
+        assertCovered(clear,NewsFeedModel.inspect(rows,1000,2000,840,null));
+    }
     @Test public void repeatedForeignAndChallengeNodesRejectTheWholeFrame(){
         var nodes=list(false);nodes.add(n(29,0,b(20,30,300,100),null,"安全验证",false));
         assertEquals(NewsFeedModel.Page.BLOCKED,NewsFeedModel.inspect(nodes,1000,2000,-1,null).page());

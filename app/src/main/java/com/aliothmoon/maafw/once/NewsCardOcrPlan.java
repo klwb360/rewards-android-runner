@@ -88,7 +88,7 @@ final class NewsCardOcrPlan {
                 continue;
             }
             String part=compact(row.text());
-            if(part.contains("广告")||NewsFeedModel.sourceAd(row.text()))
+            if(part.contains("广告"))
                 return new Evidence(NewsFeedModel.Kind.AD,visualKey,-1,-1,"AD_BADGE");
             if(part.endsWith("广")||part.startsWith("告"))fragments.add(row);
         }
