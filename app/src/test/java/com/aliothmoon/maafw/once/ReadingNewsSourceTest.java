@@ -223,6 +223,50 @@ public class ReadingNewsSourceTest {
             assertThrows(SecurityException.class,()->route.backSucceeded(clean.source(),3050));
         }
     }
+    private static String attachedPanel(String component){
+        return window("Panel:"+component,"f00d",true).replace("rootTaskId=15","rootTaskId="+TASK)
+                .replace("ty=BASE_APPLICATION","ty=APPLICATION_PANEL")
+                .replace("    Requested","      fl=NOT_FOCUSABLE HARDWARE_ACCELERATED\n    Requested")
+                +"    mParentWindow=Window{bbb u0 "+component+"} mLayoutAttached=true\n"
+                +"    mActivityRecord=ActivityRecord{eee u0 "+component+" t"+TASK+"}\n";
+    }
+    @Test public void attachedBingPanelCanOnlyWaitForTheOriginalUncoveredArticle(){
+        for(String component:new String[]{TEMPLATE,BROWSER}){
+            var route=enteredList();
+            String w=viewerWindows(component),a=viewerActivities(component);
+            var original=read(route,w,a).source();
+            route.confirmArticle(original);
+            var pending=read(route,w+attachedPanel(component),a);
+            assertEquals(FirstGate.VISIBLE_UNKNOWN_WINDOW,pending.parsed().firstGate());
+            assertEquals(ReadingNewsSource.WAIT_ARTICLE_OVERLAY,pending.gate());
+            assertTrue(pending.waitable());assertNull(pending.source());
+            assertThrows(SecurityException.class,()->route.backSucceeded(original,3050));
+            var clear=read(route,w,a);
+            assertEquals(FirstGate.READY,clear.parsed().firstGate());
+            assertTrue(original.sameLiveWindow(clear.source()));route.confirmArticle(clear.source());
+            route.backSucceeded(clear.source(),3050);
+            assertThrows(SecurityException.class,()->route.backSucceeded(clear.source(),3100));
+        }
+    }
+    @Test public void foreignDetachedFocusableOrAmbiguousArticlePanelsEndTheVisit(){
+        var route=enteredList();
+        String w=viewerWindows(TEMPLATE),a=viewerActivities(TEMPLATE),panel=attachedPanel(TEMPLATE);
+        route.confirmArticle(read(route,w,a).source());
+        for(String invalid:new String[]{
+                panel.replace("Panel:"+TEMPLATE,"Panel:"+MAIN),panel.replace("mOwnerUid=10073","mOwnerUid=10074"),
+                panel.replace("package=com.microsoft.bing","package=other.app"),panel.replace("appop=NONE","appop=OTHER"),
+                panel.replace("mDisplayId=0","mDisplayId=1"),panel.replace("rootTaskId="+TASK,"rootTaskId=23"),
+                panel.replace("mParentWindow=Window{bbb","mParentWindow=Window{bbc"),panel.replace("mLayoutAttached=true","mLayoutAttached=false"),
+                panel.replace("u0 "+TEMPLATE+"} mLayoutAttached","u0 "+MAIN+"} mLayoutAttached"),
+                panel.replace("ActivityRecord{eee","ActivityRecord{eed"),panel.replace(" t"+TASK+"}"," t23}"),
+                panel.replace("u0 "+TEMPLATE+" t"+TASK,"u0 "+MAIN+" t"+TASK),
+                panel.replace("ty=APPLICATION_PANEL","ty=SYSTEM_DIALOG"),panel.replace("NOT_FOCUSABLE","NOT_TOUCH_MODAL"),
+                panel+"    mParentWindow=Window{bbb u0 "+TEMPLATE+"} mLayoutAttached=true\n"}){
+            assertNotEquals(panel,invalid);
+            rejectWithoutWaiting(route,w+invalid,a,"NEWS_ROUTE_ARTICLE_OVERLAY_UNTRUSTED");
+        }
+        rejectWithoutWaiting(route,w+panel+window("other.app/.Dialog","cade",true),a,null);
+    }
     @Test public void aLateVisibleCoverCannotHideChangedFocusActivityTaskOrMissingList(){
         var route=enteredList();String w=viewerWindows(TEMPLATE),a=viewerActivities(TEMPLATE);
         route.confirmArticle(read(route,w,a).source());
