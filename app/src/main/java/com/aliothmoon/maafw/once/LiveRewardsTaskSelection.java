@@ -5,6 +5,13 @@ import java.util.List;
 
 /** The visible selection can only narrow the normal source, task and ledger gates. */
 final class LiveRewardsTaskSelection {
+    enum Workflow { BASIC, FULL, SEARCH }
+    record Plan(LiveRewardsTaskSelection tasks, Workflow workflow) {
+        Plan {
+            if (tasks == null || workflow == null || workflow != Workflow.BASIC && tasks != ALL)
+                throw new IllegalArgumentException("Incompatible visible workflow and task scope");
+        }
+    }
     static final LiveRewardsTaskSelection ALL = new LiveRewardsTaskSelection("", List.of());
     private final String day;
     private final List<String> keys;
@@ -34,13 +41,24 @@ final class LiveRewardsTaskSelection {
 
     /** Only exists during the exact button callback. It carries a selection, never input authority. */
     static final class VisibleChoice {
-        private record Bound(Object activity, LiveRewardsTaskSelection selection) {}
+        private record Bound(Object activity, Plan plan) {}
         private final ThreadLocal<Bound> click = new ThreadLocal<>();
 
         void confirm(Object activity, LiveRewardsTaskSelection selection, Runnable start) {
-            if (activity == null || selection == null || start == null || click.get() != null)
+            if (selection == null) throw new IllegalStateException("Missing visible task selection");
+            confirmPlan(activity, new Plan(selection, Workflow.BASIC), start);
+        }
+
+        void confirmWorkflow(Object activity, Workflow workflow, Runnable start) {
+            if (workflow == null || workflow == Workflow.BASIC)
+                throw new IllegalStateException("Select a daily or search workflow");
+            confirmPlan(activity, new Plan(ALL, workflow), start);
+        }
+
+        private void confirmPlan(Object activity, Plan plan, Runnable start) {
+            if (activity == null || start == null || click.get() != null)
                 throw new IllegalStateException("Fresh visible selection required");
-            click.set(new Bound(activity, selection));
+            click.set(new Bound(activity, plan));
             try {
                 start.run();
             } finally {
@@ -49,12 +67,18 @@ final class LiveRewardsTaskSelection {
         }
 
         LiveRewardsTaskSelection take(Object activity) {
+            var plan=takePlan(activity);
+            if(plan.workflow()!=Workflow.BASIC)throw new SecurityException("Expected only a base task selection");
+            return plan.tasks();
+        }
+
+        Plan takePlan(Object activity) {
             var bound = click.get();
-            if (bound == null || bound.activity() != activity || bound.selection() == null)
+            if (bound == null || bound.activity() != activity || bound.plan() == null)
                 throw new SecurityException("Missing visible task selection");
             // Keep a consumed slot until the callback returns, including through nested UI callbacks.
             click.set(new Bound(activity, null));
-            return bound.selection();
+            return bound.plan();
         }
     }
 }

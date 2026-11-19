@@ -15,9 +15,9 @@ android {
     }
     buildTypes.getByName("debug") { isDebuggable = false }
     defaultConfig {
-        versionCode = 54
-        versionName = "0.54-native-own-state"
-        manifestPlaceholders["appLabel"] = "Rewards只读"
+        versionCode = 55
+        versionName = "0.55-local-runner"
+        manifestPlaceholders["appLabel"] = "Rewards 助手"
         externalNativeBuild { cmake { arguments += "-DANDROID_STL=c++_shared" } }
     }
     flavorDimensions += "reviewBoundary"

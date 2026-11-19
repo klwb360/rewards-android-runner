@@ -23,6 +23,12 @@ final class LiveRewardsUi {
     static final String RUN_NEWS_PROGRESS="确认只读1篇并复查积分";
     static final String OPEN_NEWS_SEVEN="打开连续阅读七篇";
     static final String RUN_NEWS_SEVEN="确认连续阅读最多七篇";
+    static final String OPEN_AUTOMATION="打开 Rewards 自动运行";
+    static final String OPEN_FULL="完整流程 · 基础任务、阅读和搜索";
+    static final String OPEN_SEARCH="单独运行搜索";
+    static final String RUN_FULL="确认开始完整流程";
+    static final String RUN_SEARCH="确认开始字母搜索";
+    static final String RESULT_HEADING="\nRewards 运行结果\n";
     private static final ReadingNewsChoice newsChoice = new ReadingNewsChoice();
     static final String OPEN_SINGLE_TASK="打开一次任务试点（尚不执行）";
     static final String RUN_SINGLE_TASK="确认只点击一个任务";
@@ -33,7 +39,7 @@ final class LiveRewardsUi {
     private static final LiveRewardsTaskSelection.VisibleChoice visibleChoice = new LiveRewardsTaskSelection.VisibleChoice();
     private static final LiveMoreUiRecheck.Choice recheckChoice = new LiveMoreUiRecheck.Choice();
 
-    static LiveRewardsTaskSelection takeSelection(Activity activity) { return visibleChoice.take(activity); }
+    static LiveRewardsTaskSelection.Plan takePlan(Activity activity) { return visibleChoice.takePlan(activity); }
     static boolean takeMoreUiRecheck(Activity activity) { return recheckChoice.take(activity); }
     static ReadingNewsChoice.Mode takeNewsMode(Activity activity,boolean live,boolean limited) {
         return newsChoice.take(activity,live,limited);
@@ -49,6 +55,13 @@ final class LiveRewardsUi {
         b.setOnClickListener(v->{if(b.isEnabled()){b.setEnabled(false);action.run();}});box.addView(b);
     }
     static void choice(Activity a,boolean ready,Runnable run,Runnable close){
+        for (var workflow : new LiveRewardsTaskSelection.Workflow[]{
+                LiveRewardsTaskSelection.Workflow.FULL, LiveRewardsTaskSelection.Workflow.SEARCH}) {
+            if (a.getWindow().getDecorView().findViewWithTag(workflow) != null) {
+                workflowPage(a,ready,run,close,workflow);
+                return;
+            }
+        }
         for(var mode:ReadingNewsChoice.Mode.values()){
             if(mode.live && a.getWindow().getDecorView().findViewWithTag(mode)!=null){
                 newsPage(a,ready,run,close,mode);return;
@@ -59,19 +72,37 @@ final class LiveRewardsUi {
             morePairChoice(a,ready,run,close,editing.getText().toString());
             return;
         }
-        LinearLayout box=page(a,"本轮真实流程：签入 → 每日活动 → 更多活动\n"
+        LinearLayout box=page(a,"选择完整流程、单独搜索，或使用下方的基础任务和阅读入口。\n"
+                +"“确认开始本轮真实流程”只运行基础任务，顺序为签入 → 每日活动 → 更多活动。\n"
                 +"按区域识别并执行。签入后在原处确认，随后依次核对每日活动、更多活动，识别完整区域后才处理其中的任务。\n"
                 +"活动点击命令成功返回后静置至少5秒，不做返回前页面复核，再返回一次。签入不返回。\n"
                 +"新页面不点击、答题、解谜或滚动。返回命令成功后，再读取Rewards任务状态。\n"
                 +"返回后仍未确认完成则记录并继续，本轮不重试同一任务。\n"
                 +"最多一次签入、每区八张活动卡、总计17次点击与16次返回，最长30分钟。\n"
-                +"保留全部历史记录；不执行搜索、阅读或七日进度卡点击，不采集整屏。截图和诊断仅保存在本机。\n"
+                +"基础任务跳过七日进度卡。历史记录保留，局部截图和诊断仅保存在本机。\n"
                 +"点击和进度变化都不证明账户积分已到账。来源、输入或清理不明时停止。");
+        button(a,box,OPEN_FULL,true,()->workflowPage(a,ready,run,close,LiveRewardsTaskSelection.Workflow.FULL));
+        button(a,box,OPEN_SEARCH,true,()->workflowPage(a,ready,run,close,LiveRewardsTaskSelection.Workflow.SEARCH));
         button(a,box,RUN,ready,()->visibleChoice.confirm(a,LiveRewardsTaskSelection.ALL,run));
         button(a,box,OPEN_MORE_PAIR,ready,()->morePairChoice(a,ready,run,close,""));
         button(a,box,OPEN_NEWS_LIVE,ready,()->newsPage(a,ready,run,close,ReadingNewsChoice.Mode.LIVE));
         button(a,box,OPEN_NEWS_PROGRESS,ready,()->newsPage(a,ready,run,close,ReadingNewsChoice.Mode.PROGRESS_FIVE));
         button(a,box,OPEN_NEWS_SEVEN,ready,()->newsPage(a,ready,run,close,ReadingNewsChoice.Mode.SEVEN));
+        button(a,box,"关闭",true,close);
+    }
+
+    private static void workflowPage(Activity a, boolean ready, Runnable run, Runnable close,
+                                     LiveRewardsTaskSelection.Workflow workflow) {
+        boolean full=workflow==LiveRewardsTaskSelection.Workflow.FULL;
+        String instructions=full
+                ? "完整流程\n依次处理签入、每日活动、更多活动，再阅读最多 7 篇，最后搜索。已完成的卡片及当天已经尝试的任务会跳过。\n"
+                : "字母搜索\n";
+        instructions+="从 a 到 t，每次提交一个字母。提交成功后等待至少 5 秒，返回一次。当天已尝试的字母会跳过。\n"
+                +"先在 Bing 主页打开 Rewards，再从最近任务切回本应用确认。Bing 需要联网，识别与操作都在本机运行。";
+        if (!ready) instructions+="\n等待已授权的本机 Shizuku 服务就绪。";
+        var box=page(a,instructions);
+        box.setTag(workflow);
+        button(a,box,full?RUN_FULL:RUN_SEARCH,ready,()->visibleChoice.confirmWorkflow(a,workflow,run));
         button(a,box,"关闭",true,close);
     }
 
@@ -168,6 +199,12 @@ final class LiveRewardsUi {
         button(a,box,"停止并关闭",true,close);
     }
     static void status(Activity a,boolean singleTask,String summary,Runnable close){
+        int userResult=summary==null?-1:summary.indexOf(RESULT_HEADING);
+        if(userResult>=0){
+            LinearLayout result=page(a,summary.substring(userResult).trim());
+            button(a,result,"关闭",true,close);
+            return;
+        }
         LinearLayout box=page(a,(singleTask?"一次任务试点已停止\n":"本轮真实流程已停止\n")+summary);
         button(a,box,"关闭",true,close);
     }

@@ -9,6 +9,25 @@ public class LiveMorePairSelectionTest {
     private static final String DAY = LiveCoreFixture.DAY;
     private static final LiveRewardsTypes.Kind MORE = LiveRewardsTypes.Kind.MORE;
 
+    @Test public void fullAndSearchConfirmationsRemainDistinctAndAreConsumedOnce() {
+        var owner=new Object();
+        var choice=new LiveRewardsTaskSelection.VisibleChoice();
+        for(var mode : List.of(LiveRewardsTaskSelection.Workflow.FULL, LiveRewardsTaskSelection.Workflow.SEARCH)) {
+            choice.confirmWorkflow(owner,mode,()->{
+                assertThrows(SecurityException.class,()->choice.takePlan(new Object()));
+                var plan=choice.takePlan(owner);
+                assertEquals(mode,plan.workflow());
+                assertSame(LiveRewardsTaskSelection.ALL,plan.tasks());
+                assertThrows(SecurityException.class,()->choice.takePlan(owner));
+            });
+            assertThrows(SecurityException.class,()->choice.takePlan(owner));
+            choice.confirmWorkflow(owner,mode,()->assertThrows(SecurityException.class,()->choice.take(owner)));
+            assertThrows(IllegalArgumentException.class,()->new LiveRewardsTaskSelection.Plan(pair(card(1,"one"),card(2,"two")),mode));
+        }
+        choice.confirm(owner,LiveRewardsTaskSelection.ALL,()->
+                assertEquals(LiveRewardsTaskSelection.Workflow.BASIC,choice.takePlan(owner).workflow()));
+    }
+
     private static LiveRewardsTypes.Task card(int ordinal, String name) {
         return LiveCoreFixture.task(MORE, ordinal, name);
     }
