@@ -35,6 +35,7 @@ public final class ReadingNewsCycleTest {
         long clock = 1_000, success;
         int anchor, moves, backCalls, inFlight, autoAt, failAt, reorderAfter, pageChecks;
         boolean revoked, revokeDuringWait, shortSleep, stalled, bypassTap, returnUncertain, clean = true;
+        boolean changedBeforeTap, changedAfterReserve;
         ReadingNewsCycle.Page destination = ReadingNewsCycle.Page.ARTICLE;
         Feed(List<ReadingNewsCycle.CardProof> cards) { this.cards = cards; }
         public long now() { return clock; }
@@ -56,8 +57,10 @@ public final class ReadingNewsCycleTest {
             assertEquals(ARTICLE, card.kind());
             storedGate = gate;
             if (bypassTap) return now();
+            if (changedBeforeTap) {changedBeforeTap=false;throw new ReadingNewsCycle.CardChangedBeforeDispatch();}
             clock += 75;
             gate.burn();
+            if (changedAfterReserve) throw new ReadingNewsCycle.CardChangedBeforeDispatch();
             tapped.add(card.key());
             assertEquals(1, ++inFlight);
             clicked = card;
@@ -217,6 +220,19 @@ public final class ReadingNewsCycleTest {
         assertThrows(IOException.class, () -> new ReadingNewsCycle(ledger(new LiveRewardsLedger.MemoryStore())).run(failedBack));
         assertEquals(1,failedBack.backCalls);
         assertEquals(0,failedBack.moves);
+    }
+
+    @Test public void changedPictureBeforeDispatchSkipsOneSlotWithoutCountingAnAttempt() throws Exception{
+        var journal=ledger(new LiveRewardsLedger.MemoryStore());
+        var feed=new Feed(articles(3));feed.changedBeforeTap=true;
+        var result=new ReadingNewsCycle(journal).run(feed);
+        assertTrue(result.pilotPassed());assertEquals(2,result.openedAndReturned());assertEquals(2,result.attempts());
+        assertEquals(1,result.unreadable());assertEquals(2,journal.used());assertEquals(2,feed.moves);
+        assertFalse(journal.attempted(hash("article-0")));
+        var reserved=ledger(new LiveRewardsLedger.MemoryStore());
+        var bad=new Feed(articles(3));bad.changedAfterReserve=true;
+        assertThrows(SecurityException.class,()->new ReadingNewsCycle(reserved).run(bad));
+        assertEquals(1,reserved.used());assertEquals(0,bad.moves);
     }
 
     @Test public void missingInputGateOrEarlyReturnCannotBeReportedAsSuccess() throws Exception {

@@ -11,6 +11,11 @@ final class ReadingNewsCycle {
     enum Kind { ARTICLE, AD, UNKNOWN, END }
     enum Page { ARTICLE, FEED, BLOCKED, UNKNOWN }
     enum Status { READY, RUNNING, DAILY_LIMIT, FEED_END, NO_MOVEMENT, PILOT_UNCONFIRMED, STOPPED }
+    static final class CardChangedBeforeDispatch extends Exception {
+        private static final long serialVersionUID=1L;
+        CardChangedBeforeDispatch(){super("NEWS_CARD_CHANGED_BEFORE_DISPATCH");}
+    }
+    private enum VisitResult { CONFIRMED, AUTO_RETURN, CHANGED_BEFORE_DISPATCH }
 
     record CardProof(Kind kind, String key, String layoutKey, boolean atEnd) {
         CardProof {
@@ -48,15 +53,17 @@ final class ReadingNewsCycle {
 
     private static final class Once implements BurnGate {
         private final BurnGate action;
-        private boolean available = true, consumed;
+        private boolean available = true, entered, consumed;
         Once(BurnGate action) { this.action = action; }
         @Override public synchronized void burn() throws Exception {
             if (!available) throw new SecurityException("News input gate already spent");
             available = false;
+            entered = true;
             action.burn();
             consumed = true;
         }
         synchronized void close() { available = false; }
+        synchronized boolean closeUnused(){available=false;return !entered;}
         synchronized void checkConsumed() {
             if (!consumed) throw new SecurityException("News input has no durable reservation");
         }
@@ -94,12 +101,13 @@ final class ReadingNewsCycle {
                 if (card.kind() == Kind.END) return stop(Status.FEED_END);
                 if (ledger.used() >= ReadingNewsLedger.DAILY_LIMIT) return stop(Status.DAILY_LIMIT);
                 if (card.kind() == Kind.ARTICLE && !ledger.attempted(card.key())) {
-                    boolean confirmed = visit(ports, card);
-                    if (!confirmed && completed < 2) return stop(Status.PILOT_UNCONFIRMED);
+                    VisitResult result = visit(ports, card);
+                    if (result == VisitResult.AUTO_RETURN && completed < 2) return stop(Status.PILOT_UNCONFIRMED);
+                    if (result == VisitResult.CHANGED_BEFORE_DISPATCH) unreadable++;
                     if (ledger.used() >= ReadingNewsLedger.DAILY_LIMIT) return stop(Status.DAILY_LIMIT);
                     // Returning can reorder/repopulate the list. A pre-tap proof can never authorize a swipe.
                     CardProof returned = read(ports);
-                    if (!card.sameCard(returned) && returned.atEnd()) {
+                    if (result != VisitResult.CHANGED_BEFORE_DISPATCH && !card.sameCard(returned) && returned.atEnd()) {
                         card = returned;
                         continue;
                     }
@@ -138,7 +146,7 @@ final class ReadingNewsCycle {
         return null;
     }
 
-    private boolean visit(Ports ports, CardProof card) throws Exception {
+    private VisitResult visit(Ports ports, CardProof card) throws Exception {
         ReadingNewsLedger.Attempt[] owner = {null};
         long[] dispatched = {-1};
         Once tap = new Once(() -> {
@@ -151,6 +159,10 @@ final class ReadingNewsCycle {
         long success;
         try {
             success = ports.tapArticle(card, tap);
+        } catch (CardChangedBeforeDispatch changed) {
+            if(!tap.closeUnused())throw new SecurityException("News card changed after input reservation",changed);
+            requireCurrent(ports);
+            return VisitResult.CHANGED_BEFORE_DISPATCH;
         } finally {
             tap.close();
         }
@@ -186,7 +198,7 @@ final class ReadingNewsCycle {
         else completed++;
         visits.add(new Visit(card.key(), success, waited, automatic));
         publish();
-        return !automatic;
+        return automatic?VisitResult.AUTO_RETURN:VisitResult.CONFIRMED;
     }
 
     private long waitAfterTap(Ports ports, long success) throws Exception {

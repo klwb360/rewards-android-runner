@@ -32,8 +32,11 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
     private final String preparation;
     private final AtomicBoolean started = new AtomicBoolean();
     private BingNavigationSnapshot.Ready original;
+    private ReadingNewsSource readingSource;
+    private boolean awaitingFeed;
     private int anchorY = -1;
     private NewsFeedModel.Card opened;
+    private String openedKey="";
     private long tapReturned = -1;
     private volatile String step = "READY", outcome = "READY", detail = "NONE";
     private volatile boolean listConfirmed, uncertain, ocrClean = true;
@@ -42,6 +45,7 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
     private int serial;
     private ReadingNewsCycle cycle;
     private Snapshot lastCandidate;
+    private Located lastLocated;
     private ReadingNewsCycle.CardProof lastProof;
 
     NewsAndroidPort(LiveRewardsRuntime.ReadingApproval selected,Context context,LiveRunAuthority authority,
@@ -64,6 +68,7 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
             reserve("PREPARATION");
             step="ENTRY_SOURCE";
             original=navigation.template();
+            if(authority.taskInputAllowed())readingSource=new ReadingNewsSource(original);
             Snapshot entry=null;
             for(int i=0;i<=8;i++){
                 entry=readEntry();
@@ -88,9 +93,11 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
             if(!authority.taskInputAllowed()) { outcome=step="PRECHECK_READY"; return; }
             step="OPEN_ENTRY";
             tap(located,()->reserve("ENTRY_TAP"),true);
+            readingSource.entrySucceeded();
             pause(450);
             step="FIRST_FEED";
             Snapshot first=awaitFeed(true);
+            readingSource.confirmList(first.source());
             listConfirmed=true;
             if(first.frame().card()!=null)anchorY=(int)first.frame().card().box().centerY();
             check();
@@ -129,6 +136,16 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
 
     private BingNavigationSnapshot.Ready source(){
         check();
+        if(readingSource!=null){
+            for(int sample=0;;sample++){
+                var observation=navigation.reading(readingSource);
+                if(observation.source()!=null && observation.source().fresh(now()))return observation.source();
+                if(!awaitingFeed || !observation.waitable() || sample==2)throw reject(observation.gate());
+                try{Thread.sleep(450);}
+                catch(InterruptedException interrupted){Thread.currentThread().interrupt();throw reject("NEWS_ROUTE_CANCELLED");}
+                check();
+            }
+        }
         var visit=navigation.visit(original);
         if (visit==null || visit.source()==null || !visit.source().matchesOriginal(original) || !visit.source().fresh(now()))
             throw reject(visit==null?"NEWS_SOURCE_MISSING":"NEWS_SOURCE_"+visit.gate().name());
@@ -162,9 +179,15 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
         var data=tree.source();
         if (!bound(data,before,after,shape,now())) throw reject("NEWS_TREE_SOURCE_BRACKET");
         var frame=NewsFeedModel.inspect(tree.nodes(),shape.width(),shape.height(),anchorY,article);
+        if(article!=null && readingSource!=null && readingSource.isCheckedViewer(after) && viewerContent(frame,tree.nodes()))
+            frame=new NewsFeedModel.Frame(NewsFeedModel.Page.ARTICLE,new Box(0,0,shape.width(),shape.height()),null,false,null,0,false,"BOUND_ARTICLE_VIEWER");
         if (frame.page()==NewsFeedModel.Page.REWARDS && !original.sameSource(after)) throw reject("NEWS_REWARDS_WINDOW");
         lastNodes=data.nodeCount(); lastStride=frame.stride(); detail=frame.reason();
         return new Snapshot(frame,after,data.windowId(),data.started());
+    }
+    static boolean viewerContent(NewsFeedModel.Frame frame,java.util.List<NativeUiBoundPointsParser.Node> nodes){
+        return frame.page()==NewsFeedModel.Page.UNKNOWN && "NO_FEED_CARDS".equals(frame.reason())
+                && !nodes.isEmpty() && nodes.stream().noneMatch(n->"homePageWrapper".equals(n.resourceId())||"compose_home_root".equals(n.resourceId()));
     }
     static boolean bound(NativeUiStructureProtocol.Report data,BingNavigationSnapshot.Ready before,
                          BingNavigationSnapshot.Ready after,BingNavigationSnapshot.Shape shape,long now){
@@ -192,13 +215,16 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
         if(s.frame().page()!=page)throw reject("EXPECTED_"+page.name()+"_"+s.frame().reason());
     }
     private Snapshot awaitFeed(boolean fromEntry)throws Exception{
-        for (int sample=0;;sample++) {
-            var snapshot=readFrame(fromEntry?null:opened);
-            if (snapshot.frame().page()==NewsFeedModel.Page.FEED) return snapshot;
-            if (sample==2 || !feedMayStillLoad(snapshot.frame(),fromEntry))
-                throw reject("EXPECTED_FEED_"+snapshot.frame().reason());
-            pause(500);
-        }
+        awaitingFeed=true;
+        try{
+            for (int sample=0;;sample++) {
+                var snapshot=readFrame(fromEntry?null:opened);
+                if (snapshot.frame().page()==NewsFeedModel.Page.FEED) return snapshot;
+                if (sample==2 || !feedMayStillLoad(snapshot.frame(),fromEntry))
+                    throw reject("EXPECTED_FEED_"+snapshot.frame().reason());
+                pause(500);
+            }
+        } finally {awaitingFeed=false;}
     }
     static boolean feedMayStillLoad(NewsFeedModel.Frame frame, boolean fromEntry) {
         return switch(frame.page()){
@@ -217,8 +243,19 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
                 && Objects.equals(left.reason(),right.reason());
     }
     private Snapshot refresh(Snapshot expected)throws Exception{
+        return refresh(expected,false);
+    }
+    private Snapshot refresh(Snapshot expected,boolean storyInput)throws Exception{
         var latest=readFrame(opened);
-        if(!sameTarget(expected,latest))throw reject("NEWS_CARD_CHANGED");
+        if(!sameTarget(expected,latest)){
+            if(storyInput && expected.window()==latest.window() && expected.source().sameLiveWindow(latest.source())
+                    && expected.frame().page()==NewsFeedModel.Page.FEED && latest.frame().page()==NewsFeedModel.Page.FEED
+                    && Objects.equals(expected.frame().viewport(),latest.frame().viewport())
+                    && latest.frame().card()!=null && ("FEED_CANDIDATE".equals(latest.frame().reason())
+                    || "FEED_CAROUSEL_CANDIDATE".equals(latest.frame().reason())))
+                throw new ReadingNewsCycle.CardChangedBeforeDispatch();
+            throw reject("NEWS_CARD_CHANGED");
+        }
         return latest;
     }
     private static Box cardBox(Snapshot frame) {
@@ -254,6 +291,9 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
     }
 
     private Located locate(Snapshot frame,boolean publish)throws Exception{
+        return locate(frame,publish,false);
+    }
+    private Located locate(Snapshot frame,boolean publish,boolean storyInput)throws Exception{
         var card=cardBox(frame);
         if(card==null || crops>=96)throw reject("NEWS_CROP_BUDGET");
         var view=frame.frame().viewport();
@@ -298,7 +338,7 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
                 match=NewsLocalOcr.recognize(context,png.clone(),crop,frame.frame(),true,this::current);
                 if(!match.clean()){ocrClean=false;throw reject("NEWS_OCR_CLEANUP");}
             }
-            var latest=refresh(frame);
+            var latest=refresh(frame,storyInput);
             if (!NativeProgressPublication.frameFresh(now(),acquired.helperStartedMs()))throw reject("NEWS_OCR_EXPIRED");
             detail=match.reason();
             if(publish && !authority.taskInputAllowed() && latest.frame().page()==NewsFeedModel.Page.REWARDS
@@ -356,14 +396,42 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
         return box!=null && x>box.left() && x<box.right()-1 && y>box.top() && y<box.bottom()-1;
     }
 
+    /** Checks the last local image inside the input actor, before the story reservation can be touched. */
+    static final class StoryTapCheck {
+        private final String imageKey;
+        private boolean changed;
+        StoryTapCheck(NewsFeedModel.Frame frame,String imageKey){
+            if(frame.page()!=NewsFeedModel.Page.FEED || frame.card()==null || !"FEED_CANDIDATE".equals(frame.reason())
+                    || !LiveRewardsTypes.hashValue(imageKey))throw reject("NEWS_ARTICLE_NOT_STABLE_SLOT");
+            this.imageKey=imageKey;
+        }
+        boolean markChanged(){changed=true;return false;}
+        boolean checkAndBurn(NewsLocalOcr.Result seen,ReviewShizukuTapActor.TapTarget target,
+                             ReadingNewsCycle.BurnGate budget)throws Exception{
+            if(changed || seen==null || !seen.clean())throw reject("NEWS_ARTICLE_RECHECK_UNREADABLE");
+            if(seen.kind()==NewsFeedModel.Kind.AD && "AD_BADGE".equals(seen.reason()))return markChanged();
+            if(seen.kind()!=NewsFeedModel.Kind.ARTICLE || !"BADGE_ABSENT".equals(seen.reason())
+                    || !LiveRewardsTypes.hashValue(seen.key()))throw reject("NEWS_ARTICLE_RECHECK_UNREADABLE");
+            if(!imageKey.equals(seen.key()))return markChanged();
+            if(target.x()!=seen.x() || target.y()!=seen.y())throw reject("NEWS_ARTICLE_POINT_CHANGED");
+            budget.burn();
+            return true;
+        }
+        boolean confirmedSkip(ReviewShizukuTapActor.Result result,boolean budgetEntered){
+            return changed && !budgetEntered && result.kind()==ReviewShizukuTapActor.Kind.REJECTED
+                    && result.reason()==ReviewShizukuTapActor.Reason.AUTHORITY_REJECTED && !result.invocationAttempted();
+        }
+    }
+
     final class Input {
         private final Object target;
         private final Snapshot expected;
         private final ReadingNewsCycle.BurnGate burn;
+        private final StoryTapCheck story;
         private boolean claimed,spent;
         private Snapshot checked;
-        private Input(Object target,Snapshot expected,ReadingNewsCycle.BurnGate burn){
-            this.target=target;this.expected=expected;this.burn=burn;
+        private Input(Object target,Snapshot expected,ReadingNewsCycle.BurnGate burn,StoryTapCheck story){
+            this.target=target;this.expected=expected;this.burn=burn;this.story=story;
         }
         boolean current(){return NewsAndroidPort.this.current() && knownClean();}
         boolean claim(Object exact){
@@ -372,11 +440,23 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
         }
         boolean consume(Object exact)throws Exception{
             if(exact!=target||!claimed||spent||!current())return false;
-            checked=refresh(expected);
+            NewsLocalOcr.Result finalImage=null;
+            if(story==null){
+                checked=refresh(expected);
+            }else{
+                try{
+                    // Capture both the image and the left badge after actor preflight and prior to reserving.
+                    var evidence=locate(refresh(expected,true),false,true);
+                    checked=evidence.snapshot();
+                    finalImage=evidence.ocr();
+                }catch(ReadingNewsCycle.CardChangedBeforeDispatch moved){return story.markChanged();}
+            }
             if(!checked.source().fresh(now())||!current())return false;
-            spent=true;burn.burn();
+            if(story==null)burnOnce();
+            else if(!story.checkAndBurn(finalImage,(ReviewShizukuTapActor.TapTarget)exact,this::burnOnce))return false;
             return valid(exact);
         }
+        private void burnOnce()throws Exception{spent=true;burn.burn();}
         boolean valid(Object exact){
             if(exact!=target || !spent || !current() || checked==null || !checked.source().fresh(now()))return false;
             sameSource(checked.source());
@@ -389,12 +469,15 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
         if (!authority.taskInputAllowed() || match.kind()!=(entry?NewsFeedModel.Kind.ENTRY:NewsFeedModel.Kind.ARTICLE)
                 || !inside(cardBox(located.snapshot()),match.x(),match.y()))throw reject("NEWS_TAP_PROOF");
         var target=new ReviewShizukuTapActor.TapTarget(match.x(),match.y(),shape.width(),shape.height(),shape.rotation());
-        var grant=new Input(target,located.snapshot(),budget);
+        var story=entry?null:new StoryTapCheck(located.snapshot().frame(),match.key());
+        var grant=new Input(target,located.snapshot(),budget,story);
         taps++;
         var result=ReviewShizukuTapActor.newsTap(context,grant,target);
         long success=now();
         if(result.invocationAttempted())tapInvoked++;
         if(result.kind()==ReviewShizukuTapActor.Kind.DISPATCH_UNKNOWN)uncertain=true;
+        if(story!=null && story.confirmedSkip(result,grant.spent) && current() && knownClean())
+            throw new ReadingNewsCycle.CardChangedBeforeDispatch();
         if(!result.commandExitZero()||!knownClean())throw reject("NEWS_TAP_"+result.reason().name());
         tapSuccess++;if(entry)entryTaps++;
         return success;
@@ -405,7 +488,7 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
                 direction,distance,measured);
         if(!ReviewShizukuSwipeActor.valid(target)||!inside(current.frame().viewport(),target.x(),target.fromY())
                 || !inside(current.frame().viewport(),target.x(),target.toY()))throw reject("NEWS_SCROLL_GEOMETRY");
-        var grant=new Input(target,current,()->reserve("SWIPE_"+(++serial)));
+        var grant=new Input(target,current,()->reserve("SWIPE_"+(++serial)),null);
         var result=ReviewShizukuSwipeActor.newsSwipe(context,grant,target);
         if(result.kind()==ReviewShizukuSwipeActor.Kind.DISPATCH_UNKNOWN)uncertain=true;
         if(!result.commandExitZero() || !knownClean())throw reject("NEWS_SWIPE_"+result.reason().name());
@@ -415,10 +498,12 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
     @Override public void assertFeed()throws Exception{
         if(!listConfirmed)throw reject("NEWS_FEED_NOT_ENTERED");
         step="VERIFY_FEED";
-        awaitFeed(false);
+        var frame=awaitFeed(false);
+        readingSource.confirmList(frame.source());
     }
     @Override public ReadingNewsCycle.CardProof readCard()throws Exception{
         step="IDENTIFY_CARD";
+        lastLocated=null;
         var current=readFrame(null);
         expectPage(current,NewsFeedModel.Page.FEED);
         var model=current.frame();
@@ -427,6 +512,12 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
             throw reject(model.reason());
         }
         if(anchorY<0)anchorY=(int)model.card().box().centerY();
+        var carousel=skippedCarousel(model);
+        if(carousel!=null){
+            lastCandidate=current;
+            lastProof=carousel;
+            return carousel;
+        }
         var evidence=locate(current,true);
         var local=evidence.ocr();
         var kind=switch(local.kind()){
@@ -434,22 +525,28 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
             case AD -> ReadingNewsCycle.Kind.AD;
             default -> ReadingNewsCycle.Kind.UNKNOWN;
         };
-        if(kind==ReadingNewsCycle.Kind.ARTICLE && (model.card().kind()!=NewsFeedModel.Kind.ARTICLE
-                ||!model.card().key().equals(local.key())))throw reject("NEWS_ARTICLE_IDENTITY");
+        if(kind==ReadingNewsCycle.Kind.ARTICLE && !LiveRewardsTypes.hashValue(local.key()))
+            throw reject("NEWS_ARTICLE_IDENTITY");
         lastCandidate=evidence.snapshot();
+        if(kind==ReadingNewsCycle.Kind.ARTICLE)lastLocated=evidence;
         lastProof=new ReadingNewsCycle.CardProof(kind,kind==ReadingNewsCycle.Kind.ARTICLE?local.key():"",
-                model.card().layoutKey(),model.atEnd());
+                LiveRewardsTypes.hashValue(local.key())?local.key():model.card().layoutKey(),model.atEnd());
         return lastProof;
+    }
+    static ReadingNewsCycle.CardProof skippedCarousel(NewsFeedModel.Frame frame){
+        if(frame.page()!=NewsFeedModel.Page.FEED || frame.card()==null
+                || !"FEED_CAROUSEL_CANDIDATE".equals(frame.reason()))return null;
+        return new ReadingNewsCycle.CardProof(ReadingNewsCycle.Kind.UNKNOWN,"",frame.card().layoutKey(),frame.atEnd());
     }
     @Override public long tapArticle(ReadingNewsCycle.CardProof proof,ReadingNewsCycle.BurnGate gate)throws Exception{
         step="TAP_ARTICLE";
-        if(!listConfirmed || proof==null || !proof.equals(lastProof) || proof.kind()!=ReadingNewsCycle.Kind.ARTICLE)
+        if(!listConfirmed || proof==null || !proof.equals(lastProof) || proof.kind()!=ReadingNewsCycle.Kind.ARTICLE
+                || lastLocated==null || !proof.key().equals(lastLocated.ocr().key()))
             throw reject("NEWS_ARTICLE_NOT_IDENTIFIED");
-        var fresh=locate(refresh(lastCandidate),false);
-        if(fresh.ocr().kind()!=NewsFeedModel.Kind.ARTICLE || !proof.key().equals(fresh.ocr().key()))
-            throw reject("NEWS_ARTICLE_CHANGED");
-        opened=fresh.snapshot().frame().card();
-        tapReturned=tap(fresh,gate,false); step="ARTICLE_WAIT";
+        tapReturned=tap(lastLocated,gate,false);
+        opened=lastLocated.snapshot().frame().card();
+        openedKey=proof.key();
+        readingSource.articleSucceeded();step="ARTICLE_WAIT";
         return tapReturned;
     }
     @Override public ReadingNewsCycle.Page pageAfterWait(ReadingNewsCycle.CardProof card)throws Exception{
@@ -463,7 +560,7 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
         };
     }
     private boolean articleDue(ReadingNewsCycle.CardProof card){
-        return current() && listConfirmed && opened!=null && card!=null && card.key().equals(opened.key())
+        return current() && listConfirmed && opened!=null && card!=null && card.key().equals(openedKey)
                 && tapReturned>=0 && now()-tapReturned>=ReadingNewsCycle.WAIT_MILLIS;
     }
     @Override public void back(ReadingNewsCycle.CardProof card,ReadingNewsCycle.BurnGate gate)throws Exception{
@@ -471,7 +568,7 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
         step="RETURN_ARTICLE";
         var article=readFrame(opened); expectPage(article,NewsFeedModel.Page.ARTICLE);
         var target=new ReviewShizukuBackActor.BackTarget(shape.width(),shape.height(),shape.rotation());
-        var grant=new Input(target,article,gate); backs++;
+        var grant=new Input(target,article,gate,null); backs++;
         var result=ReviewShizukuBackActor.newsBack(context,grant,target);
         if(result.invocationAttempted())backInvoked++;
         if(result.kind()==ReviewShizukuBackActor.Kind.DISPATCH_UNKNOWN)uncertain=true;
