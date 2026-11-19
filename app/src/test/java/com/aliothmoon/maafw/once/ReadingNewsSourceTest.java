@@ -65,6 +65,56 @@ public class ReadingNewsSourceTest {
         var foreign=read(route,mainWindows()+window("other.app/.Dialog","bad",true),mainActivities());
         assertNull(foreign.source());assertFalse(foreign.waitable());
     }
+    private static String leavingRewards(boolean specialHeader){
+        String old=activityBlock(TEMPLATE,"ddd",NUM,false).replace("state=STOPPED","state=STOPPING")
+                .replace("finishing=false","finishing=true");
+        if(specialHeader)old=old.replace(" t"+NUM+"}"," t"+NUM+" f}}");
+        return mainActivities().replace(mainActivity(true),old+mainActivity(true));
+    }
+    private static void rejectWithoutWaiting(ReadingNewsSource route,String windows,String activities,String gate){
+        var seen=read(route,windows,activities);
+        assertNull(seen.gate(),seen.source());
+        assertFalse(seen.gate(),seen.waitable());
+        if(gate!=null)assertEquals(gate,seen.gate());
+    }
+    @Test public void entryPopIsWaitOnlyThenStableMainMustPassTheWholeUnchangedParser(){
+        for(boolean tagged:new boolean[]{true,false}){
+            var route=anchored();
+            String w=tagged?mainWindows():mainWindows().replace("HAS_DRAWN","DRAW_PENDING");
+            var activities=leavingRewards(tagged);
+            rejectWithoutWaiting(route,w,activities,null);
+            route.entrySucceeded();
+            var pending=read(route,w,activities);
+            assertEquals(tagged?FirstGate.ACTIVITY_HEADERS:FirstGate.READ_ONLY_STABILITY,pending.parsed().firstGate());
+            assertTrue(pending.gate(),pending.waitable());
+            assertNull(pending.source());assertFalse(route.isCheckedViewer(pending.source()));
+            assertThrows(SecurityException.class,()->route.confirmList(pending.source()));
+            assertThrows(SecurityException.class,route::articleSucceeded);
+            var next=read(route,mainWindows(),mainActivities());
+            assertEquals(Status.READY,next.parsed().status());assertFalse(next.waitable());
+            route.confirmList(next.source());
+            rejectWithoutWaiting(route,w,activities,"NEWS_ROUTE_MAIN_HISTORY_COUNT");
+        }
+    }
+    @Test public void entryPopRejectsChangedWindowActivityOwnerTaskUnknownHeadersAndExtraHistory(){
+        var route=anchored();route.entrySucceeded();
+        String w=mainWindows(), a=leavingRewards(true);
+        rejectWithoutWaiting(route,w,a.replace("ActivityRecord{ddd","ActivityRecord{def"),"NEWS_ROUTE_TEMPLATE_SUBSTITUTED");
+        rejectWithoutWaiting(route,w.replace(MAIN_RECORD,"ace"),a.replace(MAIN_RECORD,"ace"),"NEWS_ROUTE_MAIN_SUBSTITUTED");
+        rejectWithoutWaiting(route,w,a.replace("rootOfTask=true","rootOfTask=false"),"NEWS_ROUTE_MAIN_MEMBER");
+        rejectWithoutWaiting(route,w,a.replace("finishing=true","finishing=false"),"NEWS_ROUTE_EXIT_LIFECYCLE");
+        rejectWithoutWaiting(route,w,a.replace(" t41}"," t41 f}}"),"NEWS_ROUTE_ENTRY_OTHER_HEADER");
+        rejectWithoutWaiting(route,w,a.replace("Task{abc #"+TASK,"Task{cab #"+TASK),"NEWS_ROUTE_TASK_OBJECT");
+        rejectWithoutWaiting(route,w,a.replace(mainActivity(true),mainActivity(true)+activityBlock(BROWSER,"cc",NUM,false)),
+                "NEWS_ROUTE_MAIN_HISTORY_COUNT");
+        rejectWithoutWaiting(route,w+window("other.app/.Popup","abcdef",true),a,null);
+        rejectWithoutWaiting(route,w.replace("mOwnerUid=10073","mOwnerUid=10074"),a,null);
+        rejectWithoutWaiting(route,w.replace("mOwnerUid=10087","mOwnerUid=10088"),a,"NEWS_ROUTE_EXIT_WINDOWS");
+        rejectWithoutWaiting(route,w.replace("mActivityRecord=ActivityRecord{"+MAIN_RECORD,"mActivityRecord=ActivityRecord{cafe"),
+                a,"NEWS_ROUTE_EXIT_WINDOWS");
+        rejectWithoutWaiting(route,w,a.replace(" f}}"," unknown}}"),"NEWS_ROUTE_TEMPLATE_SUBSTITUTED");
+        rejectWithoutWaiting(route,w,mainActivities().replace(" t41}"," t41 f}}"),null);
+    }
     @Test public void childArticleRequiresSuccessfulTapFullStrictChecksAndRetainedList(){
         String childW=childWindows(TASK).replace("Window{aaa u0 "+TEMPLATE,"Window{baba u0 "+MAIN)
                 .replace("ActivityRecord{ddd u0 "+TEMPLATE,"ActivityRecord{"+MAIN_RECORD+" u0 "+MAIN)

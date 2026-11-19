@@ -16,6 +16,8 @@ final class ReadingNewsSource {
     private boolean entryTapped, articleTapped;
     private static final String TOKEN="[a-fA-F0-9]+";
     private static final String PKG="com.microsoft.bing";
+    private static final Pattern HIST_START=Pattern.compile("\\* Hist\\s+#\\d+: ActivityRecord\\{.*");
+    private static final Pattern NORMAL_HIST=Pattern.compile("\\* Hist\\s+#\\d+: ActivityRecord\\{"+TOKEN+" u\\d+ [^\\s}]+ t\\d+[^}\\r\\n]*\\}");
 
     ReadingNewsSource(Ready rewards) {
         if(rewards==null||rewards.kind()!=Kind.TEMPLATE)throw new IllegalArgumentException("Expected Rewards source");
@@ -50,6 +52,7 @@ final class ReadingNewsSource {
                 && rewards.diagnosticWindowMatches(focus.window());
         boolean parent = predecessor!=null && MAIN.equals(focus.component()) && predecessor.activity().equals(focus.activity());
         boolean child = articleTapped && listWindow!=null && !original && (browser||TEMPLATE.equals(focus.component()));
+        if(entryTapped && MAIN.equals(focus.component()) && !parent)return hold(parsed,"NEWS_ROUTE_MAIN_SUBSTITUTED");
         if(!(original&&listWindow==null || parent&&entryTapped || child))return hold(parsed,"NEWS_ROUTE_IDENTITY");
         Stack stack=stack(activities,profile,rewards.task());
         if(stack==null||predecessor!=null&&!predecessor.taskObject().equals(stack.object()))
@@ -62,9 +65,11 @@ final class ReadingNewsSource {
             if(predecessor!=null&&!predecessor.equals(candidate))return hold(parsed,"NEWS_ROUTE_MAIN_CHANGED");
             if(parsed.ready()!=null && rewards.sameSource(parsed.ready()))predecessor=candidate;
         } else if(parent) {
-            if(stack.history().size()!=1 || !member(stack,0,0,focus.activity(),MAIN,true,profile)
-                    || listWindow!=null&&!listWindow.diagnosticWindowMatches(focus.window()))
-                return hold(parsed,"NEWS_ROUTE_VISIBLE_MAIN");
+            if(listWindow!=null&&!listWindow.diagnosticWindowMatches(focus.window()))return hold(parsed,"NEWS_ROUTE_MAIN_WINDOW_CHANGED");
+            if(stack.history().size()==2 && listWindow==null)
+                return departingRewards(parsed,stack,focus,windows,activities,profile,guard);
+            if(stack.history().size()!=1)return hold(parsed,"NEWS_ROUTE_MAIN_HISTORY_COUNT");
+            if(!member(stack,0,0,focus.activity(),MAIN,true,profile))return hold(parsed,"NEWS_ROUTE_MAIN_MEMBER");
         } else {
             if(stack.history().size()!=2 || !member(stack,0,1,focus.activity(),focus.component(),false,profile)
                     || !predecessor.activity().equals(historyToken(stack.history().get(1),0,MAIN))
@@ -79,6 +84,69 @@ final class ReadingNewsSource {
     }
     private static Observation hold(Result r,String why){return new Observation(r,null,false,why);}
 
+    private Observation departingRewards(Result parsed,Stack stack,BingForegroundSnapshot.Snapshot focus,
+            String windows,String activities,Profile profile,ReadOnlyGuard guard){
+        if(!member(stack,1,0,focus.activity(),MAIN,true,profile))return hold(parsed,"NEWS_ROUTE_MAIN_MEMBER");
+        var leaving=stack.history().get(0);
+        String[] id=one(leaving.header(),"^\\* Hist +#1: ActivityRecord\\{("+TOKEN+") u0 "+Pattern.quote(TEMPLATE)
+                +" t"+Pattern.quote(rewards.task())+"(?:\\}| f\\}\\}?)$",1);
+        if(id==null || !rewards.diagnosticActivityMatches(id[0],TEMPLATE,rewards.task()))
+            return hold(parsed,"NEWS_ROUTE_TEMPLATE_SUBSTITUTED");
+        if(!linked(stack,leaving,false,profile))return hold(parsed,"NEWS_ROUTE_TEMPLATE_MEMBER");
+        boolean headers=parsed.status()==Status.UNKNOWN && parsed.firstGate()==FirstGate.ACTIVITY_HEADERS;
+        if(!headers && parsed.status()!=Status.BING_TRANSITION)return hold(parsed,"NEWS_ROUTE_ENTRY_EXIT_"+parsed.firstGate().name());
+        // Some Android finishing records end in " f}}". Only this exact authenticated departing record
+        // may carry that extra brace. An unparseable header elsewhere is independently disqualifying.
+        if(headers && !onlyDepartingHeader(activities,leaving.header()))return hold(parsed,"NEWS_ROUTE_ENTRY_OTHER_HEADER");
+        String[] top=one(activities,"^ *topResumedActivity=ActivityRecord\\{("+TOKEN+") u0 ([^\\s}]+) t(\\d+)(?:\\}| f\\}\\}?) *$",3);
+        if(top==null || !rewards.task().equals(top[2]) || !(MAIN.equals(top[1]) && focus.activity().equals(top[0])
+                || rewards.diagnosticActivityMatches(top[0],top[1],top[2])))return hold(parsed,"NEWS_ROUTE_EXIT_TOP");
+        String[] state=one(leaving.body(),"(?<![A-Za-z0-9_])state=([A-Z]+)(?![A-Za-z0-9_])",1);
+        String[] finishing=one(leaving.body(),"(?<![A-Za-z0-9_])finishing=(true|false)(?![A-Za-z0-9_])",1);
+        if(state==null || finishing==null || !state[0].matches("RESUMED|PAUSING|PAUSED|STOPPING|STOPPED|DESTROYING|DESTROYED")
+                || !finishing[0].equals("true") && (headers || !state[0].matches("PAUSING|STOPPING|DESTROYING|DESTROYED")))
+            return hold(parsed,"NEWS_ROUTE_EXIT_LIFECYCLE");
+        if(!exitWindows(windows,focus,id[0],profile,guard))return hold(parsed,"NEWS_ROUTE_EXIT_WINDOWS");
+        return new Observation(parsed,null,true,"NEWS_ROUTE_WAIT_REWARDS_EXIT");
+    }
+    private static boolean onlyDepartingHeader(String activities,String leaving){
+        int ordinary=0,finishing=0;
+        for(String raw:activities.split("\\r?\\n")){
+            String line=raw.strip();
+            if(!HIST_START.matcher(line).matches())continue;
+            if(NORMAL_HIST.matcher(line).matches())ordinary++;
+            else if(line.equals(leaving) && line.endsWith(" f}}"))finishing++;
+            else return false;
+        }
+        return finishing==1 && ordinary>0 && ordinary+finishing<=64;
+    }
+    private boolean exitWindows(String windows,BingForegroundSnapshot.Snapshot focus,String oldActivity,Profile p,ReadOnlyGuard guard){
+        int main=0,template=0,own=0;
+        for(var s:sections(windows," *Window #\\d+ Window\\{.*")){
+            String[] id=one(s.header(),"^Window #\\d+ Window\\{("+TOKEN+") u\\d+ ([^}\\r\\n]+)\\}:$",2);
+            if(id==null)return false;
+            var block=new Block(id[0],id[1],null,s.body());
+            if(MAIN.equals(id[1]) || TEMPLATE.equals(id[1])){
+                boolean isMain=MAIN.equals(id[1]);
+                String[] link=one(s.body(),"^ *mActivityRecord=ActivityRecord\\{("+TOKEN+") u0 ([^\\s}]+) t(\\d+)(?:\\}| f\\}\\}?) *$",3);
+                if(!appWindow(block,p,rewards.task(),true) || link==null || !link[1].equals(id[1])
+                        || !link[2].equals(rewards.task()) || !(isMain?focus.activity():oldActivity).equals(link[0]))return false;
+                if(isMain){if(!focus.window().equals(id[0]))return false;main++;}
+                else{if(!rewards.diagnosticWindowMatches(id[0]))return false;template++;}
+            }else if(guard!=null && id[1].equals(guard.ownComponent())){
+                String pkg=id[1].substring(0,id[1].indexOf('/'));
+                String[] owner=one(s.body(),"^ *mOwnerUid=(\\d+)\\b[^\\r\\n]*\\bpackage=([^\\s]+)\\s+appop=([^\\s]+)[^\\r\\n]*$",3);
+                String[] display=one(s.body(),"^ *mDisplayId=(\\d+)\\s+rootTaskId=(\\d+)\\b.*$",2);
+                if(!safelyInvisible(block)||owner==null||display==null||!owner[0].equals(Integer.toString(guard.ownUid()))
+                        ||!owner[1].equals(pkg)||!owner[2].equals("NONE")||!display[0].equals("0")
+                        ||!display[1].equals(Integer.toString(guard.ownTaskId())))return false;
+                own++;
+            }else if(!"StatusBar".equals(id[1]) && !safelyInvisible(block))return false;
+        }
+        // Earlier strict parsing has already rejected unidentified visible windows and invalid StatusBar owners.
+        return main==1 && template<=1 && own==1;
+    }
+
     private static Stack stack(String activities,Profile profile,String task){
         if(activities==null || profile==null || activities.length()>262144)return null;
         Section display=uniqueSection(sections(activities,"Display #\\d+ \\(activities from top to bottom\\):"),
@@ -90,14 +158,15 @@ final class ReadingNewsSource {
         String object=null;
         for(var item:sections(display.body()," *\\* Task\\{.*")){
             var match=Pattern.compile(head).matcher(item.header());
-            if(item.indent()!=2||!match.matches())continue;
+            if(!item.header().matches("\\* Task\\{[^\\s]+ #"+Pattern.quote(task)+"\\b.*"))continue;
+            if(item.indent()!=2||!match.matches())return null;
             if(selected!=null)return null;
             selected=item;object=match.group(1);
         }
         if(selected==null || !selected.header().contains(" mode=fullscreen ")
                 || !sections(selected.body()," *\\* Task\\{.*").isEmpty())return null;
         var history=sections(selected.body()," *\\* Hist +#\\d+: ActivityRecord\\{.*");
-        if(history.isEmpty()||history.size()>2 || history.stream().anyMatch(h->h.indent()!=4))return null;
+        if(history.isEmpty() || history.stream().anyMatch(h->h.indent()!=4))return null;
         return new Stack(object,history);
     }
     private String historyToken(Section section,int index,String component){
@@ -107,7 +176,9 @@ final class ReadingNewsSource {
     }
     private boolean member(Stack stack,int position,int index,String token,String component,boolean root,Profile profile){
         var line=stack.history().get(position);
-        if(token==null||!token.equals(historyToken(line,index,component)))return false;
+        return token!=null && token.equals(historyToken(line,index,component)) && linked(stack,line,root,profile);
+    }
+    private boolean linked(Stack stack,Section line,boolean root,Profile profile){
         String[] link=one(line.body(),"^ *rootOfTask=(true|false) task=Task\\{("+TOKEN+") #(\\d+) type=standard A=(\\d+):([^}]+)\\} *$",5);
         return link!=null && link[0].equals(Boolean.toString(root)) && link[1].equals(stack.object())
                 && link[2].equals(rewards.task()) && link[3].equals(Integer.toString(profile.bingUid())) && link[4].equals(PKG);

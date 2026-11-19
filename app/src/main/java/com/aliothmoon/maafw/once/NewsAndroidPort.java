@@ -21,6 +21,7 @@ import org.json.JSONObject;
 
 /** Device implementation owned by one explicitly selected reading entry in the visible runtime. */
 final class NewsAndroidPort implements ReadingNewsCycle.Ports {
+    private static final long ENTRY_SETTLE_MS = 2500;
     private final Context context;
     private final LiveRunAuthority authority;
     private final LiveRewardsNavigation navigation;
@@ -94,7 +95,8 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
             step="OPEN_ENTRY";
             tap(located,()->reserve("ENTRY_TAP"),true);
             readingSource.entrySucceeded();
-            pause(450);
+            // Bing finishes the Rewards activity while its existing Main window becomes visible.
+            pause(ENTRY_SETTLE_MS);
             step="FIRST_FEED";
             Snapshot first=awaitFeed(true);
             readingSource.confirmList(first.source());
