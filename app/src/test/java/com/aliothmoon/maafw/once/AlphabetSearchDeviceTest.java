@@ -146,6 +146,20 @@ public class AlphabetSearchDeviceTest {
         }
     }
 
+    @Test public void aCleanBusyFieldReceiptIsValidOnlyForReadOnlyEditorSampling() {
+        String busy = RECEIPT + "WAIT|0|0|FIELD_NOT_READY\n";
+        var waiting = new AlphabetSearchDevice.ProbeAttempt();
+        waiting.invoked = true;
+        assertNull(waiting.accept(busy,NONCE,"EDITOR",1440,2560));
+        assertTrue(waiting.clean());
+        for (String invalid : new String[]{busy, busy.replace("FIELD_NOT_READY","UNKNOWN")}) {
+            var attempt = new AlphabetSearchDevice.ProbeAttempt();
+            attempt.invoked = true;
+            assertThrows(SecurityException.class, () -> attempt.accept(invalid,NONCE,"BAR",1440,2560));
+            assertFalse(attempt.clean());
+        }
+    }
+
     @Test public void ambiguousOutputNeverAcknowledgesProbeCleanup() {
         String ok = RECEIPT + "OK|320|120|MATCH\n";
         for (String receipt : new String[]{

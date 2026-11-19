@@ -181,15 +181,13 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
             }
             action(Input.TYPE, editor, letter, 0, 0);
         }
-        // This is checked again immediately before the submit command.
+        // Verify the letter before the caller reserves it. The submit path rechecks the window.
         need("MATCH".equals(probe(editor, "EDITOR", letter).state), "SEARCH_TEXT_MISMATCH");
         prepared = letter;
     }
 
     @Override public void submit(char letter) throws Exception {
         need(allowedLetter(letter) && prepared == letter && submitted == 0, "SEARCH_SUBMIT_OWNER");
-        var field = probe(editor, "EDITOR", letter);
-        need("MATCH".equals(field.state), "SEARCH_TEXT_MISMATCH");
         prepared = 0;
         action(Input.SUBMIT, editor, letter, 0, 0);
         successAt = now();
@@ -254,6 +252,8 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
     static final class ProbeAttempt {
         boolean invoked;
         private boolean acknowledged;
+        private boolean pendingField;
+        private String detail = "MISS";
         boolean clean() { return !invoked || acknowledged; }
 
         Projection accept(String line, String nonce, String operation, int width, int height) {
@@ -266,7 +266,14 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
             need(f.length == 6 && f[0].equals("S1") && f[1].equals(nonce), "SEARCH_PROBE_PROTOCOL");
             Projection projection = null;
             if ("MISS".equals(f[2])) {
-                need(f[3].equals("0") && f[4].equals("0") && f[5].equals("NONE"), "SEARCH_PROBE_PROTOCOL");
+                boolean diagnostic = f[5].matches("ROOT|WINDOW|EDITOR|EDITOR_FOCUS|CONFIG|DEADLINE|CHROME|CHROME_BOUNDS|NONE");
+                need(f[3].equals("0") && f[4].equals("0") && diagnostic, "SEARCH_PROBE_PROTOCOL");
+                if (!"NONE".equals(f[5])) detail = f[5];
+            } else if ("WAIT".equals(f[2])) {
+                need(("EDITOR".equals(operation) || "SELECTION".equals(operation))
+                        && f[3].equals("0") && f[4].equals("0") && "FIELD_NOT_READY".equals(f[5]), "SEARCH_PROBE_PROTOCOL");
+                pendingField = true;
+                detail = f[5];
             } else {
                 need(f[2].equals("OK") && f[3].matches("[1-9][0-9]{0,3}")
                         && f[4].matches("[1-9][0-9]{0,3}"), "SEARCH_PROBE_PROTOCOL");
@@ -286,22 +293,26 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
     }
 
     private Projection probe(BingForegroundSnapshot.Snapshot owner, String operation, char letter) throws Exception {
-        need(owner != null && owner.equals(source()), "SEARCH_PROBE_OWNER");
-        String nonce = UUID.randomUUID().toString().replace("-", "");
-        long end = Math.min(now()+5000, authority.deadline());
-        String[] command = {"/system/bin/app_process","-cp",apk,"/system/bin",Probe.class.getName(),nonce,
-                Long.toString(end),operation,owner.component(),String.valueOf(letter),String.valueOf(shape.width()),
-                String.valueOf(shape.height())};
-        ProbeAttempt attempt = new ProbeAttempt();
-        try {
-            String result = execute(command, 300, null, attempt);
-            Projection point = attempt.accept(result, nonce, operation, shape.width(), shape.height());
-            need(point != null, "SEARCH_PROBE_MISS");
-            need(now() < end && owner.equals(source()), "SEARCH_PROBE_STALE");
-            return point;
-        } finally {
-            if (!attempt.clean()) quarantined = true;
+        for (int sample=0; sample<3; sample++) {
+            need(owner != null && owner.equals(source()), "SEARCH_PROBE_OWNER");
+            String nonce = UUID.randomUUID().toString().replace("-", "");
+            long end = Math.min(now()+5000, authority.deadline());
+            String[] command = {"/system/bin/app_process","-cp",apk,"/system/bin",Probe.class.getName(),nonce,
+                    Long.toString(end),operation,owner.component(),String.valueOf(letter),String.valueOf(shape.width()),
+                    String.valueOf(shape.height())};
+            ProbeAttempt attempt = new ProbeAttempt();
+            try {
+                String result = execute(command, 300, null, attempt);
+                Projection point = attempt.accept(result, nonce, operation, shape.width(), shape.height());
+                need(now() < end && owner.equals(source()), "SEARCH_PROBE_STALE");
+                if (point != null) return point;
+                need(attempt.pendingField && sample < 2, "SEARCH_PROBE_" + attempt.detail);
+            } finally {
+                if (!attempt.clean()) quarantined = true;
+            }
+            pause(150);
         }
+        throw new IllegalStateException("SEARCH_PROBE_FIELD_NOT_READY");
     }
 
     // A transition sometimes displays two Bing windows together. Neither authorizes input.
@@ -480,7 +491,7 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
         public static void main(String[] args) {
             if (Build.VERSION.SDK_INT < 34 || android.os.Process.myUid() != 0 || args == null || args.length != 7
                     || !NativeUiStructureProtocol.validNonce(args[0]) || args[4].length()!=1 || !allowedLetter(args[4].charAt(0))) return;
-            String status = "MISS";
+            String status = "MISS", diagnostic = "NONE";
             Projection point = new Projection(0,0,"NONE");
             HandlerThread worker = null;
             UiAutomation ui = null;
@@ -504,16 +515,27 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
                 ui.setServiceInfo(config);
                 need(ui.getServiceInfo()!=null && ui.getServiceInfo().flags==config.flags,"CONFIG");
                 var root = nodes.own(ui.getRootInActiveWindow());
+                need(root!=null,"ROOT_NOT_READY");
                 need(valid(root) && root.isVisibleToUser(),"ROOT");
                 var win = root.getWindow();
                 try {
-                    need(win!=null && win.getId()==root.getWindowId() && win.isActive() && win.isFocused()
+                    need(win!=null,"WINDOW_NOT_READY");
+                    need(win.getId()==root.getWindowId() && win.isActive() && win.isFocused()
                             && win.getDisplayId()==0 && win.getType()==AccessibilityWindowInfo.TYPE_APPLICATION,"WINDOW");
                     point = select(ui,root,nodes,args[2],args[3],args[4].charAt(0),width,height,end);
                     need(SystemClock.elapsedRealtime()<end,"DEADLINE");
                     status = "OK";
                 } finally {
                     if (win != null) try { win.recycle(); } catch (RuntimeException failure) { nodes.clean = false; }
+                }
+            } catch (SecurityException miss) {
+                String reason = miss.getMessage();
+                boolean readingField = "EDITOR".equals(args[2]) || "SELECTION".equals(args[2]);
+                if (readingField && ("ROOT_NOT_READY".equals(reason) || "WINDOW_NOT_READY".equals(reason) || "FIELD_NOT_READY".equals(reason))) {
+                    status = "WAIT";
+                    diagnostic = "FIELD_NOT_READY";
+                } else if (reason != null && reason.matches("ROOT|WINDOW|EDITOR|EDITOR_FOCUS|CONFIG|DEADLINE|CHROME|CHROME_BOUNDS")) {
+                    diagnostic = reason;
                 }
             } catch (Exception miss) { status = "MISS"; }
             finally {
@@ -527,7 +549,7 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
                     catch (InterruptedException interrupted) { status="UNCLEAN"; Thread.currentThread().interrupt(); }
                 }
             }
-            if (!"OK".equals(status)) point = new Projection(0,0,"NONE");
+            if (!"OK".equals(status)) point = new Projection(0,0,"UNCLEAN".equals(status)?"NONE":diagnostic);
             System.out.printf(Locale.ROOT,"S1|%s|%s|%d|%d|%s%n",args[0],status,point.x,point.y,point.state);
         }
 
@@ -550,7 +572,8 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
                             field == null ? "" : String.valueOf(field.getClassName()),
                             field != null && field.isFocused(), field != null && field.isEditable());
                     if (state == EditorFocus.FIELD) break;
-                    need(state == EditorFocus.WAIT && SystemClock.elapsedRealtime() < focusDeadline, "EDITOR_FOCUS");
+                    need(state == EditorFocus.WAIT, "EDITOR_FOCUS");
+                    need(SystemClock.elapsedRealtime() < focusDeadline, "FIELD_NOT_READY");
                     SystemClock.sleep(50);
                 }
                 need(field.isVisibleToUser() && field.isEnabled() && !field.isPassword()
