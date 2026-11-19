@@ -8,6 +8,19 @@ public class AlphabetSearchDeviceTest {
     private static final BingNavigationSnapshot.Profile PROFILE = new BingNavigationSnapshot.Profile(
             10501, 10502, new BingNavigationSnapshot.Shape(1440,2560,0));
 
+    @Test public void backOnlyAcceptsANewBingResultInstanceOnTheOriginalTask() {
+        var origin = new BingForegroundSnapshot.Snapshot("a1","a2",BingNavigationSnapshot.TEMPLATE,"7");
+        var editor = new BingForegroundSnapshot.Snapshot("b1","b2",AlphabetSearchDevice.EDITOR,"7");
+        for (String destination : new String[]{AlphabetSearchDevice.RESULTS,BingNavigationSnapshot.BROWSER})
+            assertTrue(AlphabetSearchDevice.boundResult(origin,editor,new BingForegroundSnapshot.Snapshot("c1","c2",destination,"7")));
+        assertFalse(AlphabetSearchDevice.boundResult(origin,editor,origin));
+        assertFalse(AlphabetSearchDevice.boundResult(origin,editor,editor));
+        assertFalse(AlphabetSearchDevice.boundResult(origin,editor,new BingForegroundSnapshot.Snapshot("c1","c2",BingNavigationSnapshot.BROWSER,"8")));
+        assertFalse(AlphabetSearchDevice.boundResult(origin,editor,new BingForegroundSnapshot.Snapshot("c1","b2",BingNavigationSnapshot.BROWSER,"7")));
+        assertFalse(AlphabetSearchDevice.boundResult(origin,editor,new BingForegroundSnapshot.Snapshot("a1","c2",BingNavigationSnapshot.BROWSER,"7")));
+        assertFalse(AlphabetSearchDevice.boundResult(origin,editor,new BingForegroundSnapshot.Snapshot("c1","c2",BingNavigationSnapshot.MAIN,"7")));
+    }
+
     @Test public void aTemporaryHostViewCanOnlyWaitForTheExactEditableFocusedField() {
         var wait = AlphabetSearchDevice.EditorFocus.WAIT;
         var reject = AlphabetSearchDevice.EditorFocus.REJECT;
