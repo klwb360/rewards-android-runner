@@ -150,18 +150,22 @@ public final class NativeUiStructureHelper {
                     if (!packageMatches(node.getPackageName())) throw new Stop(NativeUiStructureProtocol.Reason.FOREIGN_NODE);
                     if (node.getWindowId() != windowId) throw new Stop(NativeUiStructureProtocol.Reason.WINDOW_UNAVAILABLE);
                     boolean visible = node.isVisibleToUser();
-                    if (visible) {
-                        Rect nodeBounds = new Rect();
-                        node.getBoundsInScreen(nodeBounds);
-                        if (nodeBounds.isEmpty() || !bounds.contains(nodeBounds))
-                            throw new Stop(NativeUiStructureProtocol.Reason.WINDOW_UNAVAILABLE);
-                    }
                     if(articleMode){
                         String text=articleGuardLabel(node.getText()), description=articleGuardLabel(node.getContentDescription());
                         diagnostics.node(node.getClassName(),text,description);
                         liveGuard.node(node.getClassName(),text,description,visible);
+                        if(liveGuard.challenges>0 || liveGuard.dialogs>0 || diagnostics.blocked())
+                            throw new Stop(NativeUiStructureProtocol.Reason.UI_BLOCKER);
                         nodeCount++;
-                    }else{
+                    }
+                    if (visible) {
+                        Rect nodeBounds = new Rect();
+                        node.getBoundsInScreen(nodeBounds);
+                        if (nodeBounds.isEmpty() || !bounds.contains(nodeBounds))
+                            throw new Stop(articleMode ? NativeUiStructureProtocol.Reason.ARTICLE_NODE_BOUNDS
+                                    : NativeUiStructureProtocol.Reason.WINDOW_UNAVAILABLE);
+                    }
+                    if(!articleMode){
                         String text = field(node.getText()), description = field(node.getContentDescription());
                         if (chars + text.length() + description.length() > 32768)
                             throw new Stop(NativeUiStructureProtocol.Reason.TREE_OVERFLOW);
@@ -194,7 +198,8 @@ public final class NativeUiStructureHelper {
                     for (int i = 0; i < count; i++) {
                         checkTime(readEnd);
                         AccessibilityNodeInfo child = node.getChild(i);
-                        if (child == null) throw new Stop(NativeUiStructureProtocol.Reason.TREE_FAILED);
+                        if (child == null) throw new Stop(articleMode ? NativeUiStructureProtocol.Reason.ARTICLE_CHILD_MISSING
+                                : NativeUiStructureProtocol.Reason.TREE_FAILED);
                         pending.addLast(new Pending(child, scheduled++, current.index(), current.depth()+1));
                     }
                 } finally {
@@ -203,8 +208,7 @@ public final class NativeUiStructureHelper {
             }
             checkTime(readEnd);
             if(articleMode){
-                if(liveGuard.challenges>0 || liveGuard.dialogs>0 || diagnostics.blocked())
-                    throw new Stop(NativeUiStructureProtocol.Reason.UI_BLOCKER);
+                if(nodeCount!=scheduled)throw new Stop(NativeUiStructureProtocol.Reason.TREE_FAILED);
             }else if(!fieldMode){if(!readyMode||!diagnostics.blocked()){
                 NativeUiStructureParser.Result result;
                 if(overviewMode){

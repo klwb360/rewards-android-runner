@@ -10,7 +10,7 @@ final class ReadingNewsCycle {
     static final long RUN_MILLIS = 30 * 60_000L;
     enum Kind { ARTICLE, AD, UNKNOWN, END }
     enum Page { ARTICLE, FEED, BLOCKED, UNKNOWN }
-    enum Status { READY, RUNNING, DAILY_LIMIT, FIVE_LIMIT, PROGRESS_CHECK_REQUIRED, FEED_END, NO_MOVEMENT, PILOT_UNCONFIRMED, STOPPED }
+    enum Status { READY, RUNNING, DAILY_LIMIT, FIVE_LIMIT, SEVEN_LIMIT, PROGRESS_CHECK_REQUIRED, FEED_END, NO_MOVEMENT, PILOT_UNCONFIRMED, STOPPED }
     static final class CardChangedBeforeDispatch extends Exception {
         private static final long serialVersionUID=1L;
         CardChangedBeforeDispatch(){super("NEWS_CARD_CHANGED_BEFORE_DISPATCH");}
@@ -88,7 +88,9 @@ final class ReadingNewsCycle {
 
     static Status reachedLimit(ReadingNewsLedger ledger)throws java.io.IOException{
         if(ledger.used()>=ReadingNewsLedger.DAILY_LIMIT)return Status.DAILY_LIMIT;
-        return ledger.progressBatch && ledger.progressUsed()>=ReadingNewsLedger.PROGRESS_LIMIT?Status.FIVE_LIMIT:null;
+        if((ledger.progressBatch || ledger.sevenBatch) && ledger.progressUsed()>=ledger.batchLimit())
+            return ledger.sevenBatch?Status.SEVEN_LIMIT:Status.FIVE_LIMIT;
+        return null;
     }
 
     Summary run(Ports ports) throws Exception {

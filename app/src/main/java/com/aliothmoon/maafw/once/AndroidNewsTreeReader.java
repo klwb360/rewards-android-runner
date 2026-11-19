@@ -18,6 +18,19 @@ final class AndroidNewsTreeReader {
     private static volatile Object quarantine;
     static boolean knownClean() { return quarantine == null; }
 
+    static final class UnqualifiedTree extends SecurityException {
+        final NativeUiStructureProtocol.Reason reason;
+        final boolean canResampleArticle;
+        UnqualifiedTree(boolean article,NativeUiStructureProtocol.Reason reason,NativeUiStructureProtocol.Cleanup cleanup) {
+            super("NEWS_TREE_"+reason.name());
+            this.reason=reason;
+            canResampleArticle=article && cleanup==NativeUiStructureProtocol.Cleanup.CONFIRMED && switch(reason){
+                case NO_ROOT, ARTICLE_CHILD_MISSING, ARTICLE_NODE_BOUNDS -> true;
+                default -> false;
+            };
+        }
+    }
+
     static NewsTreeWire.Tree read(Context context, NewsAndroidPort.TreeGrant grant, boolean article) throws Exception {
         if (grant == null || !grant.current() || !knownClean() || !AndroidLiveUiReader.knownClean()
                 || Build.VERSION.SDK_INT < 34 || !AndroidLiveUiReader.authority(context))
@@ -65,7 +78,7 @@ final class AndroidNewsTreeReader {
             stream.frameCleanup = tree.source().cleanup();
             stream.helperReason = tree.source().reason();
             stream.completeReceipt = true;
-            if (!tree.source().qualified()) throw new SecurityException("NEWS_TREE_" + stream.helperReason.name());
+            if (!tree.source().qualified()) throw new UnqualifiedTree(article,stream.helperReason,stream.frameCleanup);
             if (stream.currentLost || !grant.current() || !AndroidLiveUiReader.authority(context))
                 throw new SecurityException("NEWS_TREE_STALE");
             return tree;

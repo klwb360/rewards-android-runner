@@ -198,6 +198,41 @@ public class NewsDeviceEvidenceTest {
             reads[0]++;throw new SecurityException("NEWS_TREE_UI_BLOCKER");},millis->fail("Unexpected wait"),()->now[0]));
         assertEquals(1,reads[0]);
     }
+    @Test public void aChangingArticleTreeMustBeReadFromScratchBeforeAnyReturn()throws Exception{
+        for(var reason:List.of(NativeUiStructureProtocol.Reason.NO_ROOT,
+                NativeUiStructureProtocol.Reason.ARTICLE_CHILD_MISSING,NativeUiStructureProtocol.Reason.ARTICLE_NODE_BOUNDS)){
+            var incomplete=new AndroidNewsTreeReader.UnqualifiedTree(true,reason,NativeUiStructureProtocol.Cleanup.CONFIRMED);
+            int[] reads={0};long[] now={0};
+            int verified=NewsAndroidPort.awaitClearArticle(()->{
+                if(++reads[0]<=2)throw incomplete;
+                return 17;
+            },millis->now[0]+=millis,()->now[0]);
+            assertEquals(17,verified);assertEquals(3,reads[0]);assertEquals(1000,now[0]);
+            reads[0]=0;
+            var exhausted=assertThrows(AndroidNewsTreeReader.UnqualifiedTree.class,()->NewsAndroidPort.awaitClearArticle(
+                    ()->{reads[0]++;throw incomplete;},millis->now[0]+=millis,()->now[0]));
+            assertEquals(3,reads[0]);assertEquals("NEWS_RETURN_TREE_"+reason.name(),NewsAndroidPort.returnFailureCode(exhausted));
+        }
+    }
+    @Test public void articleTreeResamplingRequiresReleaseAndNeverAcceptsAnUntrustedOrBlockedWindow(){
+        for(var reason:NativeUiStructureProtocol.Reason.values()){
+            for(var cleanup:NativeUiStructureProtocol.Cleanup.values()){
+                for(boolean article:new boolean[]{false,true}){
+                    var fault=new AndroidNewsTreeReader.UnqualifiedTree(article,reason,cleanup);
+                    boolean allowed=article && cleanup==NativeUiStructureProtocol.Cleanup.CONFIRMED
+                            && List.of(NativeUiStructureProtocol.Reason.NO_ROOT,NativeUiStructureProtocol.Reason.ARTICLE_CHILD_MISSING,
+                                       NativeUiStructureProtocol.Reason.ARTICLE_NODE_BOUNDS).contains(reason);
+                    assertEquals(allowed,fault.canResampleArticle);
+                    if(!allowed)assertSame(fault,assertThrows(AndroidNewsTreeReader.UnqualifiedTree.class,()->
+                            NewsAndroidPort.awaitClearArticle(()->{throw fault;},ms->fail("Unexpected resample"),()->0L)));
+                }
+            }
+        }
+        assertEquals("NEWS_ARTICLE_WINDOW_CHANGED",NewsAndroidPort.returnFailureCode(new SecurityException("NEWS_ARTICLE_WINDOW_CHANGED")));
+        assertEquals("NEWS_RETURN_INTERRUPTED",NewsAndroidPort.returnFailureCode(new InterruptedException()));
+        assertEquals("NEWS_RETURN_TREE_IO",NewsAndroidPort.returnFailureCode(new IOException("private content")));
+        assertEquals("NEWS_RETURN_FINAL_RECHECK",NewsAndroidPort.returnFailureCode(new SecurityException("private content")));
+    }
     private static NativeUiBoundPointsParser.Node node(int index,int parent,boolean own,int right) {
         return new NativeUiBoundPointsParser.Node(index,parent,true,own,"card","abc","",6,9,right,41,
                 NativeUiBoundPointsParser.ClassRole.TEXT,index!=0);
