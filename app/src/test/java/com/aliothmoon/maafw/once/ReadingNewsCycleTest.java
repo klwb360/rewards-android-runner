@@ -36,6 +36,8 @@ public final class ReadingNewsCycleTest {
         int anchor, moves, backCalls, inFlight, autoAt, failAt, reorderAfter, pageChecks;
         boolean revoked, revokeDuringWait, shortSleep, stalled, bypassTap, returnUncertain, clean = true;
         boolean changedBeforeTap, changedAfterReserve;
+        boolean coverDuringTap, coverAtFinalGate;
+        ReadingNewsCycle.Kind replacementWhileCovered;
         ReadingNewsCycle.Page destination = ReadingNewsCycle.Page.ARTICLE;
         Feed(List<ReadingNewsCycle.CardProof> cards) { this.cards = cards; }
         public long now() { return clock; }
@@ -58,6 +60,11 @@ public final class ReadingNewsCycleTest {
             storedGate = gate;
             if (bypassTap) return now();
             if (changedBeforeTap) {changedBeforeTap=false;throw new ReadingNewsCycle.CardChangedBeforeDispatch();}
+            if(coverDuringTap){
+                coverDuringTap=false;
+                if(replacementWhileCovered!=null)cards.set(anchor,ReadingNewsCycleTest.card(replacementWhileCovered,"covered"));
+                NewsDeviceEvidenceTest.rejectCoveredGate(coverAtFinalGate,gate);
+            }
             clock += 75;
             gate.burn();
             if (changedAfterReserve) throw new ReadingNewsCycle.CardChangedBeforeDispatch();
@@ -233,6 +240,33 @@ public final class ReadingNewsCycleTest {
         var bad=new Feed(articles(3));bad.changedAfterReserve=true;
         assertThrows(SecurityException.class,()->new ReadingNewsCycle(reserved).run(bad));
         assertEquals(1,reserved.used());assertEquals(0,bad.moves);
+    }
+    @Test public void initialAndLateCoverSkipStraightToNextStoryWithoutAReservationWaitOrBack()throws Exception{
+        for(int phase=0;phase<3;phase++){
+            var journal=ledger(new LiveRewardsLedger.MemoryStore());
+            var cards=articles(2);
+            if(phase==0)cards.set(0,NewsAndroidPort.scrollOnly(NewsDeviceEvidenceTest.overlaySlot(true)));
+            var feed=new Feed(cards);
+            feed.coverDuringTap=phase>0;
+            feed.coverAtFinalGate=phase==2;
+            var result=new ReadingNewsCycle(journal).run(feed);
+            assertEquals(ReadingNewsCycle.Status.FEED_END,result.status());
+            assertEquals(1,result.attempts());assertEquals(1,journal.used());assertEquals(1,result.unreadable());
+            assertEquals(1,feed.moves);assertEquals(List.of(hash("article-1")),feed.tapped);
+            assertEquals(1,result.openedAndReturned());assertEquals(1,feed.backCalls);assertEquals(List.of(10_000L),feed.dwell);
+            assertFalse(journal.attempted(hash("article-0")));
+        }
+    }
+    @Test public void persistentCoverOrVisibleAdAfterLateRejectionIsOneSkippedSlot()throws Exception{
+        for(var reread:List.of(UNKNOWN,AD)){
+            var journal=ledger(new LiveRewardsLedger.MemoryStore());
+            var feed=new Feed(articles(2));
+            feed.coverDuringTap=true;feed.coverAtFinalGate=true;feed.replacementWhileCovered=reread;
+            var result=new ReadingNewsCycle(journal).run(feed);
+            assertEquals(reread==AD?1:0,result.ads());assertEquals(reread==UNKNOWN?1:0,result.unreadable());
+            assertEquals(1,journal.used());assertEquals(List.of(hash("article-1")),feed.tapped);
+            assertEquals(1,feed.moves);assertEquals(1,feed.backCalls);
+        }
     }
 
     @Test public void missingInputGateOrEarlyReturnCannotBeReportedAsSuccess() throws Exception {

@@ -13,12 +13,75 @@ public class NewsDeviceEvidenceTest {
     @Test public void carouselHasOnlyAScrollProofAndCannotOwnAStoryTap(){
         var rotating=NewsFeedModel.inspect(NewsFeedModelTest.list(true),1000,2000,-1,null);
         var ordinary=NewsFeedModel.inspect(NewsFeedModelTest.list(false),1000,2000,-1,null);
-        var proof=NewsAndroidPort.skippedCarousel(rotating);
+        var proof=NewsAndroidPort.scrollOnly(rotating);
         assertEquals(ReadingNewsCycle.Kind.UNKNOWN,proof.kind());
         assertEquals("",proof.key());
         assertEquals(rotating.card().layoutKey(),proof.layoutKey());
-        assertNull(NewsAndroidPort.skippedCarousel(ordinary));
+        assertNull(NewsAndroidPort.scrollOnly(ordinary));
         assertThrows(SecurityException.class,()->new NewsAndroidPort.StoryTapCheck(rotating,LiveRewardsTypes.hash("story")));
+    }
+
+    static NewsFeedModel.Frame overlaySlot(boolean covered){
+        var nodes=NewsFeedModelTest.list(false);
+        if(covered)nodes.add(NewsFeedModelTest.n(90,1,NewsFeedModelTest.b(390,635,610,740),null,"",true));
+        return NewsFeedModel.inspect(nodes,1000,2000,1180,null);
+    }
+    private static NewsAndroidPort.Snapshot snapshot(NewsFeedModel.Frame frame,int window){
+        return new NewsAndroidPort.Snapshot(frame,
+                BingNavigationFixture.result(BingNavigationSnapshot.Kind.TEMPLATE,1000).ready(),window,1000);
+    }
+    @Test public void coveredOwnerCanOnlyAdvanceUnderSameWindowGeometryAndMeasuredStride(){
+        var clear=snapshot(overlaySlot(false),1);var covered=snapshot(overlaySlot(true),1);
+        assertEquals("FEED_OCCLUDED",covered.frame().reason());
+        var proof=NewsAndroidPort.scrollOnly(covered.frame());
+        assertEquals(ReadingNewsCycle.Kind.UNKNOWN,proof.kind());assertEquals("",proof.key());
+        assertThrows(SecurityException.class,()->new NewsAndroidPort.StoryTapCheck(covered.frame(),LiveRewardsTypes.hash("story")));
+        assertEquals(NewsAndroidPort.FrameDecision.ACCEPT,NewsAndroidPort.compare(clear,covered,NewsAndroidPort.RefreshUse.IDENTIFY));
+        assertEquals(NewsAndroidPort.FrameDecision.SKIP_BEFORE_TAP,NewsAndroidPort.compare(clear,covered,NewsAndroidPort.RefreshUse.STORY_TAP));
+        assertEquals(NewsAndroidPort.FrameDecision.REJECT,NewsAndroidPort.compare(covered,covered,NewsAndroidPort.RefreshUse.STORY_TAP));
+        var swipe=NewsAndroidPort.RefreshUse.FEED_SWIPE;
+        assertEquals(NewsAndroidPort.FrameDecision.ACCEPT,NewsAndroidPort.compare(covered,clear,swipe));
+        assertEquals(NewsAndroidPort.FrameDecision.ACCEPT,NewsAndroidPort.compare(clear,covered,swipe));
+        assertEquals(NewsAndroidPort.FrameDecision.REJECT,NewsAndroidPort.compare(covered,snapshot(clear.frame(),2),swipe));
+        var foreign=new NewsAndroidPort.Snapshot(clear.frame(),BingNavigationFixture.result(BingNavigationSnapshot.Kind.BROWSER,1000).ready(),1,1000);
+        assertEquals(NewsAndroidPort.FrameDecision.REJECT,NewsAndroidPort.compare(covered,foreign,swipe));
+        var f=clear.frame();
+        var changedStride=new NewsFeedModel.Frame(f.page(),f.viewport(),f.entry(),f.entryComplete(),f.card(),f.stride()+1,f.atEnd(),f.reason());
+        assertEquals(NewsAndroidPort.FrameDecision.REJECT,NewsAndroidPort.compare(covered,snapshot(changedStride,1),swipe));
+    }
+    static void rejectCoveredGate(boolean finalGate,ReadingNewsCycle.BurnGate budget)throws Exception{
+        var clear=snapshot(overlaySlot(false),1);var covered=snapshot(overlaySlot(true),1);
+        var target=new ReviewShizukuTapActor.TapTarget(500,690,1000,2000,0);
+        String key=LiveRewardsTypes.hash("story");
+        var story=new NewsAndroidPort.StoryTapCheck(clear.frame(),key);
+        var actor=new ReviewShizukuTapActor(()->new ReviewShizukuTapActor.Session(){
+            public boolean stillReady(){return true;}
+            public ReviewShizukuTapActor.DisplayShape display(){return new ReviewShizukuTapActor.DisplayShape(1000,2000,0);}
+            public ReviewShizukuTapActor.PendingTap dispatch(ReviewShizukuTapActor.TapTarget t,
+                    ReviewShizukuTapActor.FinalGate gate)throws Exception{
+                assertTrue(finalGate);
+                gate.requireValid();
+                throw new AssertionError("A covered point reached native input");
+            }
+        });
+        var result=actor.tap(target,new ReviewShizukuTapActor.DispatchGate(){
+            public boolean consume(ReviewShizukuTapActor.TapTarget exact){
+                var observed=finalGate?clear:covered;
+                if(NewsAndroidPort.compare(clear,observed,NewsAndroidPort.RefreshUse.STORY_TAP)
+                        ==NewsAndroidPort.FrameDecision.SKIP_BEFORE_TAP)return story.markChanged();
+                return true;
+            }
+            public boolean stillValid(ReviewShizukuTapActor.TapTarget exact)throws Exception{
+                if(NewsAndroidPort.compare(clear,covered,NewsAndroidPort.RefreshUse.STORY_TAP)
+                        ==NewsAndroidPort.FrameDecision.SKIP_BEFORE_TAP)return story.markChanged();
+                return story.checkAndBurn(new NewsLocalOcr.Result(NewsFeedModel.Kind.ARTICLE,key,500,690,"BADGE_ABSENT",true,""),exact,budget);
+            }
+        });
+        assertEquals(finalGate?ReviewShizukuTapActor.Reason.AUTHORITY_STALE:ReviewShizukuTapActor.Reason.AUTHORITY_REJECTED,
+                result.reason());
+        assertFalse(result.invocationAttempted());assertTrue(actor.knownClean());
+        assertTrue(story.confirmedSkip(result,false));assertFalse(story.confirmedSkip(result,true));
+        throw new ReadingNewsCycle.CardChangedBeforeDispatch();
     }
 
     @Test public void actorRejectsChangedImageAndAdWithoutEnteringStoryBudgetOrDispatch(){

@@ -22,7 +22,6 @@ final class NewsFeedModel {
                  int stride, boolean atEnd, String reason) { }
 
     private static final Set<String> END_LABELS = Set.of("已到列表底部","没有更多内容了","没有更多新闻","no more stories");
-    private static final Set<String> AD_LABELS = Set.of("广告","ad","sponsored","advertisement");
 
     static Frame inspect(List<Node> nodes, int width, int height, int anchorY, Card opened) {
         if (width < 128 || height < 128 || width > 8192 || height > 8192) return unknown("DISPLAY");
@@ -81,13 +80,20 @@ final class NewsFeedModel {
     private static Frame feed(Tree tree,Box display,int anchorY) {
         Node home=tree.uniqueId("compose_home_root"), search=tree.uniqueId("search_bar"),
                 footer=tree.uniqueId("com.microsoft.bing:id/sa_main_footer");
-        if(home==null||search==null||footer==null||!home.visible()||!search.visible()||!footer.visible()
-                || !tree.below(search,home)||tree.below(footer,home))return unknown("NO_FEED_CARDS");
+        if(home==null||footer==null||!home.visible()||!footer.visible()||tree.below(footer,home))
+            return unknown("NO_FEED_CARDS");
         Box body=clip(bounds(home),display);
-        if(body==null || !body.contains(bounds(search))||search.top()>=display.height()/4
-                || search.bottom()>display.height()/3||footer.top()<=display.height()/2
-                || !display.contains(bounds(footer)))return unknown("FEED_VIEWPORT");
-        int top=search.bottom();
+        if(body==null||footer.top()<=display.height()/2||!display.contains(bounds(footer)))return unknown("FEED_VIEWPORT");
+        int top;
+        if(search!=null){
+            if(!search.visible()||!tree.below(search,home)||!body.contains(bounds(search))
+                    ||search.top()>=display.height()/4||search.bottom()>display.height()/3)
+                return unknown("FEED_VIEWPORT");
+            top=search.bottom();
+        }else{
+            top=collapsedHeaderBottom(tree,home,footer,body,display);
+            if(top<0)return unknown("NO_FEED_CARDS");
+        }
         for(Node n:tree.nodes)if(n.visible()&&n.parentIndex()==home.index()&&n.top()==body.top()
                 &&n.left()==body.left()&&n.right()==body.right()&&n.bottom()<=display.height()/4)
             top=Math.max(top,n.bottom());
@@ -95,7 +101,7 @@ final class NewsFeedModel {
         if(view==null)return unknown("FEED_VIEWPORT");
         List<Candidate> slots=new ArrayList<>();
         for(Node n:tree.nodes){
-            if(!n.visible()||!n.clickable()||!tree.below(n,home)||tree.below(n,search)
+            if(!n.visible()||!n.clickable()||!tree.below(n,home)||(search!=null&&tree.below(n,search))
                     ||n==search||bounds(n).width()<body.width()*0.65||n.right()>body.right()
                     ||n.left()<body.left()||n.bottom()<=view.top()||n.top()>=view.bottom())continue;
             Card slot=describe(tree,n,view);
@@ -105,7 +111,7 @@ final class NewsFeedModel {
         if(slots.size()<2)return unknown("NO_VERIFIED_CARD_GROUP");
         Node list=tree.byId.get(slots.get(0).owner().parentIndex());
         while(list!=null && !tree.below(slots.get(1).owner(),list))list=tree.byId.get(list.parentIndex());
-        if(list==null||!tree.below(list,home)||tree.below(search,list))return unknown("AMBIGUOUS_FEED");
+        if(list==null||!tree.below(list,home)||(search!=null&&tree.below(search,list)))return unknown("AMBIGUOUS_FEED");
         List<Card> full=new ArrayList<>();
         for(int i=0;i<slots.size();i++) {
             var slot=slots.get(i);
@@ -122,12 +128,11 @@ final class NewsFeedModel {
         }
         if(full.isEmpty())return unknown("NO_COMPLETE_ANCHORED_CARD");
         int anchor=anchorY<0?(int)full.get(0).box().centerY():anchorY;
-        Card chosen=null;int nearest=Integer.MAX_VALUE;
+        Card chosen=null;
         for(Card c:full){
-            int distance=Math.abs((int)c.box().centerY()-anchor);
-            if(distance>c.box().height()/4)continue;
-            if(distance==nearest)return unknown("AMBIGUOUS_ANCHOR");
-            if(distance<nearest){chosen=c;nearest=distance;}
+            if(anchor<c.box().top()||anchor>=c.box().bottom())continue;
+            if(chosen!=null)return unknown("AMBIGUOUS_ANCHOR");
+            chosen=c;
         }
         if(chosen==null)return unknown("NO_COMPLETE_ANCHORED_CARD");
         int slot=0;
@@ -143,10 +148,55 @@ final class NewsFeedModel {
         // A rotating hero belongs to an additional nested pager. It is a valid list witness,
         // but its content can change several times while mobile OCR or a tap is being prepared.
         Node owner=slots.get(slot).owner(), direct=tree.directBranch(owner,list);
+        if(covered(tree,owner,chosen)){
+            Card blocked=new Card(Kind.UNKNOWN,chosen.box(),chosen.source(),chosen.title(),chosen.publisher(),chosen.headline(),
+                    chosen.key(),chosen.layoutKey(),chosen.image());
+            return new Frame(Page.FEED,view,null,false,blocked,stride,end,"FEED_OCCLUDED");
+        }
         Node parent=tree.byId.get(owner.parentIndex());
         boolean carousel=parent!=null && parent!=direct && bounds(parent).equals(chosen.box());
         return new Frame(Page.FEED,view,null,false,chosen,stride,end,
                 carousel?"FEED_CAROUSEL_CANDIDATE":"FEED_CANDIDATE");
+    }
+
+    private static boolean covered(Tree tree,Node owner,Card card){
+        int x=(int)card.image().centerX(),y=(int)card.image().centerY();
+        boolean pictureSeen=false,cardSummarySeen=false;
+        for(Node n:tree.nodes){
+            if(!n.visible()||n==owner||n.left()>x||x>=n.right()||n.top()>y||y>=n.bottom()
+                    ||tree.below(owner,n))continue;
+            if(!n.clickable()&&n.parentIndex()==owner.index()){
+                // The accessibility representation of the card includes its own full-card
+                // summary and photograph. A second superimposed surface is not either one.
+                if(!pictureSeen&&bounds(n).equals(card.image())){pictureSeen=true;continue;}
+                if(!cardSummarySeen&&bounds(n).equals(card.box())){cardSummarySeen=true;continue;}
+            }
+            // Accessibility traversal indices are not reliable Android z-order. An unrelated
+            // visible surface covering the exact tap point cannot be proved to be behind it.
+            return true;
+        }
+        return false;
+    }
+
+    private static int collapsedHeaderBottom(Tree tree,Node home,Node footer,Box body,Box display){
+        // On a scrolled Bing home the toolbar node disappears. Its narrow full-width edge remains
+        // a direct child of Compose; the Android footer remains in a separate branch of content.
+        Node content=tree.uniqueId("android:id/content"),container=tree.uniqueId("com.microsoft.bing:id/container");
+        if(tree.hasId("search_bar")||content==null||container==null||!content.visible()||!container.visible()
+                ||!tree.below(home,container)||!tree.below(container,content)||!tree.below(footer,content)
+                ||tree.below(footer,container)||!body.equals(display))return -1;
+        int bottom=body.top();
+        boolean fullWidthEdge=false;
+        for(Node n:tree.nodes)if(n.parentIndex()==home.index()&&n.visible()&&!n.clickable()
+                &&n.top()==body.top()&&n.bottom()>n.top()&&n.bottom()-n.top()<=Math.max(2,display.height()/48)){
+            if(n.left()==body.left()&&n.right()==body.right()){
+                if(fullWidthEdge)return -1;
+                fullWidthEdge=true;
+            }
+            // The centered progress indicator extends below the collapsed edge.
+            bottom=Math.max(bottom,n.bottom());
+        }
+        return fullWidthEdge?bottom:-1;
     }
 
     private static Card describe(Tree tree,Node owner,Box view){
@@ -184,13 +234,6 @@ final class NewsFeedModel {
         }
         String layout=LiveCardIdentity.hashText("news-layout|"+card+"|"+image+"|"+badge);
         return new Card(badge==null?Kind.UNKNOWN:Kind.ARTICLE,card,badge,null,"","","",layout,image);
-    }
-
-    static boolean isAd(String value){return AD_LABELS.contains(LiveCardIdentity.normalize(value));}
-    static boolean sourceAd(String value){
-        String s=LiveCardIdentity.normalize(value);
-        return isAd(s)||s.replace(" ","").startsWith("广告")
-                ||s.matches("^(?:ad|sponsored|advertisement)[\\s,.:|·]+.+$");
     }
 
     private static boolean article(Tree tree,Card opened){

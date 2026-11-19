@@ -47,6 +47,14 @@ public class NewsCardOcrPlanTest {
         var expanded=f.plan(true);assertTrue(expanded.rois().get(0).contains(roi));
         assertEquals(result.key(),expanded.finish(List.of(List.of(mark("1.",expanded.rois().get(0))))).key());
     }
+    @Test public void unrelatedWordsInTheSourceStripDoNotStandInForTheChineseBadge(){
+        var f=new Fixture();
+        for(String text:List.of("ad","Sponsored","Advertisement","来源")){
+            var plan=f.plan(false);
+            var result=plan.finish(List.of(List.of(mark(text,plan.rois().get(0)))));
+            assertEquals(NewsFeedModel.Kind.ARTICLE,result.kind());
+        }
+    }
     @Test public void ordinaryAndSplitAdMarksHaveNoClickPoint(){
         var f=new Fixture();
         for(boolean split:List.of(false,true)){
