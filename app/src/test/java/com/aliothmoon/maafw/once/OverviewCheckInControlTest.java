@@ -31,6 +31,41 @@ public class OverviewCheckInControlTest {
         assertEquals(new com.aliothmoon.maafw.rewards.RewardRegionLocator.Box(112,280,232,360),region.heading());
         assertEquals(saved,nodes);assertEquals(40,nodes.size());assertTrue(nodes.get(39).clickable());assertEquals("签入",nodes.get(39).description());
     }
+    private static Node caption(int parent) {
+        return new Node(40,parent,true,true,"","签入","",112,288,232,352,TEXT,false);
+    }
+    @Test public void sameLineCheckInCaptionLeafKeepsExactlyTheOriginalRegionsAndAuthority() {
+        var plain=pair();
+        var expected=OverviewUiParser.parse(plain);
+        var nested=pair();nested.add(caption(7));var originalNodes=List.copyOf(nested);
+        var result=OverviewUiParser.parse(nested);
+        assertEquals(expected,result);
+        assertEquals(RemainingCardUiParser.parse(plain,expected),RemainingCardUiParser.parse(nested,result));
+        assertEquals(originalNodes,nested);
+        assertEquals(new com.aliothmoon.maafw.rewards.RewardRegionLocator.Box(112,280,232,360),checkIn(result).heading());
+        hide(nested,7);hide(nested,39);hide(nested,40);
+        assertEquals(OverviewUiRegions.Status.OBSERVED,OverviewUiParser.parse(nested).status());
+        assertNull(checkIn(OverviewUiParser.parse(nested)));
+    }
+    @Test public void nestedCheckInLabelMustBeOneInertSameLineEchoNotAnotherControl() {
+        Node leaf=caption(7);
+        for(Node bad:List.of(copy(leaf,TEXT,true,"签入",""),copy(leaf,BUTTON,false,"签入",""),
+                copy(leaf,TEXT,false,"另一个标题",""),copy(leaf,TEXT,false,"签入","签入"),
+                new Node(40,7,true,true,"target","签入","",112,288,232,352,TEXT,false),
+                geometry(leaf,113,288,232,352),geometry(leaf,112,272,232,352),geometry(leaf,112,300,232,352),
+                caption(39))) {
+            var nodes=pair();nodes.add(bad);ambiguous(nodes);
+        }
+        var two=pair();two.add(leaf);two.add(new Node(41,7,true,true,"","签入","",112,288,232,352,TEXT,false));ambiguous(two);
+        var grandchild=pair();grandchild.add(leaf);grandchild.add(new Node(41,40,true,true,"","签入","",112,292,232,348,TEXT,false));ambiguous(grandchild);
+        var mixed=pair();mixed.add(leaf);hide(mixed,40);ambiguous(mixed);
+        var foreign=pair();foreign.add(new Node(40,7,true,false,"","签入","",112,288,232,352,TEXT,false));
+        assertEquals(OverviewUiRegions.Status.WRONG_STRUCTURE,OverviewUiParser.parse(foreign).status());
+        var otherWeekly=pair();replace(otherWeekly,19,n->copy(n,TEXT,false,"每日活动",""));
+        otherWeekly.add(new Node(40,18,true,true,"","","每日活动",1260,1108,1328,1172,BUTTON,true));
+        otherWeekly.add(new Node(41,19,true,true,"","每日活动","",112,1108,348,1172,TEXT,false));
+        ambiguous(otherWeekly);
+    }
     @Test public void realDuplicateTextOrAnyThirdMatchingNodeIsStillAmbiguous(){
         var twice=pair();replace(twice,39,n->copy(n,TEXT,false,"签入",""));ambiguous(twice);
         var third=pair();third.add(new Node(40,6,true,true,"","签入","",300,280,420,360,TEXT,false));ambiguous(third);
