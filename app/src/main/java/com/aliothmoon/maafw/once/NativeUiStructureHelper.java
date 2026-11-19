@@ -193,8 +193,8 @@ public final class NativeUiStructureHelper {
                                 visible, true, text, description));
                     }
                     int count = node.getChildCount();
-                    if (count < 0 || scheduled + count > 512 || count > 0 && current.depth() >= 32)
-                        throw new Stop(NativeUiStructureProtocol.Reason.TREE_OVERFLOW);
+                    var childStatus = childTraversalStatus(articleMode, scheduled, current.depth(), count);
+                    if (childStatus != NativeUiStructureProtocol.Reason.OK) throw new Stop(childStatus);
                     for (int i = 0; i < count; i++) {
                         checkTime(readEnd);
                         AccessibilityNodeInfo child = node.getChild(i);
@@ -324,6 +324,22 @@ public final class NativeUiStructureHelper {
         if(value!=null&&value.length()=="android.widget.Button".length()&&"android.widget.Button".contentEquals(value))return NativeUiBoundPointsParser.ClassRole.BUTTON;
         return NativeUiBoundPointsParser.ClassRole.UNKNOWN;
     }
+    // The article receipt contains no node text. Walk deeper article layouts under the same
+    // total node budget and deadline, checking every child before admitting the frame.
+    static NativeUiStructureProtocol.Reason childTraversalStatus(boolean articleMode, int scheduled,
+                                                                 int depth, int children) {
+        if (children < 0 || scheduled < 1 || depth < 0)
+            return NativeUiStructureProtocol.Reason.TREE_OVERFLOW;
+        if (scheduled > 512 || children > 512 - scheduled)
+            return articleMode ? NativeUiStructureProtocol.Reason.ARTICLE_NODE_LIMIT
+                    : NativeUiStructureProtocol.Reason.TREE_OVERFLOW;
+        int maxDepth = articleMode ? 64 : 32;
+        if (depth > maxDepth || (depth == maxDepth && children > 0))
+            return articleMode ? NativeUiStructureProtocol.Reason.ARTICLE_DEPTH_LIMIT
+                    : NativeUiStructureProtocol.Reason.TREE_OVERFLOW;
+        return NativeUiStructureProtocol.Reason.OK;
+    }
+
     /** Only whole, short blocker labels matter in the article viewer. Never copy a paragraph as evidence. */
     static String articleGuardLabel(CharSequence value){
         if(value==null)return "";

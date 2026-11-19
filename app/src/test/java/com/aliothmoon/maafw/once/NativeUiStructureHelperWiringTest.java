@@ -16,6 +16,35 @@ public class NativeUiStructureHelperWiringTest {
         if(!Files.isRegularFile(p))p=Path.of("../app/src/main/java/com/aliothmoon/maafw/once/NativeUiStructureHelper.java");
         return Files.readString(p);
     }
+    @Test public void deeperCompleteArticleTreeStaysWithinTheSameNodeBudget() {
+        var ok = NativeUiStructureProtocol.Reason.OK;
+        for (int depth = 0; depth <= 37; depth++)
+            assertEquals(ok, NativeUiStructureHelper.childTraversalStatus(true, depth + 1, depth, depth < 37 ? 1 : 0));
+        assertEquals(ok, NativeUiStructureHelper.childTraversalStatus(true, 512, 64, 0));
+        assertEquals(NativeUiStructureProtocol.Reason.ARTICLE_DEPTH_LIMIT,
+                NativeUiStructureHelper.childTraversalStatus(true, 65, 64, 1));
+        assertEquals(NativeUiStructureProtocol.Reason.ARTICLE_DEPTH_LIMIT,
+                NativeUiStructureHelper.childTraversalStatus(true, 66, 65, 0));
+    }
+
+    @Test public void bothModesRejectOversizedChildCountsBeforeScheduling() {
+        for (boolean article : new boolean[]{false, true}) {
+            var overflow = article ? NativeUiStructureProtocol.Reason.ARTICLE_NODE_LIMIT
+                    : NativeUiStructureProtocol.Reason.TREE_OVERFLOW;
+            assertEquals(NativeUiStructureProtocol.Reason.OK,
+                    NativeUiStructureHelper.childTraversalStatus(article, 511, 4, 1));
+            assertEquals(overflow, NativeUiStructureHelper.childTraversalStatus(article, 511, 4, 2));
+            assertEquals(overflow, NativeUiStructureHelper.childTraversalStatus(article, 4, 1, Integer.MAX_VALUE));
+        }
+    }
+
+    @Test public void ordinaryUiTreesKeepTheir32LevelLimit() {
+        assertEquals(NativeUiStructureProtocol.Reason.OK,
+                NativeUiStructureHelper.childTraversalStatus(false, 33, 32, 0));
+        assertEquals(NativeUiStructureProtocol.Reason.TREE_OVERFLOW,
+                NativeUiStructureHelper.childTraversalStatus(false, 33, 32, 1));
+    }
+
     @Test public void onlyNonSuppressingConnectAndNoExemptions() throws Exception {
         String s=source();
         assertTrue(s.contains("getMethod(\"connect\", int.class)"));
@@ -30,7 +59,7 @@ public class NativeUiStructureHelperWiringTest {
     @Test public void fixedInvocationRootAndResourceBounds() throws Exception {
         String s=source();
         for(String required:new String[]{"validReadyArguments(args)","validNonce(args[0])","deadline - start > 10000",
-                "Process.myUid() != 0","start + (readyMode?8000:5000)","scheduled + count > 512","current.depth() >= 32",
+                "Process.myUid() != 0","start + (readyMode?8000:5000)","childTraversalStatus(articleMode, scheduled, current.depth(), count)","throw new Stop(childStatus)",
                 "value.length() > 2048","> 32768","FOREIGN_ROOT","FOREIGN_NODE"})assertTrue(required,s.contains(required));
     }
     @Test public void finalOutputFollowsCleanupAndNoLateSuccess() throws Exception {
