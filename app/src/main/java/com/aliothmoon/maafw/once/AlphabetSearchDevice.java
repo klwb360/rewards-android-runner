@@ -13,7 +13,6 @@ import android.os.SystemClock;
 import android.provider.Settings;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
-import android.view.inputmethod.InputMethodManager;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -68,21 +67,31 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
                 && current() && AndroidLiveUiReader.authority(this.context), "SEARCH_AUTHORITY");
         apk = AndroidLiveUiReader.verifiedApk(this.context);
         need(apk != null, "SEARCH_APK");
-        String setting = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.DEFAULT_INPUT_METHOD);
-        ComponentName ime = setting == null ? null : ComponentName.unflattenFromString(setting);
-        imePackage = ime == null ? "" : ime.getPackageName();
-        int uid = -1;
-        var manager = context.getSystemService(InputMethodManager.class);
-        if (ime != null && manager != null) {
-            for (var enabled : manager.getEnabledInputMethodList()) {
-                if (ime.equals(enabled.getComponent()) && enabled.getServiceInfo() != null
-                        && enabled.getServiceInfo().applicationInfo != null) {
-                    uid = enabled.getServiceInfo().applicationInfo.uid;
-                    break;
-                }
+        // Android 14 filters third-party IME enumeration for ordinary apps. Resolve only
+        // the active user-0 setting and its exact package through the existing local bridge.
+        String configured = execute(new String[]{"/system/bin/settings","--user","0","get","secure",
+                Settings.Secure.DEFAULT_INPUT_METHOD}, 512, null).trim();
+        ComponentName ime = ComponentName.unflattenFromString(configured);
+        need(ime != null && ime.getPackageName().matches("[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z][A-Za-z0-9_]*)+"),
+                "SEARCH_IME_SETTING");
+        imePackage = ime.getPackageName();
+        String deviceOwner = execute(new String[]{"/system/bin/cmd","package","list","packages","--user","0",
+                "-U",imePackage}, 8192, null);
+        imeUid = exactPackageUid(deviceOwner,imePackage);
+    }
+
+    static int exactPackageUid(String listing, String pkg) {
+        var pattern = Pattern.compile("package:" + Pattern.quote(pkg) + " uid:([1-9][0-9]{0,7})");
+        int id = -1;
+        for (String row : listing.split("\\r?\\n")) {
+            var match = pattern.matcher(row);
+            if (match.matches()) {
+                need(id == -1, "SEARCH_IME_OWNER_AMBIGUOUS");
+                id = Integer.parseInt(match.group(1));
             }
         }
-        imeUid = uid;
+        need(id >= 0, "SEARCH_IME_OWNER_UNKNOWN");
+        return id;
     }
 
     static boolean knownClean() { return !quarantined; }
@@ -119,7 +128,7 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
         need(submitted == 0, "SEARCH_RETURN_PENDING");
         long end = now() + 5000;
         while (true) {
-            var active = source();
+            var active = origin == null ? source() : settledSource();
             if (origin == null) {
                 need(exactStart(initial, active), "SEARCH_START_INSTANCE");
                 probe(active, "BAR", 'a');
@@ -145,7 +154,7 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
             pause(450);
             do {
                 pause(150);
-                active = source();
+                active = settledSource();
                 if (EDITOR.equals(active.component())) break;
                 need(origin.equals(active) && now() < end, "SEARCH_EDITOR_NOT_OPEN");
             } while (true);
@@ -268,6 +277,19 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
         }
     }
 
+    // A transition sometimes displays two Bing windows together. Neither authorizes input.
+    private BingForegroundSnapshot.Snapshot settledSource() throws Exception {
+        long end = Math.min(authority.deadline(), now()+2000);
+        while (true) {
+            try {
+                return source();
+            } catch (SecurityException covered) {
+                if (!"SEARCH_BING_WINDOW_OVERLAP".equals(covered.getMessage()) || now() >= end) throw covered;
+                pause(150);
+            }
+        }
+    }
+
     private BingForegroundSnapshot.Snapshot source() throws Exception {
         var profile = initial.profile();
         long start = now();
@@ -329,7 +351,13 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
                         && "com.android.systemui".equals(owner[1]) && String.valueOf(p.systemUiUid()).equals(owner[0]);
                 boolean ime = EDITOR.equals(f.component()) && keyboardUid >= 0 && imePkg.equals(owner[1])
                         && String.valueOf(keyboardUid).equals(owner[0]) && "InputMethod".equals(name) && type(body,"INPUT_METHOD");
-                need(bar || ime, "SEARCH_COVERED");
+                if (!bar && !ime) {
+                    if ("InputMethod".equals(name)) throw new SecurityException("SEARCH_IME_WINDOW_UNBOUND");
+                    boolean bingPage = (landing(name) || EDITOR.equals(name) || RESULTS.equals(name)
+                            || BingNavigationSnapshot.BROWSER.equals(name)) && BING.equals(owner[1])
+                            && String.valueOf(p.bingUid()).equals(owner[0]) && type(body,"BASE_APPLICATION");
+                    throw new SecurityException(bingPage ? "SEARCH_BING_WINDOW_OVERLAP" : "SEARCH_COVERED");
+                }
             }
         }
         need(focused == 1, "SEARCH_FOCUS_COUNT");

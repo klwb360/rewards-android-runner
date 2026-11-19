@@ -8,6 +8,15 @@ public class AlphabetSearchDeviceTest {
     private static final BingNavigationSnapshot.Profile PROFILE = new BingNavigationSnapshot.Profile(
             10501, 10502, new BingNavigationSnapshot.Shape(1440,2560,0));
 
+    @Test public void exactImeOwnerComesFromOneRowForTheSelectedPackage() {
+        String rows = "package:example.keyboard.addon uid:10510\npackage:example.keyboard uid:10031\n";
+        assertEquals(10031, AlphabetSearchDevice.exactPackageUid(rows, "example.keyboard"));
+        for (String invalid : new String[]{rows + rows, "package:example.keyboard.addon uid:10510",
+                "package:example.keyboard uid:broken", ""}) {
+            assertThrows(SecurityException.class, () -> AlphabetSearchDevice.exactPackageUid(invalid,"example.keyboard"));
+        }
+    }
+
     private static String activities(String component) {
         String id = "ActivityRecord{ae1 u0 "+component+" t7}";
         return "topResumedActivity="+id+"\n  * Hist #2: "+id+"\n    state=RESUMED finishing=false inHistory=true\n";
@@ -41,6 +50,22 @@ public class AlphabetSearchDeviceTest {
         assertFalse(accepted(base+keyboard(IME,"APPLICATION_OVERLAY"),activity));
         assertFalse(accepted((base+keyboard(IME,"INPUT_METHOD")).replace("mOwnerUid=10432","mOwnerUid=10433"),activity));
         assertFalse(accepted(foreground(AlphabetSearchDevice.RESULTS)+keyboard(IME,"INPUT_METHOD"),activities(AlphabetSearchDevice.RESULTS)));
+    }
+
+    @Test public void overlapAndUnboundKeyboardRemainBlockedForDifferentReasons() {
+        String page = foreground(AlphabetSearchDevice.EDITOR);
+        String history = activities(AlphabetSearchDevice.EDITOR);
+        String extra = "  Window #2 Window{abc u0 " + BingNavigationSnapshot.MAIN + "}:\n"
+                + "    mOwnerUid=10501 package=com.microsoft.bing appop=NONE\n"
+                + "    mDisplayId=0 rootTaskId=7\n    mAttrs={ty=BASE_APPLICATION}\n    isVisible=true isOnScreen=true\n";
+        assertEquals("SEARCH_BING_WINDOW_OVERLAP", assertThrows(SecurityException.class,
+                () -> AlphabetSearchDevice.parseSource(page+extra,history,PROFILE,"7",IME,10432)).getMessage());
+        assertEquals("SEARCH_COVERED", assertThrows(SecurityException.class,
+                () -> AlphabetSearchDevice.parseSource(page+extra.replace("mOwnerUid=10501","mOwnerUid=10520"),
+                        history,PROFILE,"7",IME,10432)).getMessage());
+        assertEquals("SEARCH_IME_WINDOW_UNBOUND", assertThrows(SecurityException.class,
+                () -> AlphabetSearchDevice.parseSource(page+keyboard(IME,"INPUT_METHOD"),
+                        history,PROFILE,"7",IME,-1)).getMessage());
     }
 
     @Test public void onlyKnownBingComponentsOnTheOriginalTaskCanAuthorizeTheNextStep() {
