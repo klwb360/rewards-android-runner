@@ -19,7 +19,9 @@ final class NewsFeedModel {
     record Card(Kind kind, Box box, Box source, Box title, String publisher, String headline,
                 String key, String layoutKey, Box image) { }
     record Frame(Page page, Box viewport, Box entry, boolean entryComplete, Card card,
-                 int stride, boolean atEnd, String reason) { }
+                 int stride, boolean atEnd, String reason) {
+        boolean alignment(){return "FEED_ALIGN_UP".equals(reason)||"FEED_ALIGN_DOWN".equals(reason);}
+    }
 
     private static final Set<String> END_LABELS = Set.of("已到列表底部","没有更多内容了","没有更多新闻","no more stories");
 
@@ -126,7 +128,7 @@ final class NewsFeedModel {
             }
             if(slot.card().kind()==Kind.ARTICLE && wellInside(view,slot.card().box()))full.add(slot.card());
         }
-        if(full.isEmpty())return unknown("NO_COMPLETE_ANCHORED_CARD");
+        if(anchorY<0&&full.isEmpty())return unknown("NO_COMPLETE_ANCHORED_CARD");
         int anchor=anchorY<0?(int)full.get(0).box().centerY():anchorY;
         Card chosen=null;
         for(Card c:full){
@@ -134,12 +136,10 @@ final class NewsFeedModel {
             if(chosen!=null)return unknown("AMBIGUOUS_ANCHOR");
             chosen=c;
         }
-        if(chosen==null)return unknown("NO_COMPLETE_ANCHORED_CARD");
+        if(chosen==null)return align(slots,full,view,display,anchor);
         int slot=0;
         while(slots.get(slot).card()!=chosen)slot++;
-        Box previous=slot==0?null:slots.get(slot-1).card().box();
-        Box next=slot+1<slots.size()?slots.get(slot+1).card().box():null;
-        int gap=next!=null?next.top()-chosen.box().bottom():chosen.box().top()-previous.bottom();
+        int gap=slotGap(slots,slot);
         if(gap<0||gap>chosen.box().height()/3)return unknown("FEED_STRIDE");
         int stride=chosen.box().height()+gap;
         boolean end=slot==slots.size()-1 && tree.nodes.stream().anyMatch(n->n.visible()
@@ -157,6 +157,60 @@ final class NewsFeedModel {
         boolean carousel=parent!=null && parent!=direct && bounds(parent).equals(chosen.box());
         return new Frame(Page.FEED,view,null,false,chosen,stride,end,
                 carousel?"FEED_CAROUSEL_CANDIDATE":"FEED_CANDIDATE");
+    }
+
+    private static int slotGap(List<Candidate> slots,int slot){
+        Box box=slots.get(slot).card().box();
+        return slot+1<slots.size()?slots.get(slot+1).card().box().top()-box.bottom()
+                :box.top()-slots.get(slot-1).card().box().bottom();
+    }
+
+    private static Frame align(List<Candidate> slots,List<Card> full,Box view,Box display,int anchor){
+        Frame missing=unknown("NO_COMPLETE_ANCHORED_CARD");
+        if(anchor<=view.top()||anchor>=view.bottom())return missing;
+        Card target=null;
+        for(Candidate slot:slots){
+            Box box=slot.card().box();
+            if(anchor<box.top()||anchor>=box.bottom())continue;
+            boolean topVisible=box.top()>view.top(),bottomVisible=box.bottom()<view.bottom();
+            if(topVisible==bottomVisible)return missing;
+            // A lower cut-off card is the next story. For a previous card leaving at the top,
+            // prefer the complete following card if one is already visible.
+            if(topVisible||full.isEmpty())target=slot.card();
+            break;
+        }
+        if(target==null){
+            int nearest=Integer.MAX_VALUE;
+            for(Card card:full){
+                int distance=Math.max(card.box().top()-anchor,anchor-card.box().bottom()+1);
+                if(distance<nearest){target=card;nearest=distance;}
+                else if(distance==nearest)target=null;
+            }
+        }
+        if(target==null)return missing;
+        int slot=0;
+        while(slots.get(slot).card()!=target)slot++;
+        Box box=target.box();
+        int gap=slotGap(slots,slot);
+        if(gap<0||gap>box.height()/3)return missing;
+        // Signed content displacement. The complete observed bounds and the original anchor
+        // must fit together after the proposed gesture, even when the actor enforces its minimum.
+        int margin=Math.max(2,view.height()/160);
+        int lower=Math.max(view.top()+margin-box.top(),anchor+1-box.bottom());
+        int upper=Math.min(view.bottom()-margin-box.bottom(),anchor-1-box.top());
+        if(upper<0)upper=Math.min(upper,-ReviewShizukuSwipeActor.MIN_DISTANCE);
+        else if(lower>0)lower=Math.max(lower,ReviewShizukuSwipeActor.MIN_DISTANCE);
+        else return missing;
+        if(lower>upper)return missing;
+        int shift=Math.max(lower,Math.min(upper,anchor-(int)box.centerY()));
+        var direction=shift<0?ReviewShizukuSwipeActor.Direction.UP:ReviewShizukuSwipeActor.Direction.DOWN;
+        var swipe=new ReviewShizukuSwipeActor.SwipeTarget(display.width(),display.height(),0,direction,Math.abs(shift),true);
+        if(!ReviewShizukuSwipeActor.valid(swipe)||swipe.x()<=view.left()||swipe.x()>=view.right()
+                ||Math.min(swipe.fromY(),swipe.toY())<=view.top()||Math.max(swipe.fromY(),swipe.toY())>=view.bottom())
+            return missing;
+        Card scrollOnly=new Card(Kind.UNKNOWN,box,null,null,"","","",target.layoutKey(),target.image());
+        return new Frame(Page.FEED,view,null,false,scrollOnly,swipe.distance(),false,
+                shift<0?"FEED_ALIGN_UP":"FEED_ALIGN_DOWN");
     }
 
     private static boolean covered(Tree tree,Node owner,Card card){

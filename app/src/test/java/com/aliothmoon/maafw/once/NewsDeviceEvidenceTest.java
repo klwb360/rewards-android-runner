@@ -188,6 +188,70 @@ public class NewsDeviceEvidenceTest {
         });
         assertFalse(rejected.invocationAttempted());
     }
+    private static NewsAndroidPort.Snapshot alignmentFrame(int top,int bottom,String reason,int distance){
+        var main=BingNavigationSnapshot.MAIN;
+        var ready=V46EntryMetadataTest.r(V46EntryMetadataTest.w(main),V46EntryMetadataTest.a(main)).ready();
+        boolean partial=reason.startsWith("FEED_ALIGN_");
+        var box=NewsFeedModelTest.b(40,top,483,bottom);
+        var image=NewsFeedModelTest.b(50,top+12,473,top+172);
+        var source=partial?null:NewsFeedModelTest.b(50,top+180,105,top+203);
+        var card=new NewsFeedModel.Card(partial?NewsFeedModel.Kind.UNKNOWN:NewsFeedModel.Kind.ARTICLE,
+                box,source,null,"","","",LiveRewardsTypes.hash("synthetic-slot"),image);
+        var frame=new NewsFeedModel.Frame(NewsFeedModel.Page.FEED,NewsFeedModelTest.b(0,20,523,900),null,false,
+                card,distance,false,reason);
+        return new NewsAndroidPort.Snapshot(frame,ready,9,1000);
+    }
+    @Test public void smallCorrectionsOnlyReturnFreshCompleteCardsInTheSameList()throws Exception{
+        var display=BingNavigationFixture.SHAPE;
+        var complete=alignmentFrame(235,765,"FEED_CANDIDATE",550);
+        for(var direction:ReviewShizukuSwipeActor.Direction.values()){
+            var partial=direction==ReviewShizukuSwipeActor.Direction.UP
+                    ?alignmentFrame(400,930,"FEED_ALIGN_UP",200):alignmentFrame(0,530,"FEED_ALIGN_DOWN",200);
+            int[] moves={0};
+            var result=NewsAndroidPort.alignCard(partial,500,display,(before,target)->{
+                assertSame(partial,before);assertEquals(direction,target.direction());
+                assertEquals(200,target.distance());assertTrue(target.measuredNewsStride());
+                assertTrue(ReviewShizukuSwipeActor.valid(target));moves[0]++;
+                return complete;
+            });
+            assertSame(complete,result);assertEquals(1,moves[0]);
+        }
+    }
+    @Test public void correctionStopsOnNoMovementWindowChangeOrAnIncompleteReread(){
+        var display=BingNavigationFixture.SHAPE;
+        var first=alignmentFrame(400,930,"FEED_ALIGN_UP",200);
+        var visible=alignmentFrame(235,765,"FEED_CANDIDATE",550);
+        var otherWindow=new NewsAndroidPort.Snapshot(visible.frame(),first.source(),10,1000);
+        var otherAppWindow=new NewsAndroidPort.Snapshot(visible.frame(),
+                BingNavigationFixture.result(BingNavigationSnapshot.Kind.BROWSER,1000).ready(),first.window(),1000);
+        for(var after:List.of(first,otherWindow,otherAppWindow,alignmentFrame(395,925,"FEED_CANDIDATE",550))){
+            int[] moves={0};
+            assertThrows(SecurityException.class,()->NewsAndroidPort.alignCard(first,500,display,(s,t)->{moves[0]++;return after;}));
+            assertEquals(1,moves[0]);
+        }
+        var wrongSource=new NewsAndroidPort.Snapshot(first.frame(),otherAppWindow.source(),first.window(),1000);
+        for(var before:List.of(wrongSource,alignmentFrame(400,930,"FEED_ALIGN_UP",199))){
+            assertThrows(SecurityException.class,()->NewsAndroidPort.alignCard(before,500,display,(s,t)->{
+                throw new AssertionError("Invalid correction dispatched");
+            }));
+        }
+        assertThrows(SecurityException.class,()->NewsAndroidPort.alignCard(first,-1,display,(s,t)->{
+            throw new AssertionError("Unanchored correction dispatched");
+        }));
+    }
+    @Test public void partialCardConsumesAtMostTwoSmallCorrectionsBeforeAnotherCapture()throws Exception{
+        var display=BingNavigationFixture.SHAPE;
+        var first=alignmentFrame(400,930,"FEED_ALIGN_UP",200);
+        var second=alignmentFrame(390,920,"FEED_ALIGN_UP",200);
+        for(boolean complete:List.of(false,true)){
+            int[] moves={0};
+            var last=complete?alignmentFrame(235,765,"FEED_CANDIDATE",550):alignmentFrame(380,910,"FEED_ALIGN_UP",200);
+            NewsAndroidPort.AlignmentStep advance=(s,t)->{moves[0]++;return moves[0]==1?second:last;};
+            if(complete)assertSame(last,NewsAndroidPort.alignCard(first,500,display,advance));
+            else assertThrows(SecurityException.class,()->NewsAndroidPort.alignCard(first,500,display,advance));
+            assertEquals(2,moves[0]);
+        }
+    }
     @Test public void feedLoadingSamplesOnlyKnownTransitionsAndNeverGrantsInput(){
         var placeholder=new NewsFeedModel.Frame(NewsFeedModel.Page.UNKNOWN,null,null,false,null,0,false,"NO_FEED_CARDS");
         var ambiguous=new NewsFeedModel.Frame(NewsFeedModel.Page.UNKNOWN,null,null,false,null,0,false,"AMBIGUOUS_FEED");

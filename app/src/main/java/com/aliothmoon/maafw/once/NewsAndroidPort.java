@@ -21,7 +21,7 @@ import org.json.JSONObject;
 
 /** Device implementation owned by one explicitly selected reading entry in the visible runtime. */
 final class NewsAndroidPort implements ReadingNewsCycle.Ports {
-    private static final long ENTRY_SETTLE_MS = 2500;
+    private static final long NAVIGATION_SETTLE_MS = 2500;
     private final Context context;
     private final LiveRunAuthority authority;
     private final LiveRewardsNavigation navigation;
@@ -96,7 +96,7 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
             tap(located,()->reserve("ENTRY_TAP"),true);
             readingSource.entrySucceeded();
             // Bing finishes the Rewards activity while its existing Main window becomes visible.
-            pause(ENTRY_SETTLE_MS);
+            pause(NAVIGATION_SETTLE_MS);
             step="FIRST_FEED";
             Snapshot first=awaitFeed(true);
             readingSource.confirmList(first.source());
@@ -509,9 +509,12 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
         return success;
     }
     private void swipe(Snapshot current,ReviewShizukuSwipeActor.Direction direction,int distance,boolean measured)throws Exception{
-        if (swipes>=64)throw reject("NEWS_SCROLL_LIMIT");
         var target=new ReviewShizukuSwipeActor.SwipeTarget(shape.width(),shape.height(),shape.rotation(),
                 direction,distance,measured);
+        swipe(current,target);
+    }
+    private void swipe(Snapshot current,ReviewShizukuSwipeActor.SwipeTarget target)throws Exception{
+        if (swipes>=64)throw reject("NEWS_SCROLL_LIMIT");
         if(!ReviewShizukuSwipeActor.valid(target)||!inside(current.frame().viewport(),target.x(),target.fromY())
                 || !inside(current.frame().viewport(),target.x(),target.toY()))throw reject("NEWS_SCROLL_GEOMETRY");
         var grant=new Input(target,current,()->reserve("SWIPE_"+(++serial)),null);
@@ -525,13 +528,58 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
         if(!listConfirmed)throw reject("NEWS_FEED_NOT_ENTERED");
         step="VERIFY_FEED";
         var frame=awaitFeed(false);
+        // A bound list may need a small correction. Reading the next card owns that scroll.
         readingSource.confirmList(frame.source());
+    }
+    @FunctionalInterface interface AlignmentStep {
+        Snapshot swipeAndRead(Snapshot before,ReviewShizukuSwipeActor.SwipeTarget target)throws Exception;
+    }
+    static Snapshot alignCard(Snapshot first,int anchor,BingNavigationSnapshot.Shape display,AlignmentStep action)throws Exception{
+        var current=first;
+        for(int move=0;current.frame().alignment();move++){
+            var frame=current.frame();
+            var view=frame.viewport();
+            if(move>=2)throw reject("NEWS_ALIGN_LIMIT");
+            if(current.source().kind()!=BingNavigationSnapshot.Kind.MAIN || !display.equals(current.source().profile().shape())
+                    || frame.page()!=NewsFeedModel.Page.FEED || view==null || anchor<view.top() || anchor>=view.bottom()
+                    || frame.card()==null || frame.card().kind()!=NewsFeedModel.Kind.UNKNOWN || frame.card().source()!=null)
+                throw reject("NEWS_ALIGN_OWNER");
+            var direction="FEED_ALIGN_UP".equals(frame.reason())?ReviewShizukuSwipeActor.Direction.UP:ReviewShizukuSwipeActor.Direction.DOWN;
+            var target=new ReviewShizukuSwipeActor.SwipeTarget(display.width(),display.height(),display.rotation(),direction,frame.stride(),true);
+            if(!ReviewShizukuSwipeActor.valid(target)||!inside(view,target.x(),target.fromY())||!inside(view,target.x(),target.toY()))
+                throw reject("NEWS_ALIGN_GEOMETRY");
+            var next=action.swipeAndRead(current,target);
+            if(next.window()!=current.window() || !current.source().sameLiveWindow(next.source())
+                    || next.frame().page()!=NewsFeedModel.Page.FEED || next.frame().card()==null)
+                throw reject("NEWS_ALIGN_LIST_CHANGED");
+            var after=next.frame();
+            var box=after.card().box();
+            if(frame.card().box().equals(box) && view.equals(after.viewport()))
+                throw reject("NEWS_ALIGN_NO_MOVEMENT");
+            if(!after.alignment() && (!(ordinaryOrCarousel(after)||occluded(after)) || after.viewport()==null
+                    || !after.viewport().contains(box) || box.top()<=after.viewport().top() || box.bottom()>=after.viewport().bottom()
+                    || anchor<box.top() || anchor>=box.bottom()))
+                throw reject("NEWS_ALIGN_INCOMPLETE");
+            current=next;
+        }
+        return current;
     }
     @Override public ReadingNewsCycle.CardProof readCard()throws Exception{
         step="IDENTIFY_CARD";
         lastLocated=null;
         var current=readFrame(null);
         expectPage(current,NewsFeedModel.Page.FEED);
+        if(current.frame().alignment()){
+            if(!listConfirmed || readingSource==null)throw reject("NEWS_FEED_NOT_ENTERED");
+            readingSource.confirmList(current.source());
+            step="ALIGN_CARD";
+            current=alignCard(current,anchorY,shape,(before,target)->{
+                swipe(before,target);
+                pause(450);
+                return readFrame(null);
+            });
+            step="IDENTIFY_CARD";
+        }
         var model=current.frame();
         if(model.card()==null){
             if(model.atEnd())return new ReadingNewsCycle.CardProof(ReadingNewsCycle.Kind.END,"","",true);
@@ -578,8 +626,9 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
     @Override public ReadingNewsCycle.Page pageAfterWait(ReadingNewsCycle.CardProof card)throws Exception{
         if(!articleDue(card))throw reject("NEWS_ARTICLE_EARLY");
         step="ARTICLE_SOURCE";
-        return switch(readFrame(opened).frame().page()){
-            case ARTICLE -> ReadingNewsCycle.Page.ARTICLE;
+        var destination=readFrame(opened);
+        return switch(destination.frame().page()){
+            case ARTICLE -> {readingSource.confirmArticle(destination.source());yield ReadingNewsCycle.Page.ARTICLE;}
             case FEED -> ReadingNewsCycle.Page.FEED;
             case BLOCKED -> ReadingNewsCycle.Page.BLOCKED;
             default -> ReadingNewsCycle.Page.UNKNOWN;
@@ -593,13 +642,16 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
         if(!articleDue(card))throw reject("NEWS_BACK_EARLY");
         step="RETURN_ARTICLE";
         var article=readFrame(opened); expectPage(article,NewsFeedModel.Page.ARTICLE);
+        readingSource.confirmArticle(article.source());
         var target=new ReviewShizukuBackActor.BackTarget(shape.width(),shape.height(),shape.rotation());
         var grant=new Input(target,article,gate,null); backs++;
         var result=ReviewShizukuBackActor.newsBack(context,grant,target);
         if(result.invocationAttempted())backInvoked++;
         if(result.kind()==ReviewShizukuBackActor.Kind.DISPATCH_UNKNOWN)uncertain=true;
         if(!result.commandExitZero()||!knownClean())throw reject("NEWS_BACK_"+result.reason().name());
-        backSuccess++; tapReturned=-1; pause(350);
+        backSuccess++; tapReturned=-1;
+        readingSource.backSucceeded(article.source(),now());
+        pause(NAVIGATION_SETTLE_MS);
     }
     @Override public void advance(ReadingNewsCycle.CardProof card)throws Exception{
         if(!listConfirmed || !Objects.equals(card,lastProof))throw reject("NEWS_SCROLL_CARD");

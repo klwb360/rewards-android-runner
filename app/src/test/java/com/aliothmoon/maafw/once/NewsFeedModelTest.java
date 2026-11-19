@@ -47,7 +47,7 @@ public class NewsFeedModelTest {
     }
     @Test public void searchBarHeaderOrOccludedSecondCardCannotBecomeInput(){
         var nodes=list(false);
-        assertNull(NewsFeedModel.inspect(nodes,1000,2000,1600,null).card());
+        assertAlignment(NewsFeedModel.inspect(nodes,1000,2000,1600,null),"FEED_ALIGN_UP");
         var onlyOne=new ArrayList<>(nodes);onlyOne.removeIf(v->v.index()>=17);
         assertEquals(NewsFeedModel.Page.UNKNOWN,NewsFeedModel.inspect(onlyOne,1000,2000,-1,null).page());
         nodes.removeIf(v->v.index()==2);
@@ -76,7 +76,7 @@ public class NewsFeedModelTest {
             assertEquals(b(0,31,1000,1840),f.viewport());assertEquals(b(50,430,950,1250),f.card().box());
             assertEquals(930,f.stride());
         }
-        assertNull(NewsFeedModel.inspect(nodes,1000,2000,1500,null).card());
+        assertAlignment(NewsFeedModel.inspect(nodes,1000,2000,1500,null),"FEED_ALIGN_UP");
     }
     @Test public void missingHeaderNeedsOneCollapsedEdgeAndTheNativeBingContainerBranches(){
         var missing=collapsedList();missing.removeIf(n->n.index()==41);
@@ -98,6 +98,42 @@ public class NewsFeedModelTest {
         rows.add(hiddenChrome(44,b(480,0,520,31)));
         rows.add(hiddenChrome(47,b(0,0,1000,230)));
         return rows;
+    }
+    private static void assertAlignment(NewsFeedModel.Frame f,String reason){
+        assertEquals(NewsFeedModel.Page.FEED,f.page());assertEquals(reason,f.reason());assertTrue(f.alignment());
+        assertEquals(NewsFeedModel.Kind.UNKNOWN,f.card().kind());assertNull(f.card().source());
+        assertTrue(f.card().key().isEmpty());assertFalse(f.atEnd());
+        assertTrue(f.stride()>=ReviewShizukuSwipeActor.MIN_DISTANCE);
+    }
+    private static List<Node> twoRows(int previousBottom,int top,int bottom){
+        var rows=nativeCollapsedList();rows.removeIf(n->n.index()>=5&&n.index()<40);
+        rows.add(n(5,4,b(50,0,950,previousBottom),null,null,false));item(rows,10,5,0,previousBottom,false);
+        rows.add(n(17,4,b(50,top,950,bottom),null,null,false));item(rows,21,17,top,bottom,true);
+        return rows;
+    }
+    @Test public void clippedRowOnlyRecommendsACorrectionThenFreshCompleteRowBecomesACandidate(){
+        var before=twoRows(830,885,1860);
+        assertEquals("NO_COMPLETE_ANCHORED_CARD",NewsFeedModel.inspect(before,1000,2000,-1,null).reason());
+        var up=NewsFeedModel.inspect(before,1000,2000,1150,null);
+        assertAlignment(up,"FEED_ALIGN_UP");assertEquals(222,up.stride());
+        assertEquals(b(50,885,950,1860),up.card().box());
+        var after=NewsFeedModel.inspect(twoRows(604,659,1634),1000,2000,1150,null);
+        assertFalse(after.alignment());assertEquals("FEED_CANDIDATE",after.reason());assertNotNull(after.card().source());
+        var down=NewsFeedModel.inspect(before,1000,2000,700,null);
+        assertAlignment(down,"FEED_ALIGN_DOWN");assertEquals(285,down.stride());
+        var fullNext=NewsFeedModel.inspect(twoRows(830,885,1800),1000,2000,700,null);
+        assertAlignment(fullNext,"FEED_ALIGN_UP");assertEquals(b(50,885,950,1800),fullNext.card().box());
+    }
+    @Test public void aGapOnlyAlignsTowardItsUniqueNearestCompleteRow(){
+        var rows=nativeCollapsedList();rows.removeIf(n->n.index()>=5&&n.index()<40);
+        rows.add(n(5,4,b(50,260,950,990),null,null,false));item(rows,10,5,260,990,true);
+        rows.add(n(17,4,b(50,1041,950,1771),null,null,false));item(rows,21,17,1041,1771,true);
+        assertAlignment(NewsFeedModel.inspect(rows,1000,2000,1000,null),"FEED_ALIGN_DOWN");
+        assertEquals("NO_COMPLETE_ANCHORED_CARD",NewsFeedModel.inspect(rows,1000,2000,1015,null).reason());
+        var nearest=NewsFeedModel.inspect(rows,1000,2000,1030,null);
+        assertAlignment(nearest,"FEED_ALIGN_UP");assertEquals(b(50,1041,950,1771),nearest.card().box());
+        for(int outside:List.of(0,1840,1930))
+            assertEquals("NO_COMPLETE_ANCHORED_CARD",NewsFeedModel.inspect(rows,1000,2000,outside,null).reason());
     }
     @Test public void hiddenNativeToolbarBoundsOnlyTheChromeAndNeverAuthorizesAnInvisibleCard(){
         var rows=nativeCollapsedList();

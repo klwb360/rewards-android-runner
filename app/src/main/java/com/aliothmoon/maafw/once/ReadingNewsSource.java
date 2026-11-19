@@ -12,7 +12,10 @@ final class ReadingNewsSource {
     private final Ready rewards;
     private Predecessor predecessor;
     private Ready listWindow;
-    private Ready checkedViewer;
+    private Ready latestSource;
+    private Ready confirmedArticle;
+    private long backAt=-1;
+    static final long RETURN_WAIT_MS=10_000;
     private boolean entryTapped, articleTapped;
     private static final String TOKEN="[a-fA-F0-9]+";
     private static final String PKG="com.microsoft.bing";
@@ -31,17 +34,34 @@ final class ReadingNewsSource {
     void confirmList(Ready ready){
         if(!entryTapped || ready==null || ready.kind()!=Kind.MAIN || predecessor==null
                 ||!rewards.sameTask(ready) ||!ready.diagnosticActivityMatches(predecessor.activity(),MAIN,rewards.task())
+                ||latestSource==null||!latestSource.sameLiveWindow(ready)
                 ||listWindow!=null&&!listWindow.sameLiveWindow(ready))throw new SecurityException("NEWS_LIST_ANCHOR");
-        listWindow=ready;articleTapped=false;
+        listWindow=ready;articleTapped=false;confirmedArticle=null;backAt=-1;
     }
     void articleSucceeded(){
         if(listWindow==null||articleTapped)throw new SecurityException("NEWS_ARTICLE_ANCHOR");
         articleTapped=true;
     }
-    boolean isCheckedViewer(Ready ready){return articleTapped && ready!=null && ready==checkedViewer;}
+    boolean isCheckedViewer(Ready ready){return articleTapped && ready!=null && ready==latestSource && ready.kind()!=Kind.MAIN;}
+    void confirmArticle(Ready ready){
+        if(!articleTapped || backAt>=0 || ready==null || listWindow==null || !listWindow.sameTask(ready)
+                || latestSource==null || !latestSource.sameLiveWindow(ready)
+                || confirmedArticle!=null && !confirmedArticle.sameLiveWindow(ready))throw new SecurityException("NEWS_ARTICLE_WINDOW_CHANGED");
+        confirmedArticle=ready;
+    }
+    void backSucceeded(Ready article,long now){
+        if(confirmedArticle==null || !confirmedArticle.sameLiveWindow(article) || latestSource==null
+                || !latestSource.sameLiveWindow(article) || backAt>=0 || now<0)
+            throw new SecurityException("NEWS_ROUTE_BACK_ANCHOR");
+        backAt=now;
+    }
+    private Observation waitAfterBack(Result parsed,long now){
+        if(backAt<0 || now<backAt || now-backAt>=RETURN_WAIT_MS)return hold(parsed,"NEWS_ROUTE_RETURN_WAIT_EXPIRED");
+        return new Observation(parsed,null,true,"NEWS_ROUTE_WAIT_ARTICLE_EXIT");
+    }
 
     Observation inspect(String windows,String activities,Profile profile,ReadOnlyGuard guard,long lower,long observed){
-        checkedViewer=null;
+        latestSource=null;
         var focus=BingForegroundSnapshot.parse(windows);
         boolean browser=focus!=null && BROWSER.equals(focus.component());
         Result parsed=browser?parseRootReadOnly(windows,activities,profile,guard,lower,observed)
@@ -52,6 +72,9 @@ final class ReadingNewsSource {
                 && rewards.diagnosticWindowMatches(focus.window());
         boolean parent = predecessor!=null && MAIN.equals(focus.component()) && predecessor.activity().equals(focus.activity());
         boolean child = articleTapped && listWindow!=null && !original && (browser||TEMPLATE.equals(focus.component()));
+        if(child && confirmedArticle!=null && !(confirmedArticle.diagnosticWindowMatches(focus.window())
+                && confirmedArticle.diagnosticActivityMatches(focus.activity(),focus.component(),focus.task())))
+            return hold(parsed,"NEWS_ROUTE_ARTICLE_SUBSTITUTED");
         if(entryTapped && MAIN.equals(focus.component()) && !parent)return hold(parsed,"NEWS_ROUTE_MAIN_SUBSTITUTED");
         if(!(original&&listWindow==null || parent&&entryTapped || child))return hold(parsed,"NEWS_ROUTE_IDENTITY");
         Stack stack=stack(activities,profile,rewards.task());
@@ -67,7 +90,9 @@ final class ReadingNewsSource {
         } else if(parent) {
             if(listWindow!=null&&!listWindow.diagnosticWindowMatches(focus.window()))return hold(parsed,"NEWS_ROUTE_MAIN_WINDOW_CHANGED");
             if(stack.history().size()==2 && listWindow==null)
-                return departingRewards(parsed,stack,focus,windows,activities,profile,guard);
+                return departing(parsed,stack,focus,windows,activities,profile,guard,rewards,observed);
+            if(stack.history().size()==2 && backAt>=0 && confirmedArticle!=null && confirmedArticle.kind()!=Kind.MAIN)
+                return departing(parsed,stack,focus,windows,activities,profile,guard,confirmedArticle,observed);
             if(stack.history().size()!=1)return hold(parsed,"NEWS_ROUTE_MAIN_HISTORY_COUNT");
             if(!member(stack,0,0,focus.activity(),MAIN,true,profile))return hold(parsed,"NEWS_ROUTE_MAIN_MEMBER");
         } else {
@@ -76,38 +101,45 @@ final class ReadingNewsSource {
                     || !hiddenMain(stack,1,profile) || !hiddenListWindow(windows,profile))
                 return hold(parsed,"NEWS_ROUTE_ARTICLE_STACK");
         }
-        if(parsed.status()==Status.BING_TRANSITION)return new Observation(parsed,null,true,"NEWS_ROUTE_TRANSITION");
+        if(parsed.status()==Status.BING_TRANSITION)return backAt>=0?waitAfterBack(parsed,observed)
+                :new Observation(parsed,null,true,"NEWS_ROUTE_TRANSITION");
         if(parsed.ready()==null || parsed.status()!=Status.READY)
             return hold(parsed,"NEWS_ROUTE_"+parsed.firstGate().name()+"_"+parsed.readOnlyGate().name());
-        if(child)checkedViewer=parsed.ready();
+        if(child && backAt>=0)return waitAfterBack(parsed,observed);
+        latestSource=parsed.ready();
         return new Observation(parsed,parsed.ready(),false,"NEWS_ROUTE_READY");
     }
     private static Observation hold(Result r,String why){return new Observation(r,null,false,why);}
 
-    private Observation departingRewards(Result parsed,Stack stack,BingForegroundSnapshot.Snapshot focus,
-            String windows,String activities,Profile profile,ReadOnlyGuard guard){
+    private Observation departing(Result parsed,Stack stack,BingForegroundSnapshot.Snapshot focus,
+            String windows,String activities,Profile profile,ReadOnlyGuard guard,Ready departing,long observed){
         if(!member(stack,1,0,focus.activity(),MAIN,true,profile))return hold(parsed,"NEWS_ROUTE_MAIN_MEMBER");
+        boolean returning=backAt>=0;
+        String oldComponent=departing.kind()==Kind.BROWSER?BROWSER:TEMPLATE;
         var leaving=stack.history().get(0);
-        String[] id=one(leaving.header(),"^\\* Hist +#1: ActivityRecord\\{("+TOKEN+") u0 "+Pattern.quote(TEMPLATE)
+        String[] id=one(leaving.header(),"^\\* Hist +#1: ActivityRecord\\{("+TOKEN+") u0 "+Pattern.quote(oldComponent)
                 +" t"+Pattern.quote(rewards.task())+"(?:\\}| f\\}\\}?)$",1);
-        if(id==null || !rewards.diagnosticActivityMatches(id[0],TEMPLATE,rewards.task()))
-            return hold(parsed,"NEWS_ROUTE_TEMPLATE_SUBSTITUTED");
-        if(!linked(stack,leaving,false,profile))return hold(parsed,"NEWS_ROUTE_TEMPLATE_MEMBER");
+        if(id==null || !departing.diagnosticActivityMatches(id[0],oldComponent,rewards.task()))
+            return hold(parsed,returning?"NEWS_ROUTE_ARTICLE_SUBSTITUTED":"NEWS_ROUTE_TEMPLATE_SUBSTITUTED");
+        if(!linked(stack,leaving,false,profile))return hold(parsed,returning?"NEWS_ROUTE_ARTICLE_MEMBER":"NEWS_ROUTE_TEMPLATE_MEMBER");
         boolean headers=parsed.status()==Status.UNKNOWN && parsed.firstGate()==FirstGate.ACTIVITY_HEADERS;
-        if(!headers && parsed.status()!=Status.BING_TRANSITION)return hold(parsed,"NEWS_ROUTE_ENTRY_EXIT_"+parsed.firstGate().name());
+        boolean mainReady=returning && parsed.status()==Status.READY && listWindow.sameLiveWindow(parsed.ready());
+        if(!headers && !mainReady && parsed.status()!=Status.BING_TRANSITION)
+            return hold(parsed,(returning?"NEWS_ROUTE_RETURN_EXIT_":"NEWS_ROUTE_ENTRY_EXIT_")+parsed.firstGate().name());
         // Some Android finishing records end in " f}}". Only this exact authenticated departing record
         // may carry that extra brace. An unparseable header elsewhere is independently disqualifying.
-        if(headers && !onlyDepartingHeader(activities,leaving.header()))return hold(parsed,"NEWS_ROUTE_ENTRY_OTHER_HEADER");
+        if(headers && !onlyDepartingHeader(activities,leaving.header()))
+            return hold(parsed,returning?"NEWS_ROUTE_RETURN_OTHER_HEADER":"NEWS_ROUTE_ENTRY_OTHER_HEADER");
         String[] top=one(activities,"^ *topResumedActivity=ActivityRecord\\{("+TOKEN+") u0 ([^\\s}]+) t(\\d+)(?:\\}| f\\}\\}?) *$",3);
         if(top==null || !rewards.task().equals(top[2]) || !(MAIN.equals(top[1]) && focus.activity().equals(top[0])
-                || rewards.diagnosticActivityMatches(top[0],top[1],top[2])))return hold(parsed,"NEWS_ROUTE_EXIT_TOP");
+                || departing.diagnosticActivityMatches(top[0],top[1],top[2])))return hold(parsed,"NEWS_ROUTE_EXIT_TOP");
         String[] state=one(leaving.body(),"(?<![A-Za-z0-9_])state=([A-Z]+)(?![A-Za-z0-9_])",1);
         String[] finishing=one(leaving.body(),"(?<![A-Za-z0-9_])finishing=(true|false)(?![A-Za-z0-9_])",1);
         if(state==null || finishing==null || !state[0].matches("RESUMED|PAUSING|PAUSED|STOPPING|STOPPED|DESTROYING|DESTROYED")
-                || !finishing[0].equals("true") && (headers || !state[0].matches("PAUSING|STOPPING|DESTROYING|DESTROYED")))
+                || !finishing[0].equals("true") && (headers || mainReady || !state[0].matches("PAUSING|STOPPING|DESTROYING|DESTROYED")))
             return hold(parsed,"NEWS_ROUTE_EXIT_LIFECYCLE");
-        if(!exitWindows(windows,focus,id[0],profile,guard))return hold(parsed,"NEWS_ROUTE_EXIT_WINDOWS");
-        return new Observation(parsed,null,true,"NEWS_ROUTE_WAIT_REWARDS_EXIT");
+        if(!exitWindows(windows,focus,id[0],oldComponent,departing,profile,guard))return hold(parsed,"NEWS_ROUTE_EXIT_WINDOWS");
+        return returning?waitAfterBack(parsed,observed):new Observation(parsed,null,true,"NEWS_ROUTE_WAIT_REWARDS_EXIT");
     }
     private static boolean onlyDepartingHeader(String activities,String leaving){
         int ordinary=0,finishing=0;
@@ -120,19 +152,20 @@ final class ReadingNewsSource {
         }
         return finishing==1 && ordinary>0 && ordinary+finishing<=64;
     }
-    private boolean exitWindows(String windows,BingForegroundSnapshot.Snapshot focus,String oldActivity,Profile p,ReadOnlyGuard guard){
-        int main=0,template=0,own=0;
+    private boolean exitWindows(String windows,BingForegroundSnapshot.Snapshot focus,String oldActivity,String oldComponent,
+            Ready departing,Profile p,ReadOnlyGuard guard){
+        int main=0,previous=0,own=0;
         for(var s:sections(windows," *Window #\\d+ Window\\{.*")){
             String[] id=one(s.header(),"^Window #\\d+ Window\\{("+TOKEN+") u\\d+ ([^}\\r\\n]+)\\}:$",2);
             if(id==null)return false;
             var block=new Block(id[0],id[1],null,s.body());
-            if(MAIN.equals(id[1]) || TEMPLATE.equals(id[1])){
+            if(MAIN.equals(id[1]) || oldComponent.equals(id[1])){
                 boolean isMain=MAIN.equals(id[1]);
                 String[] link=one(s.body(),"^ *mActivityRecord=ActivityRecord\\{("+TOKEN+") u0 ([^\\s}]+) t(\\d+)(?:\\}| f\\}\\}?) *$",3);
-                if(!appWindow(block,p,rewards.task(),true) || link==null || !link[1].equals(id[1])
+                if(!appWindow(block,p,rewards.task(),!BROWSER.equals(id[1])) || link==null || !link[1].equals(id[1])
                         || !link[2].equals(rewards.task()) || !(isMain?focus.activity():oldActivity).equals(link[0]))return false;
                 if(isMain){if(!focus.window().equals(id[0]))return false;main++;}
-                else{if(!rewards.diagnosticWindowMatches(id[0]))return false;template++;}
+                else{if(!departing.diagnosticWindowMatches(id[0]))return false;previous++;}
             }else if(guard!=null && id[1].equals(guard.ownComponent())){
                 String pkg=id[1].substring(0,id[1].indexOf('/'));
                 String[] owner=one(s.body(),"^ *mOwnerUid=(\\d+)\\b[^\\r\\n]*\\bpackage=([^\\s]+)\\s+appop=([^\\s]+)[^\\r\\n]*$",3);
@@ -144,7 +177,7 @@ final class ReadingNewsSource {
             }else if(!"StatusBar".equals(id[1]) && !safelyInvisible(block))return false;
         }
         // Earlier strict parsing has already rejected unidentified visible windows and invalid StatusBar owners.
-        return main==1 && template<=1 && own==1;
+        return main==1 && previous<=1 && own==1;
     }
 
     private static Stack stack(String activities,Profile profile,String task){
