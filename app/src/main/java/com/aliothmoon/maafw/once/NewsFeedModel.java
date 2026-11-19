@@ -196,7 +196,35 @@ final class NewsFeedModel {
             // The centered progress indicator extends below the collapsed edge.
             bottom=Math.max(bottom,n.bottom());
         }
-        return fullWidthEdge?bottom:-1;
+        if(fullWidthEdge)return bottom;
+        // Android may retain the complete collapsed toolbar as non-visible semantics. These
+        // siblings bound the excluded chrome only; visible news cards still prove the feed.
+        int thin=Math.max(2,display.height()/48),edgeBottom=-1,indicatorBottom=-1,toolbarBottom=-1;
+        boolean visibleContent=false;
+        for(Node n:tree.nodes){
+            if(n.parentIndex()!=home.index()||n.clickable()||n.top()!=body.top())continue;
+            Box box=bounds(n);
+            if(!positive(box)||!body.contains(box))continue;
+            if(n.visible()){
+                if(box.equals(body))visibleContent=true;
+                continue;
+            }
+            if(box.width()==body.width()){
+                if(box.height()<=thin){
+                    if(edgeBottom>=0)return -1;
+                    edgeBottom=box.bottom();
+                }else if(box.height()<=display.height()/4){
+                    if(toolbarBottom>=0)return -1;
+                    toolbarBottom=box.bottom();
+                }
+            }else if(box.height()<=thin && box.width()>=box.height() && box.width()<=body.width()/12
+                    && Math.abs(box.centerX()-body.centerX())<=1){
+                if(indicatorBottom>=0)return -1;
+                indicatorBottom=box.bottom();
+            }
+        }
+        if(!visibleContent||edgeBottom<0||indicatorBottom<=edgeBottom||toolbarBottom<indicatorBottom)return -1;
+        return Math.max(bottom,indicatorBottom);
     }
 
     private static Card describe(Tree tree,Node owner,Box view){
