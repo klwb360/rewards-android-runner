@@ -153,7 +153,10 @@ final class ReadingNewsSource {
             // A different app or an identifiable interactive system/consent screen ends the visit.
             String name=id[1].toLowerCase(java.util.Locale.ROOT);
             String[] owner=one(section.body(),"^ *mOwnerUid=(\\d+)\\b[^\\r\\n]*\\bpackage=([^\\s]+)\\s+appop=([^\\s]+)[^\\r\\n]*$",3);
-            if(name.contains("/") || name.contains("permission") || name.contains("keyguard") || name.contains("credential")
+            if(id[1].startsWith("Panel:")){
+                if(!attachedArticlePanel(block,owner,focus,profile))return false;
+            }else if(name.contains("/"))return false;
+            if(name.contains("permission") || name.contains("keyguard") || name.contains("credential")
                     || section.body().matches("(?s).*\\bty=(?:SYSTEM_DIALOG|SYSTEM_ERROR|KEYGUARD_DIALOG)\\b.*")
                     || name.contains("signin") || name.contains("captcha") || owner!=null && !(PKG.equals(owner[1])
                     && Integer.toString(profile.bingUid()).equals(owner[0]) || "android".equals(owner[1]) || "com.android.systemui".equals(owner[1])))
@@ -161,6 +164,22 @@ final class ReadingNewsSource {
             covered=true;
         }
         return found&&covered;
+    }
+
+    private static boolean attachedArticlePanel(Block block,String[] owner,BingForegroundSnapshot.Snapshot focus,Profile profile){
+        if(!block.name().equals("Panel:"+focus.component()) || owner==null || !PKG.equals(owner[1])
+                || !Integer.toString(profile.bingUid()).equals(owner[0]) || !"NONE".equals(owner[2]))return false;
+        String body=block.text();
+        String[] display=one(body,"^ *mDisplayId=(\\d+) +rootTaskId=(\\d+)\\b.*$",2);
+        String[] parent=one(body,"^ *mParentWindow=Window\\{("+TOKEN+") u0 ([^\\s}]+)\\} +mLayoutAttached=(true|false) *$",3);
+        String[] activity=one(body,"^ *mActivityRecord=ActivityRecord\\{("+TOKEN+") u0 ([^\\s}]+) t(\\d+)\\} *$",3);
+        String[] type=one(body,"^ *mAttrs=\\{[^\\r\\n]*\\bty=([A-Z_]+)\\b[^\\r\\n]*$",1);
+        String[] flags=one(body,"^ *fl=([A-Z0-9_ ]+) *$",1);
+        return display!=null && "0".equals(display[0]) && focus.task().equals(display[1])
+                && parent!=null && focus.window().equals(parent[0]) && focus.component().equals(parent[1]) && "true".equals(parent[2])
+                && activity!=null && focus.activity().equals(activity[0]) && focus.component().equals(activity[1]) && focus.task().equals(activity[2])
+                && type!=null && "APPLICATION_PANEL".equals(type[0])
+                && flags!=null && List.of(flags[0].trim().split(" +")).contains("NOT_FOCUSABLE");
     }
 
     private Observation departing(Result parsed,Stack stack,BingForegroundSnapshot.Snapshot focus,
