@@ -198,22 +198,38 @@ public class ReadingNewsSourceTest {
         rejectWithoutWaiting(route,w,a.replace(mainActivity(true),mainActivity(true)+activityBlock(BROWSER,"cc",NUM,false)),
                 "NEWS_ROUTE_MAIN_HISTORY_COUNT");
     }
-    @Test public void embeddedMainReturnHasNoForeignViewerExitPrivilege(){
+    @Test public void theSameMainByItselfNeverProvesAnArticleOrAuthorizesBack(){
         var route=enteredList();var main=read(route,mainWindows(),mainActivities()).source();
-        route.confirmArticle(main);route.backSucceeded(main,3000);
-        rejectWithoutWaiting(route,mainWindows(),passiveExit(TEMPLATE,true),"NEWS_ROUTE_MAIN_HISTORY_COUNT");
-        rejectWithoutWaiting(route,viewerWindows(TEMPLATE),viewerActivities(TEMPLATE),"NEWS_ROUTE_ARTICLE_SUBSTITUTED");
+        assertThrows(SecurityException.class,()->route.confirmArticle(main));
+        assertThrows(SecurityException.class,()->route.backSucceeded(main,3000));
         route.confirmList(read(route,mainWindows(),mainActivities()).source());
     }
-    @Test public void viewerNeedsAQualifiedTreeOutsideRewardsAndFeedWithNoBlocker(){
-        var noList=new NewsFeedModel.Frame(NewsFeedModel.Page.UNKNOWN,null,null,false,null,0,false,"NO_FEED_CARDS");
-        var invalid=new NewsFeedModel.Frame(NewsFeedModel.Page.UNKNOWN,null,null,false,null,0,false,"TREE");
-        var blocked=new NewsFeedModel.Frame(NewsFeedModel.Page.BLOCKED,null,null,false,null,0,false,"BLOCKER");
-        var body=java.util.List.of(new NativeUiBoundPointsParser.Node(0,-1,true,true,"viewer","","",0,0,500,700));
-        assertTrue(NewsAndroidPort.viewerContent(noList,body));
-        assertFalse(NewsAndroidPort.viewerContent(noList,java.util.List.of()));
-        assertFalse(NewsAndroidPort.viewerContent(invalid,body));assertFalse(NewsAndroidPort.viewerContent(blocked,body));
-        for(String root:new String[]{"homePageWrapper","compose_home_root"})
-            assertFalse(NewsAndroidPort.viewerContent(noList,java.util.List.of(new NativeUiBoundPointsParser.Node(0,-1,true,true,root,"","",0,0,500,700))));
+    @Test public void anUnfocusedCoverOnlyWaitsThenTheUnaffectedStrictParserMustPass(){
+        for(boolean early:new boolean[]{false,true}){
+            var route=enteredList();String w=viewerWindows(TEMPLATE),a=viewerActivities(TEMPLATE);
+            if(early)route.confirmArticle(read(route,w,a).source());
+            String cover=window("FloatingSurface","f00d",true);
+            var pending=read(route,w+cover,a);
+            assertEquals(FirstGate.VISIBLE_UNKNOWN_WINDOW,pending.parsed().firstGate());
+            assertEquals(ReadingNewsSource.WAIT_ARTICLE_OVERLAY,pending.gate());
+            assertNull(pending.source());assertTrue(pending.waitable());
+            assertThrows(SecurityException.class,()->route.confirmArticle(pending.source()));
+            rejectWithoutWaiting(route,w+cover.replace("FloatingSurface","other.app/.Dialog"),a,null);
+            rejectWithoutWaiting(route,w+cover.replace("ty=BASE_APPLICATION","ty=SYSTEM_DIALOG"),a,null);
+            rejectWithoutWaiting(route,w+cover.replace("package=com.microsoft.bing","package=other.app"),a,null);
+            var clean=read(route,w,a);
+            assertEquals(FirstGate.READY,clean.parsed().firstGate());assertFalse(clean.waitable());
+            route.confirmArticle(clean.source());route.backSucceeded(clean.source(),3050);
+            assertThrows(SecurityException.class,()->route.backSucceeded(clean.source(),3050));
+        }
+    }
+    @Test public void aLateVisibleCoverCannotHideChangedFocusActivityTaskOrMissingList(){
+        var route=enteredList();String w=viewerWindows(TEMPLATE),a=viewerActivities(TEMPLATE);
+        route.confirmArticle(read(route,w,a).source());
+        String cover=window("FloatingSurface","f00d",true);
+        rejectWithoutWaiting(route,w.replace("Window{bbb","Window{bbc")+cover,a,"NEWS_ROUTE_ARTICLE_SUBSTITUTED");
+        rejectWithoutWaiting(route,w+cover,a.replace("ActivityRecord{eee","ActivityRecord{def"),null);
+        rejectWithoutWaiting(route,w+cover,a.replace("Task{abc #"+TASK,"Task{cab #"+TASK),"NEWS_ROUTE_TASK_OBJECT");
+        rejectWithoutWaiting(route,w.replace("Window{baba","Window{abab")+cover,a,"NEWS_ROUTE_ARTICLE_STACK");
     }
 }

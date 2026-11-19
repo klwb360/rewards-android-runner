@@ -8,7 +8,26 @@ import java.util.List;
 final class NewsTreeWire {
     static final int MAX_WIRE = 512 * 1024;
     private static final int MAGIC = 0x4e554931;
+    static final String ARTICLE_ARGUMENT = "READING_ARTICLE_WINDOW_V1";
+    private static final int ARTICLE_MAGIC = 0x4e415731;
     record Tree(NativeUiStructureProtocol.Report source, List<NativeUiBoundPointsParser.Node> nodes) {}
+
+    // A viewer needs the active window and the native blocker check, never its document or labels.
+    static void writeArticle(OutputStream sink,NativeUiStructureProtocol.Report report)throws IOException{
+        var out=new DataOutputStream(sink);
+        out.writeInt(ARTICLE_MAGIC);
+        out.writeUTF(NativeUiStructureProtocol.encode(report));
+        out.flush();
+    }
+    static Tree parseArticle(byte[] bytes,int count,String nonce,long dispatch,long deadline,long now)throws IOException{
+        if(bytes==null || count<1 || count>NativeUiStructureProtocol.MAX_LINE+6 || count>bytes.length)throw invalid();
+        var input=new DataInputStream(new ByteArrayInputStream(bytes,0,count));
+        if(input.readInt()!=ARTICLE_MAGIC)throw invalid();
+        var report=NativeUiStructureProtocol.parse(input.readUTF(),nonce,dispatch,deadline,now);
+        if(input.read()!=-1 || !report.search().equals(NativeUiStructureProtocol.Task.unknown())
+                || !report.reading().equals(NativeUiStructureProtocol.Task.unknown()))throw invalid();
+        return new Tree(report,List.of());
+    }
 
     static void write(OutputStream sink, NativeUiStructureProtocol.Report source,
                       List<NativeUiBoundPointsParser.Node> nodes) throws IOException {

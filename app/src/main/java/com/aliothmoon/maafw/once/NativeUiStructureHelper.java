@@ -28,7 +28,8 @@ public final class NativeUiStructureHelper {
         // Invalid invocation produces no frame, and does not initialize any automation objects.
         long start = SystemClock.elapsedRealtime(), deadline;
         if (args == null || !validReadyArguments(args) || !NativeUiStructureProtocol.validNonce(args[0])) return;
-        boolean readyMode=args.length==3;
+        boolean articleMode=args.length==3&&NewsTreeWire.ARTICLE_ARGUMENT.equals(args[2]);
+        boolean readyMode=args.length==3&&!articleMode;
         boolean newsMode=readyMode&&"READING_NEWS_TREE_V1".equals(args[2]);
         boolean afterMode=readyMode&&"LIVE_REWARDS_AFTER_V1".equals(args[2]);
         boolean liveMode=readyMode&&"LIVE_REWARDS_UI_V1".equals(args[2])||afterMode;
@@ -49,7 +50,7 @@ public final class NativeUiStructureHelper {
         boolean liveReceipt=liveMode||visitMode;
         if(afterMode)readEnd=Math.min(readEnd,LiveUiReadStream.workDeadline(deadline));
         NativeUiReadyDiagnostics.Idle idle=NativeUiReadyDiagnostics.Idle.NOT_REQUESTED;
-        NativeUiReadyDiagnostics.Accumulator diagnostics=readyMode?new NativeUiReadyDiagnostics.Accumulator():null;
+        NativeUiReadyDiagnostics.Accumulator diagnostics=readyMode||articleMode?new NativeUiReadyDiagnostics.Accumulator():null;
         NativeUiFieldDiagnostics.Accumulator fieldDiagnostics=fieldMode?new NativeUiFieldDiagnostics.Accumulator(locatedMode):null;
         NativeUiStructureProtocol.Reason reason = NativeUiStructureProtocol.Reason.TREE_FAILED;
         NativeUiStructureProtocol.Cleanup cleanup = NativeUiStructureProtocol.Cleanup.NOT_STARTED;
@@ -155,31 +156,38 @@ public final class NativeUiStructureHelper {
                         if (nodeBounds.isEmpty() || !bounds.contains(nodeBounds))
                             throw new Stop(NativeUiStructureProtocol.Reason.WINDOW_UNAVAILABLE);
                     }
-                    String text = field(node.getText()), description = field(node.getContentDescription());
-                    if (chars + text.length() + description.length() > 32768)
-                        throw new Stop(NativeUiStructureProtocol.Reason.TREE_OVERFLOW);
-                    chars += text.length() + description.length();
-                    if(readyMode)diagnostics.node(node.getClassName(),text,description);
-                    if(liveMode||visitMode||newsMode)liveGuard.node(node.getClassName(),text,description,visible);
-                    if(fieldMode){Rect originalBounds=new Rect();node.getBoundsInScreen(originalBounds);
-                        fieldDiagnostics.node(current.index(),current.parent(),current.depth(),originalBounds.left,originalBounds.top,originalBounds.right,originalBounds.bottom,visible,node.isEnabled(),node.isClickable(),node.getClassName(),node.getViewIdResourceName(),text,description);
-                    }
-                    if(boundMode){Rect originalBounds=new Rect();node.getBoundsInScreen(originalBounds);
-                        var classRole=liveMode||visitMode||newsMode?liveClassRole(node.getClassName()):NativeUiBoundPointsParser.ClassRole.UNKNOWN;
-                        boolean clickable=(liveMode||visitMode||newsMode)&&node.isClickable()&&(!newsMode||node.isEnabled());
-                        boundRecords.add(new NativeUiBoundPointsParser.Node(current.index(),current.parent(),visible,true,
-                                node.getViewIdResourceName(),text,description,originalBounds.left,originalBounds.top,originalBounds.right,originalBounds.bottom,classRole,clickable));
-                    }
-                    if(overviewMode&&visible&&node.isScrollable()) {
-                        boolean backward=false,forward=false;
-                        for(var action:node.getActionList()) {
-                            backward|=action.getId()==AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD.getId();
-                            forward|=action.getId()==AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD.getId();
+                    if(articleMode){
+                        String text=articleGuardLabel(node.getText()), description=articleGuardLabel(node.getContentDescription());
+                        diagnostics.node(node.getClassName(),text,description);
+                        liveGuard.node(node.getClassName(),text,description,visible);
+                        nodeCount++;
+                    }else{
+                        String text = field(node.getText()), description = field(node.getContentDescription());
+                        if (chars + text.length() + description.length() > 32768)
+                            throw new Stop(NativeUiStructureProtocol.Reason.TREE_OVERFLOW);
+                        chars += text.length() + description.length();
+                        if(readyMode)diagnostics.node(node.getClassName(),text,description);
+                        if(liveMode||visitMode||newsMode)liveGuard.node(node.getClassName(),text,description,visible);
+                        if(fieldMode){Rect originalBounds=new Rect();node.getBoundsInScreen(originalBounds);
+                            fieldDiagnostics.node(current.index(),current.parent(),current.depth(),originalBounds.left,originalBounds.top,originalBounds.right,originalBounds.bottom,visible,node.isEnabled(),node.isClickable(),node.getClassName(),node.getViewIdResourceName(),text,description);
                         }
-                        overviewScroll.add(new OverviewUiParser.ScrollNode(current.index(),backward,forward));
+                        if(boundMode){Rect originalBounds=new Rect();node.getBoundsInScreen(originalBounds);
+                            var classRole=liveMode||visitMode||newsMode?liveClassRole(node.getClassName()):NativeUiBoundPointsParser.ClassRole.UNKNOWN;
+                            boolean clickable=(liveMode||visitMode||newsMode)&&node.isClickable()&&(!newsMode||node.isEnabled());
+                            boundRecords.add(new NativeUiBoundPointsParser.Node(current.index(),current.parent(),visible,true,
+                                    node.getViewIdResourceName(),text,description,originalBounds.left,originalBounds.top,originalBounds.right,originalBounds.bottom,classRole,clickable));
+                        }
+                        if(overviewMode&&visible&&node.isScrollable()) {
+                            boolean backward=false,forward=false;
+                            for(var action:node.getActionList()) {
+                                backward|=action.getId()==AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD.getId();
+                                forward|=action.getId()==AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD.getId();
+                            }
+                            overviewScroll.add(new OverviewUiParser.ScrollNode(current.index(),backward,forward));
+                        }
+                        records.add(new NativeUiStructureParser.Node(current.index(), current.parent(),
+                                visible, true, text, description));
                     }
-                    records.add(new NativeUiStructureParser.Node(current.index(), current.parent(),
-                            visible, true, text, description));
                     int count = node.getChildCount();
                     if (count < 0 || scheduled + count > 512 || count > 0 && current.depth() >= 32)
                         throw new Stop(NativeUiStructureProtocol.Reason.TREE_OVERFLOW);
@@ -194,7 +202,10 @@ public final class NativeUiStructureHelper {
                 }
             }
             checkTime(readEnd);
-            if(!fieldMode){if(!readyMode||!diagnostics.blocked()){
+            if(articleMode){
+                if(liveGuard.challenges>0 || liveGuard.dialogs>0 || diagnostics.blocked())
+                    throw new Stop(NativeUiStructureProtocol.Reason.UI_BLOCKER);
+            }else if(!fieldMode){if(!readyMode||!diagnostics.blocked()){
                 NativeUiStructureParser.Result result;
                 if(overviewMode){
                     if(liveMode||visitMode){var fixed=LiveUiParser.labels(boundRecords);boundRecords.clear();boundRecords.addAll(fixed);}
@@ -238,7 +249,7 @@ public final class NativeUiStructureHelper {
                     liveItems=LiveUiParser.identities(boundRecords,overview,cards);
                 }catch(RuntimeException invalid){reason=NativeUiStructureProtocol.Reason.TREE_FAILED;liveItems=java.util.List.of();}
             }
-            nodeCount = records.size();
+            if(!articleMode)nodeCount = records.size();
             records.clear();
             boundRecords.clear();
             overviewScroll.clear();
@@ -290,7 +301,8 @@ public final class NativeUiStructureHelper {
             NativeUiStructureProtocol.Report report = new NativeUiStructureProtocol.Report(args[0], start,
                     acquired, finished, reason, cleanup, nodeCount, chars, windowId, displayId,
                     bounds.left, bounds.top, bounds.right, bounds.bottom, -1, -1, search, reading,readyMode?diagnostics.result(idle):null,fieldMode?fieldDiagnostics.result():null,boundMode&&!overviewMode,regions);
-            if(newsMode)NewsTreeWire.write(System.out, report, report.qualified()?newsRecords:List.of());
+            if(articleMode)NewsTreeWire.writeArticle(System.out,report);
+            else if(newsMode)NewsTreeWire.write(System.out, report, report.qualified()?newsRecords:List.of());
             else if(visitMode)System.out.println(LiveVisitGuard.encode(new LiveVisitGuard.Report(report,visitHint,liveGuard.webViews,liveGuard.challenges,liveGuard.dialogs)));
             else if(liveMode)System.out.println(LiveUiProtocol.encode(new LiveUiProtocol.Report(new OverviewUiProtocol.Report(report,overview,scrollHint,cards),reason==NativeUiStructureProtocol.Reason.OK?liveItems:java.util.List.of())));
             else if(cardsMode)System.out.println(OverviewUiProtocol.encode(new OverviewUiProtocol.Report(report,overview,scrollHint,cards)));
@@ -299,7 +311,7 @@ public final class NativeUiStructureHelper {
             System.out.flush();
         } catch (Throwable ignored) { /* No raw exception or partial report is published. */ }
     }
-    static boolean validReadyArguments(String[] args){return args!=null&&(args.length==2||args.length==3&&("READY_V49".equals(args[2])||"FORMAT_V50".equals(args[2])||"DIAGNOSTIC_V51".equals(args[2])||"DIAGNOSTIC_LOCATED_V52".equals(args[2])||"BOUND_POINTS_V53".equals(args[2])||"BOUND_REGIONS".equals(args[2])||"OVERVIEW_V5".equals(args[2])||"OVERVIEW_CARDS_V1".equals(args[2])||"LIVE_REWARDS_UI_V1".equals(args[2])||"LIVE_REWARDS_AFTER_V1".equals(args[2])||"LIVE_VISIT_V1".equals(args[2])||"READING_NEWS_TREE_V1".equals(args[2])));}
+    static boolean validReadyArguments(String[] args){return args!=null&&(args.length==2||args.length==3&&("READY_V49".equals(args[2])||"FORMAT_V50".equals(args[2])||"DIAGNOSTIC_V51".equals(args[2])||"DIAGNOSTIC_LOCATED_V52".equals(args[2])||"BOUND_POINTS_V53".equals(args[2])||"BOUND_REGIONS".equals(args[2])||"OVERVIEW_V5".equals(args[2])||"OVERVIEW_CARDS_V1".equals(args[2])||"LIVE_REWARDS_UI_V1".equals(args[2])||"LIVE_REWARDS_AFTER_V1".equals(args[2])||"LIVE_VISIT_V1".equals(args[2])||"READING_NEWS_TREE_V1".equals(args[2])||NewsTreeWire.ARTICLE_ARGUMENT.equals(args[2])));}
     private static boolean packageMatches(CharSequence value) {
         return value != null && value.length() == BING.length() && BING.contentEquals(value);
     }
@@ -307,6 +319,21 @@ public final class NativeUiStructureHelper {
         if(value!=null&&value.length()=="android.widget.TextView".length()&&"android.widget.TextView".contentEquals(value))return NativeUiBoundPointsParser.ClassRole.TEXT;
         if(value!=null&&value.length()=="android.widget.Button".length()&&"android.widget.Button".contentEquals(value))return NativeUiBoundPointsParser.ClassRole.BUTTON;
         return NativeUiBoundPointsParser.ClassRole.UNKNOWN;
+    }
+    /** Only whole, short blocker labels matter in the article viewer. Never copy a paragraph as evidence. */
+    static String articleGuardLabel(CharSequence value){
+        if(value==null)return "";
+        StringBuilder label=new StringBuilder();
+        boolean blank=false;
+        for(int i=0;i<value.length();i++){
+            char c=value.charAt(i);
+            if(c=='\u200B'||c=='\u200C'||c=='\u200D'||c=='\uFEFF')continue;
+            if(Character.isWhitespace(c)||Character.isSpaceChar(c)){blank=label.length()>0;continue;}
+            if(blank){label.append(' ');blank=false;}
+            if(label.length()>=128)return "";
+            label.append(c);
+        }
+        return label.toString();
     }
     private static String field(CharSequence value) throws Stop {
         if (value == null) return "";

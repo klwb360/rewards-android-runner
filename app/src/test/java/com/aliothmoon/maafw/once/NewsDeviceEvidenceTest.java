@@ -137,6 +137,67 @@ public class NewsDeviceEvidenceTest {
                 NativeUiStructureProtocol.Reason.OK,NativeUiStructureProtocol.Cleanup.CONFIRMED,
                 2,chars,3,0,0,0,500,900,-1,-1,unknown,unknown,idle,null,true);
     }
+    @Test public void articleWindowReceiptNeedsNoRenderedDocumentAndCannotAuthorizeAListRead()throws Exception{
+        var unknown=NativeUiStructureProtocol.Task.unknown();
+        var guard=new NativeUiStructureProtocol.Report(NONCE,1100,1150,1200,
+                NativeUiStructureProtocol.Reason.OK,NativeUiStructureProtocol.Cleanup.CONFIRMED,
+                1,0,3,0,0,0,500,900,-1,-1,unknown,unknown);
+        var out=new ByteArrayOutputStream();NewsTreeWire.writeArticle(out,guard);
+        byte[] bytes=out.toByteArray();
+        var parsed=NewsTreeWire.parseArticle(bytes,bytes.length,NONCE,1000,9000,1450);
+        assertEquals(guard,parsed.source());assertTrue(parsed.nodes().isEmpty());
+        assertThrows(IOException.class,()->parse(bytes));
+        byte[] ordinary=wire(List.of(node(0,-1,true,200),node(1,0,true,120)),6);
+        assertThrows(IOException.class,()->NewsTreeWire.parseArticle(ordinary,ordinary.length,NONCE,1000,9000,1450));
+        var before=BingNavigationFixture.result(BingNavigationSnapshot.Kind.TEMPLATE,1000).ready();
+        var after=BingNavigationFixture.result(BingNavigationSnapshot.Kind.TEMPLATE,1250).ready();
+        var other=BingNavigationFixture.result(BingNavigationSnapshot.Kind.BROWSER,1250).ready();
+        assertTrue(NewsAndroidPort.articleBound(guard,before,after,before.profile().shape(),1300));
+        assertFalse(NewsAndroidPort.bound(guard,before,after,before.profile().shape(),1300));
+        assertFalse(NewsAndroidPort.articleBound(source(6),before,after,before.profile().shape(),1300));
+        assertFalse(NewsAndroidPort.articleBound(guard,before,other,before.profile().shape(),1300));
+        assertFalse(NewsAndroidPort.articleBound(guard,before,after,before.profile().shape(),9000));
+        var blocker=new NativeUiStructureProtocol.Report(NONCE,1100,1150,1200,
+                NativeUiStructureProtocol.Reason.UI_BLOCKER,NativeUiStructureProtocol.Cleanup.CONFIRMED,
+                1,0,-1,-1,0,0,0,0,-1,-1,unknown,unknown);
+        assertFalse(NewsAndroidPort.articleBound(blocker,before,after,before.profile().shape(),1300));
+        assertTrue(NativeUiStructureHelper.validReadyArguments(new String[]{NONCE,"9000",NewsTreeWire.ARTICLE_ARGUMENT}));
+    }
+    @Test public void longDocumentFieldsNeverDelayTheViewerOrConcealSeparateChallengeAndLoginLabels(){
+        var guard=new LiveVisitGuard.Accumulator();
+        var ready=new NativeUiReadyDiagnostics.Accumulator();
+        for(CharSequence value:List.of("normal story text ".repeat(4000)," ".repeat(3500)+"验证身份","Sign in")){
+            String label=NativeUiStructureHelper.articleGuardLabel(value);
+            assertTrue(label.length()<=128);
+            guard.node("android.webkit.WebView",label,"",true);
+            ready.node("android.webkit.WebView",label,"");
+        }
+        assertEquals("",NativeUiStructureHelper.articleGuardLabel("a".repeat(40000)));
+        assertEquals(1,guard.challenges);assertTrue(ready.blocked());
+    }
+    @Test public void sampledArticleMatchesOnlyTheSameOsAndAccessibilityWindow(){
+        var article=new NewsFeedModel.Frame(NewsFeedModel.Page.ARTICLE,null,null,false,null,0,false,"BOUND_ARTICLE_VIEWER");
+        var early=snapshot(article,3);
+        var bound=NewsAndroidPort.ArticleWindow.from(early);
+        assertTrue(bound.matches(snapshot(article,3)));assertFalse(bound.matches(snapshot(article,4)));
+        var other=new NewsAndroidPort.Snapshot(article,BingNavigationFixture.result(BingNavigationSnapshot.Kind.BROWSER,1000).ready(),3,1000);
+        assertFalse(bound.matches(other));
+        var returned=alignmentFrame(235,765,"FEED_CANDIDATE",550);
+        assertFalse(bound.matches(returned));assertThrows(SecurityException.class,()->NewsAndroidPort.ArticleWindow.from(returned));
+    }
+    @Test public void transientCoverOnlyRereadsAndNeverRetriesOtherFailures()throws Exception{
+        int[] reads={0};long[] now={0};
+        int value=NewsAndroidPort.awaitClearArticle(()->{if(++reads[0]==1)throw new NewsAndroidPort.ArticleCovered();return 7;},
+                millis->now[0]+=millis,()->now[0]);
+        assertEquals(7,value);assertEquals(2,reads[0]);assertEquals(500,now[0]);
+        reads[0]=0;
+        assertThrows(SecurityException.class,()->NewsAndroidPort.awaitClearArticle(()->{
+            reads[0]++;throw new NewsAndroidPort.ArticleCovered();},millis->now[0]+=millis,()->now[0]));
+        assertEquals(6,reads[0]);reads[0]=0;
+        assertThrows(SecurityException.class,()->NewsAndroidPort.awaitClearArticle(()->{
+            reads[0]++;throw new SecurityException("NEWS_TREE_UI_BLOCKER");},millis->fail("Unexpected wait"),()->now[0]));
+        assertEquals(1,reads[0]);
+    }
     private static NativeUiBoundPointsParser.Node node(int index,int parent,boolean own,int right) {
         return new NativeUiBoundPointsParser.Node(index,parent,true,own,"card","abc","",6,9,right,41,
                 NativeUiBoundPointsParser.ClassRole.TEXT,index!=0);
