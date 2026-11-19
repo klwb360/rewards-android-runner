@@ -87,6 +87,50 @@ public class NewsFeedModelTest {
         wrongFooter.replaceAll(node->node.index()==3?n(3,40,b(0,1840,1000,2000),"com.microsoft.bing:id/sa_main_footer",null,false):node);
         assertEquals(NewsFeedModel.Page.UNKNOWN,NewsFeedModel.inspect(wrongFooter,1000,2000,1180,null).page());
     }
+    private static Node hiddenChrome(int id,Box box){
+        return new Node(id,1,false,true,"","","",box.left(),box.top(),box.right(),box.bottom(),
+                NativeUiBoundPointsParser.ClassRole.UNKNOWN,false);
+    }
+    private static List<Node> nativeCollapsedList(){
+        var rows=collapsedList();
+        rows.removeIf(n->n.index()==41||n.index()==44);
+        rows.add(hiddenChrome(41,b(0,0,1000,12)));
+        rows.add(hiddenChrome(44,b(480,0,520,31)));
+        rows.add(hiddenChrome(47,b(0,0,1000,230)));
+        return rows;
+    }
+    @Test public void hiddenNativeToolbarBoundsOnlyTheChromeAndNeverAuthorizesAnInvisibleCard(){
+        var rows=nativeCollapsedList();
+        for(int anchor:List.of(-1,1180)){
+            var frame=NewsFeedModel.inspect(rows,1000,2000,anchor,null);
+            assertEquals("FEED_CANDIDATE",frame.reason());assertEquals(31,frame.viewport().top());
+            assertEquals(b(50,430,950,1250),frame.card().box());assertEquals(930,frame.stride());
+        }
+        for(int missing:List.of(41,44,47)){
+            var incomplete=new ArrayList<>(rows);incomplete.removeIf(n->n.index()==missing);
+            assertEquals("NO_FEED_CARDS",NewsFeedModel.inspect(incomplete,1000,2000,1180,null).reason());
+        }
+        var noSurface=new ArrayList<>(rows);
+        noSurface.replaceAll(v->v.index()==4?n(4,1,b(0,180,1000,1840),null,null,false):v);
+        assertEquals("NO_FEED_CARDS",NewsFeedModel.inspect(noSurface,1000,2000,1180,null).reason());
+        var ambiguous=new ArrayList<>(rows);ambiguous.add(hiddenChrome(48,b(0,0,1000,14)));
+        assertEquals("NO_FEED_CARDS",NewsFeedModel.inspect(ambiguous,1000,2000,1180,null).reason());
+        rows.replaceAll(v->v.index()==10?new Node(10,v.parentIndex(),false,true,"","","",50,430,950,1250,
+                NativeUiBoundPointsParser.ClassRole.UNKNOWN,true):v);
+        assertNull(NewsFeedModel.inspect(rows,1000,2000,1180,null).card());
+    }
+    @Test public void hiddenChromePreservesEachCompleteSlotAndSkipsOnlyTheCoveredPhoto(){
+        var rows=nativeCollapsedList();rows.removeIf(n->n.index()>=5&&n.index()<40);
+        rows.add(n(5,4,b(50,260,950,990),null,null,false));item(rows,10,5,260,990,true);
+        rows.add(n(17,4,b(50,1040,950,1770),null,null,false));item(rows,21,17,1040,1770,true);
+        for(boolean covered:List.of(false,true)){
+            if(covered)rows.add(n(65,5,b(420,480,580,570),null,null,true));
+            var first=NewsFeedModel.inspect(rows,1000,2000,600,null);
+            assertEquals(covered?"FEED_OCCLUDED":"FEED_CANDIDATE",first.reason());
+            var next=NewsFeedModel.inspect(rows,1000,2000,600+first.stride(),null);
+            assertEquals("FEED_CANDIDATE",next.reason());assertEquals(b(50,1040,950,1770),next.card().box());
+        }
+    }
     @Test public void nestedAdvertisingControlsDoNotReplaceTheCardsImageOrBadgeSlot(){
         var nodes=collapsedList();
         nodes.add(n(45,10,b(100,930,222,1060),null,null,true));
