@@ -198,6 +198,18 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
     }
     static MaaRecognizer liveCheckIn(Context context){MaaRecognizer r=new MaaRecognizer(context);r.liveCheckin=true;return r;}
     synchronized String liveCheckInSummary(OnceBackend.Owner expected){return expected==owner && observation()!=null?liveSummary:null;}
+    private NewsCardOcrPlan newsPlan;
+    private NewsCardOcrPlan.Evidence newsEvidence;
+
+    static MaaRecognizer newsCard(Context context,NewsCardOcrPlan plan) {
+        if(plan==null||!plan.claim())throw new IllegalArgumentException("Fresh local news crop required");
+        var recognizer=new MaaRecognizer(context);
+        recognizer.newsPlan=plan;
+        return recognizer;
+    }
+    synchronized NewsCardOcrPlan.Evidence newsEvidence(OnceBackend.Owner expected) {
+        return expected!=null && owner==expected && returned && !uncertain && observation()!=null?newsEvidence:null;
+    }
     private RemainingCardPlan.Plan remainingCardPlan;
     private RemainingCardPlan.Outcome remainingCardResult;
     private RemainingCardRoiDiagnostic remainingCardDiagnostics;
@@ -346,6 +358,12 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             frameWidth=frame.width();frameHeight=frame.height();perception.frame(frameWidth,frameHeight);
             if (materialKind != null || liveCheckin) materialFrame = frame;
             structureBinding=new FrameStructureEvidence.Binding(this,own,structureEpoch,structureFrame);
+            if(newsPlan!=null){
+                readNewsRegions(frame,stop);
+                provisional=RewardsObservation.classify(false,false,false,false);
+                checkStop(stop);recognized=true;
+                return new BackendPorts.Recognition(own,newsEvidence!=null && newsEvidence.kind()!=NewsFeedModel.Kind.UNKNOWN);
+            }
             if(remainingCardPlan!=null){
                 refineRemainingCardMock(frame,stop);
                 provisional=RewardsObservation.classify(false,false,false,false);
@@ -582,6 +600,27 @@ final class MaaRecognizer implements BackendPorts.Recognizer, CleanupEvidence.Pr
             }
             liveSummary=LiveCheckInObservation.observe(gray,frameWidth,frameHeight,rows,observationStop::requested);
         } finally {Arrays.fill(gray,(byte)0);}
+    }
+    private void readNewsRegions(BackendPorts.FrameView frame, BackendPorts.StopSignal stop)throws Exception{
+        byte[] gray=new byte[frameWidth*frameHeight];
+        var batches=new java.util.ArrayList<java.util.List<FrameStructureEvidence.Line>>();
+        try{
+            for(int at=0;at<gray.length;at+=4096){
+                checkStop(stop);frame.copyGrayRange(at,gray,at,Math.min(gray.length-at,4096));
+            }
+            need(newsPlan.sameFrame(gray,frameWidth,frameHeight));
+            for(var roi:newsPlan.rois()){
+                checkStop(stop);
+                taskQuiet=false;waiting(CleanupEvidence.Item.TASKER_RUNNING_FALSE);lastTaskStatus=0;
+                String params="{\"expected\":[\".+\"],\"threshold\":0.3,\"only_rec\":false,\"roi\":["
+                        +roi.left()+","+roi.top()+","+roi.width()+","+roi.height()+"]}";
+                taskId=api.MaaTaskerPostRecognition(tasker,"OCR",params,image);need(taskId>0);stage=Stage.TASK_POSTED;
+                int status=awaitTask(stop);checkStop(stop);roiRows=null;readingLabelRoi=true;
+                try{detail(status,true);}finally{readingLabelRoi=false;}
+                batches.add(roiRows);roiRows=null;
+            }
+            newsEvidence=newsPlan.finish(batches);checkStop(stop);
+        }finally{Arrays.fill(gray,(byte)0);batches.clear();roiRows=null;readingLabelRoi=false;newsPlan=null;}
     }
     private void refineRemainingCardMock(BackendPorts.FrameView frame,BackendPorts.StopSignal stop)throws Exception{
         checkStop(stop);need(remainingCardPlan!=null&&remainingCardPlan.admitted());

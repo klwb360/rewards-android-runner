@@ -243,14 +243,14 @@ final class AndroidLiveUiReader {
         return !Thread.currentThread().isInterrupted() && SystemClock.elapsedRealtime() < deadline
                 && current.getAsBoolean();
     }
-    private static boolean authority(Context context) {
+    static boolean authority(Context context) {
         return knownClean() && AndroidUiStructureReader.processKnownClean() && Looper.myLooper()!=Looper.getMainLooper() && android.os.Process.myUid()>=10000
                 && PACKAGE.equals(context.getPackageName()) && (PACKAGE+":capture_once").equals(Application.getProcessName())
                 && Shizuku.pingBinder() && !Shizuku.isPreV11() && Shizuku.getUid()==0
                 && Shizuku.checkSelfPermission()==PackageManager.PERMISSION_GRANTED;
     }
     @SuppressWarnings("deprecation")
-    private static String verifiedApk(Context context) throws Exception {
+    static String verifiedApk(Context context) throws Exception {
         PackageManager pm = context.getPackageManager();
         PackageInfo own = pm.getPackageInfo(PACKAGE, PackageManager.GET_SIGNATURES);
         if (own == null || !PACKAGE.equals(own.packageName) || own.applicationInfo == null

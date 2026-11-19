@@ -158,7 +158,7 @@ final class AndroidCardRegionCapture {
     }
     /** Independent live-run crop authority; legacy reveal scope is not borrowed. */
     static Result capture(Context context,String nonce,long absoluteDeadline,Box roi,
-            int fullWidth,int fullHeight,int rotation,LiveRunAuthority.CropPermit permit,
+            int fullWidth,int fullHeight,int rotation,OwnedCardCropPermit permit,
             BooleanSupplier current,Gate gate){
         byte[] bytes=null;IRemoteProcess process=null;
         ParcelFileDescriptor stdout=null,stdin=null,stderr=null;
@@ -169,7 +169,7 @@ final class AndroidCardRegionCapture {
         FixedStatus status=FixedStatus.AUTHORITY_REJECTED;
         long started=SystemClock.elapsedRealtime();
         var window=LiveCropStream.window(started,permit==null?absoluteDeadline:Math.min(absoluteDeadline,permit.deadline()),
-                permit!=null && permit.phase()!=LiveRewardsTypes.Phase.BEFORE);
+                permit!=null && permit.afterWindow());
         long deadline=window.captureDeadline();
         try{
             if(context==null||current==null||gate==null||permit==null||!permit.live()
@@ -274,7 +274,7 @@ final class AndroidCardRegionCapture {
     private static String descriptorState(boolean adopted,boolean closed){
         return !adopted?"NO_HANDLE":closed?"CLOSED":"UNCONFIRMED";
     }
-    private static long checkDispatch(LiveCropStream.Window window,LiveRunAuthority.CropPermit permit,
+    private static long checkDispatch(LiveCropStream.Window window,OwnedCardCropPermit permit,
             BooleanSupplier current,boolean authorityReady)throws Stop {
         boolean ownerCurrent=current.getAsBoolean();
         long now=SystemClock.elapsedRealtime();
@@ -283,7 +283,7 @@ final class AndroidCardRegionCapture {
         if(stop!=null)throw new Stop(stop);
         return now;
     }
-    private static void requireLiveGate(Gate gate,LiveCropStream.Window window,LiveRunAuthority.CropPermit permit,
+    private static void requireLiveGate(Gate gate,LiveCropStream.Window window,OwnedCardCropPermit permit,
             BooleanSupplier current,BooleanSupplier authorityReady)throws Stop {
         try{requireGate(gate);}
         catch(InsufficientBudget expired){
@@ -313,7 +313,7 @@ final class AndroidCardRegionCapture {
         long now=SystemClock.elapsedRealtime();return !Thread.currentThread().isInterrupted()
                 &&now<deadline&&permit.current(now)&&current.getAsBoolean();
     }
-    private static boolean live(LiveRunAuthority.CropPermit permit,BooleanSupplier current,long deadline){
+    private static boolean live(OwnedCardCropPermit permit,BooleanSupplier current,long deadline){
         long now=SystemClock.elapsedRealtime();return permit!=null&&!Thread.currentThread().isInterrupted()
                 &&now<deadline&&permit.live()&&permit.current(now)&&current.getAsBoolean();
     }

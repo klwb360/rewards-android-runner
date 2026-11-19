@@ -330,7 +330,7 @@ final class LiveRunAuthority {
         ReviewShizukuSwipeActor.Direction direction(){return direction;}long deadline(){return deadline;}
         int index(){return index;}CardScope scope(){return scope;}
     }
-    static final class CropPermit {
+    static final class CropPermit extends OwnedCardCropPermit {
         private final CardScope scope;private final UiPermit ui;private final LiveRewardsTypes.Phase phase;
         private final long issued,deadline;private boolean consumed,burned,dispatchAttempted,dispatched,finished,discarded,requestBound;
         private com.aliothmoon.maafw.rewards.RewardRegionLocator.Box roi;
@@ -360,6 +360,7 @@ final class LiveRunAuthority {
             boolean accepted=first&&burned&&!finished&&current(now);if(accepted)dispatched=true;return accepted;}
         synchronized boolean dispatchValid(long now){return dispatched&&burned&&!finished&&current(now);}
         long deadline(){return deadline;}LiveRewardsTypes.Phase phase(){return phase;}CardScope scope(){return scope;}
+        boolean afterWindow(){return phase!=LiveRewardsTypes.Phase.BEFORE;}
         UiPermit ui(){return ui;}Object owner(){return scope.owner;}
     }
 }

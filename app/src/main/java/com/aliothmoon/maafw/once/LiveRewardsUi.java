@@ -15,6 +15,11 @@ final class LiveRewardsUi {
     static final String RUN_READ_ONLY="确认开始只读预检（不点击任务）";
     static final String OPEN_MORE_RECHECK="打开更多活动二次复查（只读）";
     static final String RUN_MORE_RECHECK="确认只读验证更多活动复查";
+    static final String OPEN_NEWS_PREFLIGHT="阅读入口只读定位（不点击任务）";
+    static final String RUN_NEWS_PREFLIGHT="确认只读定位阅读入口";
+    static final String OPEN_NEWS_LIVE="打开阅读新闻试验（尚不执行）";
+    static final String RUN_NEWS_LIVE="确认阅读试验（先2篇，最多13篇）";
+    private static final ReadingNewsChoice newsChoice = new ReadingNewsChoice();
     static final String OPEN_SINGLE_TASK="打开一次任务试点（尚不执行）";
     static final String RUN_SINGLE_TASK="确认只点击一个任务";
     static final String OPEN_MORE_PAIR="限定更多活动的两张卡片";
@@ -26,6 +31,9 @@ final class LiveRewardsUi {
 
     static LiveRewardsTaskSelection takeSelection(Activity activity) { return visibleChoice.take(activity); }
     static boolean takeMoreUiRecheck(Activity activity) { return recheckChoice.take(activity); }
+    static ReadingNewsChoice.Mode takeNewsMode(Activity activity,boolean live,boolean limited) {
+        return newsChoice.take(activity,live,limited);
+    }
     private static LinearLayout page(Activity a,String text){
         ScrollView scroll=new ScrollView(a);LinearLayout box=new LinearLayout(a);
         box.setOrientation(LinearLayout.VERTICAL);box.setPadding(24,24,24,24);
@@ -37,6 +45,9 @@ final class LiveRewardsUi {
         b.setOnClickListener(v->{if(b.isEnabled()){b.setEnabled(false);action.run();}});box.addView(b);
     }
     static void choice(Activity a,boolean ready,Runnable run,Runnable close){
+        if(a.getWindow().getDecorView().findViewWithTag(ReadingNewsChoice.Mode.LIVE)!=null){
+            newsPage(a,ready,run,close,ReadingNewsChoice.Mode.LIVE);return;
+        }
         var tagged=a.getWindow().getDecorView().findViewWithTag(PAIR_FIELD);
         if(tagged instanceof EditText editing){
             morePairChoice(a,ready,run,close,editing.getText().toString());
@@ -52,6 +63,7 @@ final class LiveRewardsUi {
                 +"点击和进度变化都不证明账户积分已到账。来源、输入或清理不明时停止。");
         button(a,box,RUN,ready,()->visibleChoice.confirm(a,LiveRewardsTaskSelection.ALL,run));
         button(a,box,OPEN_MORE_PAIR,ready,()->morePairChoice(a,ready,run,close,""));
+        button(a,box,OPEN_NEWS_LIVE,ready,()->newsPage(a,ready,run,close,ReadingNewsChoice.Mode.LIVE));
         button(a,box,"关闭",true,close);
     }
 
@@ -97,6 +109,9 @@ final class LiveRewardsUi {
         button(a,box,"停止并关闭",true,close);
     }
     static void readOnlyChoice(Activity a,boolean ready,Runnable run,Runnable close){
+        if(a.getWindow().getDecorView().findViewWithTag(ReadingNewsChoice.Mode.PREFLIGHT)!=null){
+            newsPage(a,ready,run,close,ReadingNewsChoice.Mode.PREFLIGHT);return;
+        }
         if(a.getWindow().getDecorView().findViewWithTag(RECHECK_PAGE)!=null){
             moreRecheckChoice(a,ready,run,close);
             return;
@@ -108,6 +123,19 @@ final class LiveRewardsUi {
                 +"最长三十分钟；每区最多八张活动卡。预检结果不代表任务完成或积分到账。");
         button(a,box,RUN_READ_ONLY,ready,()->recheckChoice.confirm(a,false,run));
         button(a,box,OPEN_MORE_RECHECK,ready,()->moreRecheckChoice(a,ready,run,close));
+        button(a,box,OPEN_NEWS_PREFLIGHT,ready,()->newsPage(a,ready,run,close,ReadingNewsChoice.Mode.PREFLIGHT));
+        button(a,box,"关闭",true,close);
+    }
+    private static void newsPage(Activity a,boolean ready,Runnable run,Runnable close,ReadingNewsChoice.Mode mode){
+        boolean live=mode==ReadingNewsChoice.Mode.LIVE;
+        LinearLayout box=page(a,live
+                ?"阅读新闻试验\n进入新闻列表后开始。先读两篇，再自动继续，当天最多尝试13篇。每篇停留至少10秒，最多返回一次。广告与已尝试文章跳过。"
+                :"阅读入口只读定位\n在 Rewards 主页滚动至阅读卡片完整露出，核验局部图像并保存标记。");
+        box.setTag(mode);
+        button(a,box,live?RUN_NEWS_LIVE:RUN_NEWS_PREFLIGHT,ready,()->newsChoice.confirm(a,mode,()->{
+            if(live)visibleChoice.confirm(a,LiveRewardsTaskSelection.ALL,run);
+            else recheckChoice.confirm(a,false,run);
+        }));
         button(a,box,"关闭",true,close);
     }
     private static void moreRecheckChoice(Activity a,boolean ready,Runnable run,Runnable close){
