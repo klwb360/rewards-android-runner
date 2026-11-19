@@ -33,9 +33,29 @@ import com.aliothmoon.maafw.R
 
 @Composable
 fun ReadOnlyStatusRoute(model: ReadOnlyStatusViewModel = viewModel()) {
-    val state by model.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val app = context.applicationContext
+    var legacyTools by remember { mutableStateOf(false) }
+    if (!legacyTools && app is com.aliothmoon.maafw.once.ReviewVisibilityApplication
+        && context is ReadOnlyStatusActivity && com.aliothmoon.maafw.once.CaptureReleaseGate.configured()) {
+        Scaffold { insets ->
+            Column(
+                Modifier.fillMaxSize().padding(insets).verticalScroll(rememberScrollState()).padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text("Rewards 自动运行", style = MaterialTheme.typography.titleLarge)
+                Text("在安卓本机运行签入、活动、新闻阅读和搜索。Bing 需要联网。")
+                Text("先从 Bing 主页进入 Rewards，再通过最近任务切回本应用。确认页使用本机已授权的 Shizuku 服务。")
+                MaaButton(onClick = context::preparePageWithoutCapture, modifier = Modifier.fillMaxWidth()) {
+                    Text("打开受控确认页（尚不采集）")
+                }
+                Text("进入后点“打开 Rewards 自动运行”，选择完整流程或单独搜索。")
+                MaaOutlinedButton(onClick = { legacyTools = true }) { Text("查看旧版诊断工具") }
+            }
+        }
+        return
+    }
+    val state by model.uiState.collectAsStateWithLifecycle()
     LaunchedEffect(model) { model.connect(app) }
     ReadOnlyStatusScreen(state, model::toggleDetails, model::startFixture, model::cancelDemo, model::archiveInterrupted, model::terminateWorker, { model.reconnect(app) }, model::selectTask, model::selectScenario, model::preparePlan, model::fakePreview, { (context as? android.app.Activity)?.let { com.aliothmoon.maafw.once.DormantCaptureConfirmationActivity.launch(it) } }, model::fakeMaterial)
 }

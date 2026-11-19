@@ -12,6 +12,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
@@ -142,6 +143,14 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
     }
 
     @Override public long now(){return SystemClock.elapsedRealtime();}
+    BingNavigationSnapshot.Ready searchOrigin(){
+        if(mode!=ReadingNewsChoice.Mode.SEVEN || !Set.of("ENTRY_ALREADY_COMPLETE","SEVEN_LIMIT","DAILY_LIMIT","FEED_END").contains(outcome))
+            throw reject("SEARCH_NEWS_STAGE_INCOMPLETE");
+        var ready=source();
+        if(listConfirmed)readingSource.confirmList(ready);
+        else if(!original.sameSource(ready))throw reject("SEARCH_NEWS_ORIGIN_CHANGED");
+        return ready;
+    }
     @Override public boolean current(){return !Thread.currentThread().isInterrupted() && authority.current() && hidden.getAsBoolean();}
     @Override public boolean knownClean(){
         return !uncertain && ocrClean && navigation.knownClean() && AndroidLiveUiReader.knownClean()

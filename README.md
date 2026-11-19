@@ -1,10 +1,20 @@
 # Android 版 Bing Rewards Runner
 
-在安卓设备上读取 Bing Rewards 页面，识别签入、每日活动和更多活动。程序用界面结构确定区域，用完整卡片的局部图像和设备端 OCR 定位任务，再按当日账本决定是否执行。APK 提供需单独确认的真实流程和独立只读入口。
-
-**后续开发基线为 V54 / PR #34**，版本名 `0.54-native-own-state`。雷电 Android 14（API 34、x86_64）上的两轮独立只读复查均已通过。基线分支保留实测源码；日常开发从包含本文档的 `main` 新建分支。[固定提交 `c8f90a6`](https://github.com/klwb360/rewards-android-runner/commit/c8f90a6e5a365d4c4a3abec8c50a636d04c64c88) · [基线分支](https://github.com/klwb360/rewards-android-runner/tree/baseline/v54-android14-20261118) · [PR #34](https://github.com/klwb360/rewards-android-runner/pull/34)
+V55 在雷电 Android 14（x86_64）本机运行，可从桌面的 **Rewards 助手** 启动。APK 内含界面识别代码和 OCR 模型，日常使用无需连接电脑或另行下载模型。Bing 需要联网并登录账户，设备需已运行 root 模式的 Shizuku，且已为这个 APK 授权。
 
 ## 快速开始
+
+1. 将 V55 APK 复制到雷电，在安卓文件管理器中点开安装。已有本项目的同签名版本可直接覆盖安装，保留已有任务记录。
+2. 打开一次 **Rewards 助手**，再到 Bing 主页打开 Rewards。积分卡加载后，从最近任务切回助手。
+3. 点 **打开受控确认页（尚不采集） → 打开 Rewards 自动运行**。选 **完整流程 · 基础任务、阅读和搜索 → 确认开始完整流程**，或选 **单独运行搜索 → 确认开始字母搜索**。
+4. 完整流程依次执行基础任务、阅读和搜索。基础任务沿用签入、每日活动、更多活动的顺序。阅读采用每天最多七篇的连续入口，跳过广告，每篇停留至少十秒。当天已尝试的任务按本机账本跳过。
+5. 搜索按小写 **a 到 t** 顺序进行，每次只提交一个字母，从成功提交起等待至少五秒，然后返回一次。程序记录已尝试的字母，重新启动也会跳过这些字母。执行次数和返回次数可用于核对流程，账户实际计分以 Bing Rewards 页面为准。
+
+来源、输入结果或清理状态无法确认时，本轮会停止。保留助手数据即可保留当天进度。新流程使用系统窗口信息、设备端界面识别和既有输入桥，截图、账本及诊断留在本机。
+
+## 早期 V54 只读基线
+
+PR #34 保留了最早通过两轮设备只读复查的 V54 源码，版本名为 `0.54-native-own-state`。[基线分支](https://github.com/klwb360/rewards-android-runner/tree/baseline/v54-android14-20261118) · [PR #34](https://github.com/klwb360/rewards-android-runner/pull/34)
 
 ### 已有基线 APK，在雷电中验证只读流程
 
@@ -89,6 +99,6 @@ git switch -c work/my-change
 ### 从哪里跟踪一轮执行
 
 - **更多活动的只读二次复查**从 `LiveMoreUiRecheck` 进入 `LiveRewardsPerception` 的生产读取路径。排查短预算、进程退出或 EOF 时，从 `AndroidLiveUiReader` 和 `LiveUiReadStream` 入手。[只读入口](app/src/main/java/com/aliothmoon/maafw/once/LiveMoreUiRecheck.java) · [界面读取器](app/src/main/java/com/aliothmoon/maafw/once/AndroidLiveUiReader.java)
-- **真实流程**经单独的可见确认后按签入、每日活动、更多活动执行。来源通过后，按区域进度、同卡状态和当日账本跳过已完成或已尝试项。签入在原页复查；活动卡点击成功后静置至少五秒，再返回一次。返回后重新读取并按任务身份匹配，避免列表重排引起重复操作。搜索、阅读和七日进度的点击不在这条流程内。[协调器](app/src/main/java/com/aliothmoon/maafw/once/LiveRewardsCoordinator.java) · [当日账本](app/src/main/java/com/aliothmoon/maafw/once/LiveRewardsLedger.java)
+- **V54 基础任务入口**经单独的可见确认后按签入、每日活动、更多活动执行。来源通过后，按区域进度、同卡状态和当日账本跳过已完成或已尝试项。签入在原页复查；活动卡点击成功后静置至少五秒，再返回一次。返回后重新读取并按任务身份匹配，避免列表重排引起重复操作。搜索、阅读和七日进度的点击不在这条流程内。[协调器](app/src/main/java/com/aliothmoon/maafw/once/LiveRewardsCoordinator.java) · [当日账本](app/src/main/java/com/aliothmoon/maafw/once/LiveRewardsLedger.java)
 
 本项目基于 MaaFwApp，使用 MaaFramework 和 Shizuku。上游通用功能、致谢和资源开发说明单独保留。[MaaFwApp 上游说明](MAAFWAPP.md) · [AGPL-3.0 许可证](LICENSE)
