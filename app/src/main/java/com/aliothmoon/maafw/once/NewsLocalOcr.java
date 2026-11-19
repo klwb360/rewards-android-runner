@@ -10,13 +10,14 @@ import java.util.function.BooleanSupplier;
 
 /** Consumes only the same-frame card PNG supplied by the source-bracketed device port. */
 final class NewsLocalOcr {
-    record Result(NewsFeedModel.Kind kind,String key,int x,int y,String reason,boolean clean) {}
+    record Result(NewsFeedModel.Kind kind,String key,int x,int y,String reason,boolean clean,String entryDiagnostic) {}
     static Result recognize(Context context,byte[] ownedPng,Box cropOnScreen,NewsFeedModel.Frame frame,
                              boolean expanded,BooleanSupplier current) {
         Bitmap bitmap=null;
         int[] argb=null;
         byte[] gray=null;
         OnceBackend backend=null;
+        NewsCardOcrPlan plan=null;
         boolean clean=true;
         NewsCardOcrPlan.Evidence evidence=NewsCardOcrPlan.Evidence.hold("LOCAL_CROP_UNKNOWN");
         try {
@@ -38,7 +39,7 @@ final class NewsLocalOcr {
                 if((i&4095)==0&&!current.getAsBoolean())throw new IllegalStateException();
                 int px=argb[i]; gray[i]=(byte)((77*(px>>16&255)+150*(px>>8&255)+29*(px&255))>>>8);
             }
-            var plan=NewsCardOcrPlan.prepare(frame,cropOnScreen,argb,gray,expanded,current);
+            plan=NewsCardOcrPlan.prepare(frame,cropOnScreen,argb,gray,expanded,current);
             if(plan==null) {
                 evidence=NewsCardOcrPlan.Evidence.hold("BORDER_OR_ROI");
             } else {
@@ -69,7 +70,8 @@ final class NewsLocalOcr {
             }
         }
         if(!clean)evidence=NewsCardOcrPlan.Evidence.hold("OCR_CLEANUP_UNCONFIRMED");
-        return new Result(evidence.kind(),evidence.key(),evidence.x(),evidence.y(),evidence.reason(),clean);
+        return new Result(evidence.kind(),evidence.key(),evidence.x(),evidence.y(),evidence.reason(),clean,
+                plan==null?"":plan.entryDiagnostic());
     }
     private NewsLocalOcr(){}
 }

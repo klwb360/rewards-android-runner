@@ -15,6 +15,8 @@ final class NewsCardOcrPlan {
     private final List<Box> rois;
     private final String imageHash;
     private final BooleanSupplier current;
+    private final boolean expanded;
+    private String entryDiagnostic="";
     private boolean claimed, finished;
 
     record Evidence(NewsFeedModel.Kind kind,String key,int x,int y,String reason) {
@@ -37,7 +39,7 @@ final class NewsCardOcrPlan {
         if(!border(pixels,crop.width(),crop.height(),local))return null;
         List<Box> rois = new ArrayList<>();
         if(entry) {
-            rois.add(new Box(local.left()+1,local.top()+1,local.right()-1,local.bottom()-1));
+            rois.add(ReadingEntryOcr.window(gray,crop.width(),local,expanded));
         } else {
             var candidate=frame.card();
             if(!NewsFeedModel.positive(candidate.source())||!card.contains(candidate.source()))return null;
@@ -62,11 +64,15 @@ final class NewsCardOcrPlan {
                 rois.add(local(tr,crop));
             }
         }
-        return new NewsCardOcrPlan(frame,crop,card,rois,CardNativeMockReceipt.digest(gray),current);
+        return new NewsCardOcrPlan(frame,crop,card,rois,CardNativeMockReceipt.digest(gray),current,expanded);
     }
-    private NewsCardOcrPlan(NewsFeedModel.Frame frame,Box crop,Box card,List<Box>rois,String hash,BooleanSupplier current){
+    private NewsCardOcrPlan(NewsFeedModel.Frame frame,Box crop,Box card,List<Box>rois,String hash,BooleanSupplier current,
+                            boolean expanded){
         this.frame=frame;this.crop=crop;this.card=card;this.rois=List.copyOf(rois);this.imageHash=hash;this.current=current;
+        this.expanded=expanded;
+        if(frame.page()==NewsFeedModel.Page.REWARDS)entryDiagnostic=ReadingEntryOcr.diagnostic(expanded,rois.get(0),null);
     }
+    String entryDiagnostic(){return entryDiagnostic;}
     synchronized boolean claim(){if(claimed||!current.getAsBoolean())return false;claimed=true;return true;}
     List<Box> rois(){return rois;}
     boolean sameFrame(byte[] gray,int w,int h){return claimed&&!finished&&w==crop.width()&&h==crop.height()
@@ -76,23 +82,18 @@ final class NewsCardOcrPlan {
         if(!claimed||finished||!current.getAsBoolean())return Evidence.hold("STALE_CROP");
         finished=true;
         if(batches==null||batches.size()!=rois.size())return Evidence.hold("ROI_COUNT");
+        if(frame.page()==NewsFeedModel.Page.REWARDS){
+            var rows=batches.get(0);
+            Box search=rois.get(0);
+            entryDiagnostic=ReadingEntryOcr.diagnostic(expanded,search,rows);
+            return ReadingEntryOcr.match(rows,search,crop);
+        }
         List<List<FrameStructureEvidence.Line>> valid=new ArrayList<>();
         for(int i=0;i<batches.size();i++) {
             var lines=batches.get(i);
             if(lines==null||lines.isEmpty()||lines.size()>12)return Evidence.hold("ROI_ROWS");
             for(var l:lines)if(!valid(l,rois.get(i)))return Evidence.hold("ROI_SHAPE_OR_CONFIDENCE");
             valid.add(lines);
-        }
-        if(frame.page()==NewsFeedModel.Page.REWARDS){
-            List<FrameStructureEvidence.Line> titles=new ArrayList<>();
-            for(var row:valid.get(0)){
-                String s=compact(row.text());
-                if(s.equals("阅读以赚取")||s.equals("readtoearn"))titles.add(row);
-            }
-            if(titles.size()!=1)return Evidence.hold("ENTRY_TITLE");
-            var title=titles.get(0);
-            return new Evidence(NewsFeedModel.Kind.ENTRY,"",crop.left()+title.x()+title.width()/2,
-                    crop.top()+title.y()+title.height()/2,"VERIFIED_ENTRY");
         }
         NewsFeedModel.Card candidate=frame.card();
         boolean hasLeftMetadata=false;
