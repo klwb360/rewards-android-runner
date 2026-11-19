@@ -132,6 +132,79 @@ public class ReadingNewsSourceTest {
         route.confirmList(read(route,mainWindows(),mainActivities()).source());
         assertNull(read(route,childW,childA).source());
     }
+    private static String viewerWindows(String component){
+        return childWindows(TASK).replace("Window{aaa u0 "+TEMPLATE,"Window{baba u0 "+MAIN)
+                .replace("ActivityRecord{ddd u0 "+TEMPLATE,"ActivityRecord{"+MAIN_RECORD+" u0 "+MAIN)
+                .replace("WindowStateAnimator{abc "+TEMPLATE,"WindowStateAnimator{abc "+MAIN).replace(BROWSER,component);
+    }
+    private static String viewerActivities(String component){
+        return childActivities(TASK).replace(activityBlock(TEMPLATE,"ddd",NUM,false),mainActivity(false)).replace(BROWSER,component);
+    }
+    private static String passiveExit(String component,boolean tagged){
+        return leavingRewards(tagged).replace("ActivityRecord{ddd u0 "+TEMPLATE,"ActivityRecord{eee u0 "+component);
+    }
+    private static String oldViewerWindow(String component,String token){
+        return window(component,token,false).replace("rootTaskId=15","rootTaskId="+TASK)
+                +"    mActivityRecord=ActivityRecord{eee u0 "+component+" t"+TASK+"}\n"
+                +RootReadOnlyAnimationGuardTest.animator(component,true);
+    }
+    private static ReadingNewsSource enteredList(){
+        var route=anchored();route.entrySucceeded();route.confirmList(read(route,mainWindows(),mainActivities()).source());
+        route.articleSucceeded();return route;
+    }
+    @Test public void oneSuccessfulReturnOnlyWaitsForTheBoundArticleToLeaveBeforeAcceptingStableList(){
+        for(String component:new String[]{TEMPLATE,BROWSER}){
+            var route=enteredList();String vw=viewerWindows(component),va=viewerActivities(component);
+            Ready viewer=read(route,vw,va).source();assertNotNull(viewer);
+            assertThrows(SecurityException.class,()->route.backSucceeded(viewer,3000));
+            route.confirmArticle(viewer);
+            rejectWithoutWaiting(route,mainWindows(),passiveExit(component,true),"NEWS_ROUTE_MAIN_HISTORY_COUNT");
+            var beforeBack=read(route,vw,va).source();route.confirmArticle(beforeBack);
+            route.backSucceeded(beforeBack,3000);
+            var stillViewer=read(route,vw,va);
+            assertNull(stillViewer.source());assertTrue(stillViewer.waitable());
+            for(boolean tagged:new boolean[]{true,false}){
+                var waiting=read(route,mainWindows()+oldViewerWindow(component,"bbb"),passiveExit(component,tagged));
+                assertEquals(tagged?FirstGate.ACTIVITY_HEADERS:FirstGate.READY,waiting.parsed().firstGate());
+                assertEquals("NEWS_ROUTE_WAIT_ARTICLE_EXIT",waiting.gate());assertNull(waiting.source());assertTrue(waiting.waitable());
+                assertThrows(SecurityException.class,()->route.confirmArticle(viewer));
+                assertThrows(SecurityException.class,()->route.backSucceeded(viewer,3100));
+            }
+            var expired=route.inspect(mainWindows(),passiveExit(component,true),PROFILE,RootReadOnlyAnimationGuardTest.G,
+                    3000+ReadingNewsSource.RETURN_WAIT_MS,3050+ReadingNewsSource.RETURN_WAIT_MS);
+            assertNull(expired.source());assertFalse(expired.waitable());
+            var stable=read(route,mainWindows(),mainActivities());
+            assertNotNull(stable.source());assertFalse(stable.waitable());route.confirmList(stable.source());
+            rejectWithoutWaiting(route,mainWindows(),passiveExit(component,true),"NEWS_ROUTE_MAIN_HISTORY_COUNT");
+        }
+    }
+    @Test public void returnCannotBorrowAnotherViewerMainTaskOrWindow(){
+        var route=enteredList();String vw=viewerWindows(TEMPLATE),va=viewerActivities(TEMPLATE);
+        var viewer=read(route,vw,va).source();route.confirmArticle(viewer);
+        rejectWithoutWaiting(route,vw.replace("Window{bbb","Window{bcb"),va,"NEWS_ROUTE_ARTICLE_SUBSTITUTED");
+        assertThrows(SecurityException.class,()->route.backSucceeded(viewer,3000));
+        rejectWithoutWaiting(route,viewerWindows(BROWSER),viewerActivities(BROWSER),"NEWS_ROUTE_ARTICLE_SUBSTITUTED");
+        var again=read(route,vw,va).source();route.confirmArticle(again);route.backSucceeded(again,3000);
+        String w=mainWindows(),a=passiveExit(TEMPLATE,true);
+        rejectWithoutWaiting(route,w,a.replace("ActivityRecord{eee","ActivityRecord{fefe"),"NEWS_ROUTE_ARTICLE_SUBSTITUTED");
+        rejectWithoutWaiting(route,w,passiveExit(BROWSER,true),"NEWS_ROUTE_ARTICLE_SUBSTITUTED");
+        rejectWithoutWaiting(route,w.replace("Window{baba","Window{fade"),a,"NEWS_ROUTE_MAIN_WINDOW_CHANGED");
+        rejectWithoutWaiting(route,w+oldViewerWindow(TEMPLATE,"cafe"),a,"NEWS_ROUTE_EXIT_WINDOWS");
+        rejectWithoutWaiting(route,w,a.replace("Task{abc #"+TASK,"Task{fab #"+TASK),"NEWS_ROUTE_TASK_OBJECT");
+        rejectWithoutWaiting(route,w,a.replace(" t41}"," t41 f}}"),"NEWS_ROUTE_RETURN_OTHER_HEADER");
+        rejectWithoutWaiting(route,w,a.replace("finishing=true","finishing=false"),"NEWS_ROUTE_EXIT_LIFECYCLE");
+        rejectWithoutWaiting(route,w+window("other.app/.Overlay","decaf",true),a,null);
+        rejectWithoutWaiting(route,w.replace("mOwnerUid=10073","mOwnerUid=10099"),a,null);
+        rejectWithoutWaiting(route,w,a.replace(mainActivity(true),mainActivity(true)+activityBlock(BROWSER,"cc",NUM,false)),
+                "NEWS_ROUTE_MAIN_HISTORY_COUNT");
+    }
+    @Test public void embeddedMainReturnHasNoForeignViewerExitPrivilege(){
+        var route=enteredList();var main=read(route,mainWindows(),mainActivities()).source();
+        route.confirmArticle(main);route.backSucceeded(main,3000);
+        rejectWithoutWaiting(route,mainWindows(),passiveExit(TEMPLATE,true),"NEWS_ROUTE_MAIN_HISTORY_COUNT");
+        rejectWithoutWaiting(route,viewerWindows(TEMPLATE),viewerActivities(TEMPLATE),"NEWS_ROUTE_ARTICLE_SUBSTITUTED");
+        route.confirmList(read(route,mainWindows(),mainActivities()).source());
+    }
     @Test public void viewerNeedsAQualifiedTreeOutsideRewardsAndFeedWithNoBlocker(){
         var noList=new NewsFeedModel.Frame(NewsFeedModel.Page.UNKNOWN,null,null,false,null,0,false,"NO_FEED_CARDS");
         var invalid=new NewsFeedModel.Frame(NewsFeedModel.Page.UNKNOWN,null,null,false,null,0,false,"TREE");
