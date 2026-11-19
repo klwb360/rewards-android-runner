@@ -66,7 +66,7 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
             original=navigation.template();
             Snapshot entry=null;
             for(int i=0;i<=8;i++){
-                entry=readFrame(null);
+                entry=readEntry();
                 expectPage(entry,NewsFeedModel.Page.REWARDS);
                 if (entry.frame().entry()!=null) break;
                 if (i==8) throw reject("ENTRY_NOT_VISIBLE");
@@ -177,6 +177,16 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
                 && data.right()>data.left() && data.bottom()>data.top() && data.right()<=shape.width() && data.bottom()<=shape.height()
                 && (data.rotationBefore()==-1 || data.rotationBefore()==shape.rotation())
                 && (data.rotationAfter()==-1 || data.rotationAfter()==shape.rotation());
+    }
+    private Snapshot readEntry()throws Exception{
+        for(int sample=0;;sample++){
+            var snapshot=readFrame(null);
+            if(sample==2 || !original.sameSource(snapshot.source()) || !entryMayStillLoad(snapshot.frame()))return snapshot;
+            pause(500);
+        }
+    }
+    static boolean entryMayStillLoad(NewsFeedModel.Frame frame){
+        return frame.page()==NewsFeedModel.Page.UNKNOWN && "NO_FEED_CARDS".equals(frame.reason());
     }
     private static void expectPage(Snapshot s,NewsFeedModel.Page page){
         if(s.frame().page()!=page)throw reject("EXPECTED_"+page.name()+"_"+s.frame().reason());
@@ -291,11 +301,31 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
             var latest=refresh(frame);
             if (!NativeProgressPublication.frameFresh(now(),acquired.helperStartedMs()))throw reject("NEWS_OCR_EXPIRED");
             detail=match.reason();
-            if(publish)publishMark(latest,match,crop,png);
+            if(publish && !authority.taskInputAllowed() && latest.frame().page()==NewsFeedModel.Page.REWARDS
+                    && match.kind()==NewsFeedModel.Kind.UNKNOWN){
+                publishEntryDiagnostic(first,match,crop,png);
+            } else if(publish)publishMark(latest,match,crop,png);
             return new Located(latest,match);
         } finally {if(png!=null)Arrays.fill(png,(byte)0);}
     }
 
+    private void publishEntryDiagnostic(NewsLocalOcr.Result narrow,NewsLocalOcr.Result expanded,Box crop,byte[] png)throws Exception{
+        String key=LiveRewardsTypes.hash(runId+"|"+(++serial)+"|ENTRY_OCR");
+        var diag=new JSONObject().put("schemaVersion",1).put("profile","NEWS_ENTRY_OCR")
+                .put("cropWidth",crop.width()).put("cropHeight",crop.height())
+                .put("reasonNarrow",narrow.reason()).put("reasonExpanded",expanded.reason())
+                .put("narrow",diagnosticParts(narrow.entryDiagnostic())).put("expanded",diagnosticParts(expanded.entryDiagnostic()))
+                .put("rawTextIncluded",false).put("rawDataUploaded",false);
+        artifacts.write(key,"PREFLIGHT","DIAGNOSTICS.json",diag.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        artifacts.write(key,"PREFLIGHT","CARD.png",png);
+    }
+    private static JSONArray diagnosticParts(String value){
+        if(value==null || value.length()>1536)throw reject("ENTRY_DIAGNOSTIC_SIZE");
+        JSONArray parts=new JSONArray();
+        for(int offset=0;offset<value.length();offset+=256)
+            parts.put(value.substring(offset,Math.min(value.length(),offset+256)));
+        return parts;
+    }
     private void publishMark(Snapshot latest,NewsLocalOcr.Result result,Box crop,byte[] png)throws Exception{
         if(result.kind()==NewsFeedModel.Kind.UNKNOWN)return;
         BitmapFactory.Options options=new BitmapFactory.Options();options.inMutable=true;options.inPreferredConfig=Bitmap.Config.ARGB_8888;

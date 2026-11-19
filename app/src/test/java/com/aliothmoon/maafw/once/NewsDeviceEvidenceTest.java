@@ -74,6 +74,10 @@ public class NewsDeviceEvidenceTest {
         var blocked=new NewsFeedModel.Frame(NewsFeedModel.Page.BLOCKED,null,null,false,null,0,false,"BLOCKER");
         var rewards=new NewsFeedModel.Frame(NewsFeedModel.Page.REWARDS,null,null,false,null,0,false,"READING_ENTRY");
         assertTrue(NewsAndroidPort.feedMayStillLoad(placeholder,true));
+        assertTrue(NewsAndroidPort.entryMayStillLoad(placeholder));
+        assertFalse(NewsAndroidPort.entryMayStillLoad(rewards));
+        assertFalse(NewsAndroidPort.entryMayStillLoad(ambiguous));
+        assertFalse(NewsAndroidPort.entryMayStillLoad(blocked));
         assertTrue(NewsAndroidPort.feedMayStillLoad(rewards,true));
         assertFalse(NewsAndroidPort.feedMayStillLoad(rewards,false));
         assertFalse(NewsAndroidPort.feedMayStillLoad(ambiguous,true));
