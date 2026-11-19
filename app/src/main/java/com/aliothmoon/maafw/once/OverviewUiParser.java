@@ -130,11 +130,11 @@ final class OverviewUiParser {
             List<NativeUiBoundPointsParser.Node> matches, String title) {
         NativeUiBoundPointsParser.Node heading=null,button=null;
         for(var node:matches){
-            if(node.parentIndex()!=parent.index()||!children(node).isEmpty()||!empty(node.resourceId())){ambiguous=true;return null;}
+            if(node.parentIndex()!=parent.index()||!empty(node.resourceId())){ambiguous=true;return null;}
             if(node.classRole()==NativeUiBoundPointsParser.ClassRole.TEXT&&!node.clickable()&&title.equals(node.text())&&empty(node.description())){
-                if(heading!=null){ambiguous=true;return null;}heading=node;
+                if(heading!=null||!weeklyHeadingContents(node,title)){ambiguous=true;return null;}heading=node;
             }else if(node.classRole()==NativeUiBoundPointsParser.ClassRole.BUTTON&&node.clickable()&&empty(node.text())&&title.equals(node.description())){
-                if(button!=null){ambiguous=true;return null;}button=node;
+                if(button!=null||!children(node).isEmpty()){ambiguous=true;return null;}button=node;
             }else{ambiguous=true;return null;}
         }
         if(heading==null||button==null){ambiguous=true;return null;}
@@ -156,6 +156,20 @@ final class OverviewUiParser {
         // Hidden metadata supplies no region. Mixed visibility must never expose the heading
         // as a complete weekly heading while its paired control is still offscreen.
         return heading.visible()==button.visible()?heading:null;
+    }
+    /** In the paired check-in heading Bing may repeat the caption in a single inset text leaf. */
+    private boolean weeklyHeadingContents(NativeUiBoundPointsParser.Node heading,String title) {
+        var contents=children(heading);
+        if(contents.isEmpty())return true;
+        if(!"签入".equals(title)||contents.size()!=1)return false;
+        var leaf=contents.get(0);
+        if(leaf.classRole()!=NativeUiBoundPointsParser.ClassRole.TEXT||leaf.clickable()
+                ||!empty(leaf.resourceId())||!title.equals(leaf.text())||!empty(leaf.description())
+                ||!children(leaf).isEmpty()||heading.visible()!=leaf.visible())return false;
+        // Hidden captions never supply a region. A visible echo must fit the same line of text.
+        return !heading.visible()||box(heading).contains(box(leaf))
+                &&leaf.left()==heading.left()&&leaf.right()==heading.right()
+                &&Math.abs((leaf.top()-heading.top())-(heading.bottom()-leaf.bottom()))<=1;
     }
     private static boolean empty(String value){return value==null||value.isEmpty();}
     private void activities(List<NativeUiBoundPointsParser.Node> siblings) {
