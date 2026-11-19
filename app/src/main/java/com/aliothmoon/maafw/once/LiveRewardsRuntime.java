@@ -25,7 +25,10 @@ import org.json.JSONObject;
 
 /** Explicit single-run owner for native local perception and typed live actions. */
 final class LiveRewardsRuntime {
-    static final class ReadingApproval { private ReadingApproval() {} }
+    static final class ReadingApproval {
+        final ReadingNewsChoice.Mode mode;
+        private ReadingApproval(ReadingNewsChoice.Mode mode){this.mode=mode;}
+    }
     static final String PROFILE="LIVE_REWARDS_CYCLE_V1",DIRECTORY="rewards-live-cycle-v1";
     private final DormantCaptureConfirmationActivity activity;
     private final VisibleCaptureAuthority.LiveRewardsApproval approval;
@@ -75,7 +78,7 @@ final class LiveRewardsRuntime {
         uiRecheck=moreUiRecheck?new LiveMoreUiRecheck():null;
         this.newsMode=newsMode;
         if(newsMode!=null&&(singleTask||selection.limited()||moreUiRecheck
-                ||(newsMode==ReadingNewsChoice.Mode.LIVE)!=taskInputAllowed))
+                ||newsMode.live!=taskInputAllowed))
             throw new SecurityException("Dedicated news confirmation required");
     }
     static LiveRewardsRuntime start(DormantCaptureConfirmationActivity activity,
@@ -220,7 +223,7 @@ final class LiveRewardsRuntime {
     private void runNews()throws Exception{
         requireHidden();
         if(singleTask||uiRecheck!=null||input!=null||coordinator!=null||authority.taskScopeCount()!=0
-                ||authority.taskInputAllowed()!=(newsMode==ReadingNewsChoice.Mode.LIVE))
+                ||authority.taskInputAllowed()!=newsMode.live)
             throw new SecurityException("News authority mismatch");
         artifacts=createArtifactDirectory();artifactKey=directoryKey(artifacts);
         ledger=new LiveRewardsLedger(activity.getNoBackupFilesDir().toPath(),authority.day(),runId);
@@ -228,7 +231,7 @@ final class LiveRewardsRuntime {
         navigation=new LiveRewardsNavigation(activity.getApplicationContext(),authority,activity.getTaskId(),
                 activity.getComponentName().flattenToString(),shape,this::hiddenCurrent);
         stage="NEWS_READING_ENTRY";
-        news=new NewsAndroidPort(new ReadingApproval(),activity.getApplicationContext(),authority,navigation,shape,runId,
+        news=new NewsAndroidPort(new ReadingApproval(newsMode),activity.getApplicationContext(),authority,navigation,shape,runId,
                 this::hiddenCurrent,this::publishArtifact);
         try{
             news.run();
@@ -512,7 +515,7 @@ final class LiveRewardsRuntime {
     private void writeNewsReceipt()throws Exception{
         JSONObject receipt=news==null?new JSONObject().put("status","NOT_STARTED").put("listConfirmed",false):news.report();
         receipt.put("schemaVersion",1).put("profile",PROFILE).put("runId",runId).put("day",runDay)
-                .put("purpose",newsMode==ReadingNewsChoice.Mode.LIVE?"NEWS_LIVE":"NEWS_PREFLIGHT")
+                .put("purpose",newsMode.purpose)
                 .put("taskInputAllowed",taskInputAllowed).put("knownClean",nativeResourcesClosed())
                 .put("reportSha256",reportSha256).put("rawTextIncluded",false).put("rawDataUploaded",false)
                 .put("oldRecordsReset",false).put("accountCreditVerified",false);

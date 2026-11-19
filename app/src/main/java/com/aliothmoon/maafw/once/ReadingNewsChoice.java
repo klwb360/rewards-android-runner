@@ -2,7 +2,12 @@ package com.aliothmoon.maafw.once;
 
 /** Additional purpose bound to the existing synchronous, visible owner confirmation. */
 final class ReadingNewsChoice {
-    enum Mode { PREFLIGHT, LIVE }
+    enum Mode {
+        PREFLIGHT(false,"NEWS_PREFLIGHT"), LIVE(true,"NEWS_LIVE"), PROGRESS_FIVE(true,"NEWS_PROGRESS_FIVE");
+        final boolean live;
+        final String purpose;
+        Mode(boolean live,String purpose){this.live=live;this.purpose=purpose;}
+    }
     private record Selection(Object owner, Mode mode) {}
     private final ThreadLocal<Selection> active = new ThreadLocal<>();
 
@@ -17,7 +22,7 @@ final class ReadingNewsChoice {
         Selection selection = active.get();
         if (selection == null) return null;
         if (selection.owner() != owner || selection.mode() == null || singleOrLimited
-                || live != (selection.mode() == Mode.LIVE))
+                || live != selection.mode().live)
             throw new SecurityException("Reading mode differs from visible purpose");
         active.set(new Selection(owner, null));
         return selection.mode();

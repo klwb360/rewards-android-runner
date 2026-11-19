@@ -31,10 +31,16 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
     private final LiveRewardsPerception.ArtifactSink artifacts;
     private final LiveRewardsLedger.Store files;
     private final String preparation;
+    private final boolean progressBatch;
+    private volatile int progressSlotsAtStart=-1;
+    private volatile NativeUiStructureProtocol.Task progressAtEntry;
     private final AtomicBoolean started = new AtomicBoolean();
     private BingNavigationSnapshot.Ready original;
     private ReadingNewsSource readingSource;
     private boolean awaitingFeed;
+    private boolean observingArticle;
+    private ArticleWindow articleWindow;
+    private Snapshot returnCandidate;
     private int anchorY = -1;
     private NewsFeedModel.Card opened;
     private String openedKey="";
@@ -52,12 +58,14 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
     NewsAndroidPort(LiveRewardsRuntime.ReadingApproval selected,Context context,LiveRunAuthority authority,
                     LiveRewardsNavigation navigation,BingNavigationSnapshot.Shape shape,String runId,
                     BooleanSupplier hidden,LiveRewardsPerception.ArtifactSink artifacts) throws IOException {
-        if (selected == null || context == null || authority == null || !authority.live() || !authority.current()
+        if (selected == null || selected.mode==null || context == null || authority == null || !authority.live() || !authority.current()
+                || selected.mode.live!=authority.taskInputAllowed()
                 || navigation == null || shape == null || shape.rotation()!=0 || shape.width()<=0 || shape.height()<=shape.width()
                 || hidden == null || !hidden.getAsBoolean() || artifacts == null
                 || !UUID.fromString(runId).toString().equals(runId)) throw reject("READING_OWNER");
         this.context=context.getApplicationContext(); this.authority=authority; this.navigation=navigation;
         this.shape=shape; this.runId=runId; this.hidden=hidden; this.artifacts=artifacts;
+        progressBatch=selected.mode==ReadingNewsChoice.Mode.PROGRESS_FIVE;
         files=new LiveRewardsLedger.FileStore(context.getNoBackupFilesDir().toPath());
         preparation=ReadingNewsLedger.DIRECTORY+"/"+authority.day()+"/preparations/"+runId+"/";
     }
@@ -88,6 +96,13 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
             }
             if (entry==null || entry.frame().entry()==null) throw reject("ENTRY_NOT_VISIBLE");
             if (entry.frame().entryComplete()) { outcome=step="ENTRY_ALREADY_COMPLETE"; return; }
+            ReadingNewsLedger ledger=null;
+            if(progressBatch){
+                ledger=new ReadingNewsLedger(files,authority.day(),runId,true);
+                progressSlotsAtStart=ledger.progressUsed();
+                var limit=ReadingNewsCycle.reachedLimit(ledger);
+                if(limit!=null){outcome=step=limit.name();return;}
+            }
             step="ENTRY_OCR";
             var located=locate(entry,true);
             if(located.ocr().kind()!=NewsFeedModel.Kind.ENTRY) throw reject(located.ocr().reason());
@@ -103,10 +118,12 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
             listConfirmed=true;
             if(first.frame().card()!=null)anchorY=(int)first.frame().card().box().centerY();
             check();
-            cycle=new ReadingNewsCycle(new ReadingNewsLedger(files,authority.day(),runId));
+            cycle=new ReadingNewsCycle(ledger==null?new ReadingNewsLedger(files,authority.day(),runId):ledger);
             var result=cycle.run(this);
             outcome=result.status().name(); step=outcome;
-            if(result.status()!=ReadingNewsCycle.Status.DAILY_LIMIT && result.status()!=ReadingNewsCycle.Status.FEED_END)
+            if(result.status()!=ReadingNewsCycle.Status.DAILY_LIMIT && result.status()!=ReadingNewsCycle.Status.FEED_END
+                    && !(progressBatch && (result.status()==ReadingNewsCycle.Status.FIVE_LIMIT
+                    ||result.status()==ReadingNewsCycle.Status.PROGRESS_CHECK_REQUIRED)))
                 throw reject(outcome);
             check();
         } catch(Exception stopped) {
@@ -142,7 +159,9 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
             for(int sample=0;;sample++){
                 var observation=navigation.reading(readingSource);
                 if(observation.source()!=null && observation.source().fresh(now()))return observation.source();
-                if(!awaitingFeed || !observation.waitable() || sample==2)throw reject(observation.gate());
+                if(observingArticle && observation.waitable() && ReadingNewsSource.WAIT_ARTICLE_OVERLAY.equals(observation.gate()))
+                    throw new ArticleCovered();
+                if(!(awaitingFeed||observingArticle) || !observation.waitable() || sample==2)throw reject(observation.gate());
                 try{Thread.sleep(450);}
                 catch(InterruptedException interrupted){Thread.currentThread().interrupt();throw reject("NEWS_ROUTE_CANCELLED");}
                 check();
@@ -155,6 +174,40 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
     }
     record Snapshot(NewsFeedModel.Frame frame,BingNavigationSnapshot.Ready source,int window,long started) {}
     private record Located(Snapshot snapshot,NewsLocalOcr.Result ocr,long capturedAt) {}
+    record ArticleWindow(BingNavigationSnapshot.Ready owner,int accessibilityWindow){
+        static ArticleWindow from(Snapshot sample){
+            if(sample==null || sample.frame().page()!=NewsFeedModel.Page.ARTICLE || sample.source()==null
+                    || sample.source().kind()==BingNavigationSnapshot.Kind.MAIN || sample.window()<0)
+                throw reject("NEWS_ARTICLE_WINDOW_UNBOUND");
+            return new ArticleWindow(sample.source(),sample.window());
+        }
+        boolean matches(Snapshot sample){
+            return sample!=null && sample.frame().page()==NewsFeedModel.Page.ARTICLE && accessibilityWindow==sample.window()
+                    && owner.sameLiveWindow(sample.source());
+        }
+    }
+    static final class ArticleCovered extends SecurityException {
+        ArticleCovered(){super(ReadingNewsSource.WAIT_ARTICLE_OVERLAY);}
+    }
+    @FunctionalInterface interface ArticleRead<T>{T read()throws Exception;}
+    @FunctionalInterface interface PassivePause{void sleep(long millis)throws Exception;}
+    static <T> T awaitClearArticle(ArticleRead<T> read,PassivePause pause,java.util.function.LongSupplier clock)throws Exception{
+        long start=clock.getAsLong();
+        for(int sample=0;;sample++){
+            try{return read.read();}
+            catch(ArticleCovered cover){
+                long elapsed=clock.getAsLong()-start;
+                if(sample>=5 || elapsed<0 || elapsed+500>=10_000)throw reject("NEWS_ARTICLE_OVERLAY_PERSISTED");
+                pause.sleep(500);
+            }
+        }
+    }
+    private <T> T observeArticle(ArticleRead<T> read)throws Exception{
+        boolean previous=observingArticle;
+        observingArticle=true;
+        try{return awaitClearArticle(read,this::pause,this::now);}
+        finally{observingArticle=previous;}
+    }
     private void sameSource(BingNavigationSnapshot.Ready expected) {
         if (!expected.sameLiveWindow(source())) throw reject("NEWS_WINDOW_CHANGED");
     }
@@ -176,26 +229,45 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
     private Snapshot readFrame(NewsFeedModel.Card article)throws Exception{
         check();
         var before=source();
-        var tree=AndroidNewsTreeReader.read(context,new TreeGrant(before));
+        boolean child=article!=null && readingSource!=null && readingSource.isCheckedViewer(before);
+        var tree=AndroidNewsTreeReader.read(context,new TreeGrant(before),child);
         var after=source();
         var data=tree.source();
-        if (!bound(data,before,after,shape,now())) throw reject("NEWS_TREE_SOURCE_BRACKET");
-        var frame=NewsFeedModel.inspect(tree.nodes(),shape.width(),shape.height(),anchorY,article);
-        if(article!=null && readingSource!=null && readingSource.isCheckedViewer(after) && viewerContent(frame,tree.nodes()))
+        NewsFeedModel.Frame frame;
+        if(child){
+            if(!readingSource.isCheckedViewer(after) || !articleBound(data,before,after,shape,now()))
+                throw reject("NEWS_ARTICLE_SOURCE_BRACKET");
             frame=new NewsFeedModel.Frame(NewsFeedModel.Page.ARTICLE,new Box(0,0,shape.width(),shape.height()),null,false,null,0,false,"BOUND_ARTICLE_VIEWER");
+        }else{
+            if(!bound(data,before,after,shape,now()))throw reject("NEWS_TREE_SOURCE_BRACKET");
+            frame=NewsFeedModel.inspect(tree.nodes(),shape.width(),shape.height(),anchorY,null);
+        }
         if (frame.page()==NewsFeedModel.Page.REWARDS && !original.sameSource(after)) throw reject("NEWS_REWARDS_WINDOW");
+        if(progressBatch && entryTaps==0 && frame.page()==NewsFeedModel.Page.REWARDS && frame.entry()!=null)
+            progressAtEntry=checkedEntryProgress(frame,data.reading());
         lastNodes=data.nodeCount(); lastStride=frame.stride(); detail=frame.reason();
         return new Snapshot(frame,after,data.windowId(),data.started());
     }
-    static boolean viewerContent(NewsFeedModel.Frame frame,java.util.List<NativeUiBoundPointsParser.Node> nodes){
-        return frame.page()==NewsFeedModel.Page.UNKNOWN && "NO_FEED_CARDS".equals(frame.reason())
-                && !nodes.isEmpty() && nodes.stream().noneMatch(n->"homePageWrapper".equals(n.resourceId())||"compose_home_root".equals(n.resourceId()));
+    static NativeUiStructureProtocol.Task checkedEntryProgress(NewsFeedModel.Frame frame,NativeUiStructureProtocol.Task reading){
+        if(frame.page()!=NewsFeedModel.Page.REWARDS || frame.entry()==null || reading==null
+                || reading.status()!=NativeUiStructureProtocol.Status.KNOWN
+                || frame.entryComplete()!=(reading.current()==reading.target()))throw reject("NEWS_ENTRY_PROGRESS_UNCONFIRMED");
+        return reading;
+    }
+    static boolean articleBound(NativeUiStructureProtocol.Report data,BingNavigationSnapshot.Ready before,
+                                BingNavigationSnapshot.Ready after,BingNavigationSnapshot.Shape shape,long now){
+        return data!=null && data.readiness()==null && !data.structureBound() && before!=null
+                && before.kind()!=BingNavigationSnapshot.Kind.MAIN && bracket(data,before,after,shape,now);
     }
     static boolean bound(NativeUiStructureProtocol.Report data,BingNavigationSnapshot.Ready before,
                          BingNavigationSnapshot.Ready after,BingNavigationSnapshot.Shape shape,long now){
         return data!=null && data.qualified() && data.structureBound() && data.readiness()!=null
                 && data.readiness().idle()==NativeUiReadyDiagnostics.Idle.IDLE_OBSERVED && !data.readiness().blocked()
-                && data.displayId()==0 && data.windowId()>=0 && before!=null && after!=null
+                && bracket(data,before,after,shape,now);
+    }
+    private static boolean bracket(NativeUiStructureProtocol.Report data,BingNavigationSnapshot.Ready before,
+                                   BingNavigationSnapshot.Ready after,BingNavigationSnapshot.Shape shape,long now){
+        return data.qualified() && data.displayId()==0 && data.windowId()>=0 && before!=null && after!=null
                 && before.sameLiveWindow(after) && before.observed()<=data.started() && before.fresh(data.started())
                 && data.finished()<=after.lower() && after.fresh(now) && NativeProgressPublication.frameFresh(now,data.started())
                 && shape.equals(after.profile().shape()) && shape.rotation()==0 && data.left()>=0 && data.top()>=0
@@ -460,6 +532,13 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
                 prepared=checked.source().fresh(now()) && current();
                 return prepared;
             }
+            if(exact instanceof ReviewShizukuBackActor.BackTarget){
+                if(articleWindow==null || !articleWindow.matches(expected)
+                        || !expected.source().sameLiveWindow(observeArticle(NewsAndroidPort.this::source)) || !current())return false;
+                checked=expected;
+                burnOnce();
+                return current();
+            }
             boolean feedSwipe=exact instanceof ReviewShizukuSwipeActor.SwipeTarget swipe && swipe.measuredNewsStride();
             checked=refresh(expected,feedSwipe?RefreshUse.FEED_SWIPE:RefreshUse.EXACT);
             if(!checked.source().fresh(now())||!current())return false;
@@ -469,6 +548,13 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
         private void burnOnce()throws Exception{spent=true;burn.burn();}
         boolean valid(Object exact){
             if(story!=null)return finishStory(exact);
+            if(exact==target && exact instanceof ReviewShizukuBackActor.BackTarget && spent && current()){
+                try{
+                    checked=verifiedReturn();
+                    return checked.source().fresh(now()) && current();
+                }catch(InterruptedException interrupted){Thread.currentThread().interrupt();throw reject("NEWS_RETURN_INTERRUPTED");}
+                catch(Exception failure){throw new SecurityException("NEWS_RETURN_FINAL_RECHECK",failure);}
+            }
             if(exact!=target || !spent || !current() || checked==null || !checked.source().fresh(now()))return false;
             sameSource(checked.source());
             return current() && checked.source().fresh(now());
@@ -620,29 +706,58 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
         tapReturned=tap(lastLocated,gate,false);
         opened=lastLocated.snapshot().frame().card();
         openedKey=proof.key();
+        articleWindow=null;returnCandidate=null;
         readingSource.articleSucceeded();step="ARTICLE_WAIT";
         return tapReturned;
+    }
+    @Override public void observeArticleOpen(ReadingNewsCycle.CardProof card)throws Exception{
+        if(!ownsArticle(card) || articleWindow!=null)throw reject("NEWS_ARTICLE_OPEN_OWNER");
+        step="ARTICLE_OPEN";
+        // An early child identity is useful when present. No document or clean early frame is required.
+        var opening=navigation.reading(readingSource);
+        var early=opening.source();
+        if(early!=null && early.lower()>=tapReturned && early.fresh(now()) && readingSource.isCheckedViewer(early))
+            readingSource.confirmArticle(early);
+        if(opening.gate().startsWith("NEWS_ROUTE_FOREIGN_") || opening.gate().endsWith("_SUBSTITUTED")
+                || "NEWS_ROUTE_ARTICLE_OVERLAY_UNTRUSTED".equals(opening.gate()))throw reject(opening.gate());
+        step="ARTICLE_WAIT";
+    }
+    private boolean returnedList(Snapshot frame){
+        return frame.frame().page()==NewsFeedModel.Page.FEED && frame.source().kind()==BingNavigationSnapshot.Kind.MAIN;
     }
     @Override public ReadingNewsCycle.Page pageAfterWait(ReadingNewsCycle.CardProof card)throws Exception{
         if(!articleDue(card))throw reject("NEWS_ARTICLE_EARLY");
         step="ARTICLE_SOURCE";
-        var destination=readFrame(opened);
-        return switch(destination.frame().page()){
-            case ARTICLE -> {readingSource.confirmArticle(destination.source());yield ReadingNewsCycle.Page.ARTICLE;}
-            case FEED -> ReadingNewsCycle.Page.FEED;
-            case BLOCKED -> ReadingNewsCycle.Page.BLOCKED;
-            default -> ReadingNewsCycle.Page.UNKNOWN;
-        };
+        var destination=observeArticle(()->readFrame(opened));
+        if(returnedList(destination))return ReadingNewsCycle.Page.FEED;
+        if(destination.frame().page()==NewsFeedModel.Page.BLOCKED)return ReadingNewsCycle.Page.BLOCKED;
+        if(!readingSource.isCheckedViewer(destination.source()))throw reject("NEWS_ARTICLE_WINDOW_CHANGED");
+        articleWindow=ArticleWindow.from(destination);
+        readingSource.confirmArticle(destination.source());
+        returnCandidate=destination;
+        return ReadingNewsCycle.Page.ARTICLE;
+    }
+    private boolean ownsArticle(ReadingNewsCycle.CardProof card){
+        return current() && listConfirmed && opened!=null && card!=null && card.key().equals(openedKey)
+                && tapReturned>=0;
     }
     private boolean articleDue(ReadingNewsCycle.CardProof card){
-        return current() && listConfirmed && opened!=null && card!=null && card.key().equals(openedKey)
-                && tapReturned>=0 && now()-tapReturned>=ReadingNewsCycle.WAIT_MILLIS;
+        return ownsArticle(card) && now()-tapReturned>=ReadingNewsCycle.WAIT_MILLIS;
+    }
+    private Snapshot verifiedReturn()throws Exception{
+        if(tapReturned<0 || now()-tapReturned<ReadingNewsCycle.WAIT_MILLIS || articleWindow==null)
+            throw reject("NEWS_BACK_EARLY_OR_UNBOUND");
+        var currentArticle=observeArticle(()->readFrame(opened));
+        if(!articleWindow.matches(currentArticle))throw reject("NEWS_ARTICLE_WINDOW_CHANGED");
+        readingSource.confirmArticle(currentArticle.source());
+        return currentArticle;
     }
     @Override public void back(ReadingNewsCycle.CardProof card,ReadingNewsCycle.BurnGate gate)throws Exception{
         if(!articleDue(card))throw reject("NEWS_BACK_EARLY");
         step="RETURN_ARTICLE";
-        var article=readFrame(opened); expectPage(article,NewsFeedModel.Page.ARTICLE);
-        readingSource.confirmArticle(article.source());
+        var article=returnCandidate;
+        if(articleWindow==null || !articleWindow.matches(article))throw reject("NEWS_RETURN_NOT_BOUND");
+        returnCandidate=null;
         var target=new ReviewShizukuBackActor.BackTarget(shape.width(),shape.height(),shape.rotation());
         var grant=new Input(target,article,gate,null); backs++;
         var result=ReviewShizukuBackActor.newsBack(context,grant,target);
@@ -674,10 +789,16 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
     boolean inputUnknown(){return uncertain;}
     JSONObject report()throws JSONException{
         var s=cycle==null?null:cycle.snapshot();
+        var entry=progressAtEntry;
         var visits=new JSONArray();
         if(s!=null)for(var visit:s.visits())visits.put(new JSONObject().put("key",visit.articleKey())
                 .put("tapElapsed",visit.tapElapsed()).put("waitMillis",visit.waitMillis()).put("automatic",visit.automatic()));
         return new JSONObject().put("schemaVersion",1).put("profile",authority.taskInputAllowed()?"READING_NEWS_V1":"READING_NEWS_PREFLIGHT")
+                .put("batchArticleLimit",progressBatch?Integer.valueOf(1):null)
+                .put("progressAttemptLimit",progressBatch?Integer.valueOf(ReadingNewsLedger.PROGRESS_LIMIT):null)
+                .put("progressSlotsAtStart",progressSlotsAtStart>=0?Integer.valueOf(progressSlotsAtStart):null)
+                .put("readingPointsBefore",entry==null?null:Integer.valueOf(entry.current()))
+                .put("readingPointsTarget",entry==null?null:Integer.valueOf(entry.target()))
                 .put("runId",runId).put("day",authority.day()).put("taskInputAllowed",authority.taskInputAllowed())
                 .put("status",outcome).put("step",step).put("reason",detail).put("listConfirmed",listConfirmed)
                 .put("pilotPassed",s!=null && s.pilotPassed()).put("entryTaps",entryTaps).put("storyTaps",tapSuccess-entryTaps)

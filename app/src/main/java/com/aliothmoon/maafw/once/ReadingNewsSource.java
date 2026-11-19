@@ -16,6 +16,7 @@ final class ReadingNewsSource {
     private Ready confirmedArticle;
     private long backAt=-1;
     static final long RETURN_WAIT_MS=10_000;
+    static final String WAIT_ARTICLE_OVERLAY="NEWS_ROUTE_WAIT_ARTICLE_OVERLAY";
     private boolean entryTapped, articleTapped;
     private static final String TOKEN="[a-fA-F0-9]+";
     private static final String PKG="com.microsoft.bing";
@@ -44,7 +45,7 @@ final class ReadingNewsSource {
     }
     boolean isCheckedViewer(Ready ready){return articleTapped && ready!=null && ready==latestSource && ready.kind()!=Kind.MAIN;}
     void confirmArticle(Ready ready){
-        if(!articleTapped || backAt>=0 || ready==null || listWindow==null || !listWindow.sameTask(ready)
+        if(!isCheckedViewer(ready) || backAt>=0 || listWindow==null || !listWindow.sameTask(ready)
                 || latestSource==null || !latestSource.sameLiveWindow(ready)
                 || confirmedArticle!=null && !confirmedArticle.sameLiveWindow(ready))throw new SecurityException("NEWS_ARTICLE_WINDOW_CHANGED");
         confirmedArticle=ready;
@@ -66,8 +67,11 @@ final class ReadingNewsSource {
         boolean browser=focus!=null && BROWSER.equals(focus.component());
         Result parsed=browser?parseRootReadOnly(windows,activities,profile,guard,lower,observed)
                 :parseEntrySource(windows,activities,profile,guard,lower,observed);
-        if(focus==null||!rewards.profile().equals(profile)||!rewards.task().equals(focus.task()))
-            return hold(parsed,"NEWS_ROUTE_FOCUS");
+        if(focus==null){
+            String[] front=windows==null?null:one(windows,"^ *mCurrentFocus=Window\\{"+TOKEN+" u0 ([^\\s}]+)\\} *$",1);
+            return hold(parsed,front!=null && !front[0].startsWith(PKG+"/")?"NEWS_ROUTE_FOREIGN_FOCUS":"NEWS_ROUTE_FOCUS");
+        }
+        if(!rewards.profile().equals(profile)||!rewards.task().equals(focus.task()))return hold(parsed,"NEWS_ROUTE_FOREIGN_TASK");
         boolean original = rewards.diagnosticActivityMatches(focus.activity(),focus.component(),focus.task())
                 && rewards.diagnosticWindowMatches(focus.window());
         boolean parent = predecessor!=null && MAIN.equals(focus.component()) && predecessor.activity().equals(focus.activity());
@@ -93,6 +97,9 @@ final class ReadingNewsSource {
                 return departing(parsed,stack,focus,windows,activities,profile,guard,rewards,observed);
             if(stack.history().size()==2 && backAt>=0 && confirmedArticle!=null && confirmedArticle.kind()!=Kind.MAIN)
                 return departing(parsed,stack,focus,windows,activities,profile,guard,confirmedArticle,observed);
+            if(stack.history().size()==2 && articleTapped && backAt<0 && parsed.status()!=Status.UNKNOWN
+                    && enteringViewer(stack,focus,profile))
+                return new Observation(parsed,null,true,"NEWS_ROUTE_WAIT_ARTICLE_HANDOFF");
             if(stack.history().size()!=1)return hold(parsed,"NEWS_ROUTE_MAIN_HISTORY_COUNT");
             if(!member(stack,0,0,focus.activity(),MAIN,true,profile))return hold(parsed,"NEWS_ROUTE_MAIN_MEMBER");
         } else {
@@ -103,6 +110,9 @@ final class ReadingNewsSource {
         }
         if(parsed.status()==Status.BING_TRANSITION)return backAt>=0?waitAfterBack(parsed,observed)
                 :new Observation(parsed,null,true,"NEWS_ROUTE_TRANSITION");
+        if(child && backAt<0 && parsed.firstGate()==FirstGate.VISIBLE_UNKNOWN_WINDOW)
+            return coveredViewer(windows,activities,stack,focus,profile)
+                    ?new Observation(parsed,null,true,WAIT_ARTICLE_OVERLAY):hold(parsed,"NEWS_ROUTE_ARTICLE_OVERLAY_UNTRUSTED");
         if(parsed.ready()==null || parsed.status()!=Status.READY)
             return hold(parsed,"NEWS_ROUTE_"+parsed.firstGate().name()+"_"+parsed.readOnlyGate().name());
         if(child && backAt>=0)return waitAfterBack(parsed,observed);
@@ -110,6 +120,48 @@ final class ReadingNewsSource {
         return new Observation(parsed,parsed.ready(),false,"NEWS_ROUTE_READY");
     }
     private static Observation hold(Result r,String why){return new Observation(r,null,false,why);}
+
+    private boolean enteringViewer(Stack stack,BingForegroundSnapshot.Snapshot focus,Profile profile){
+        if(!member(stack,1,0,focus.activity(),MAIN,true,profile) || confirmedArticle!=null)return false;
+        for(String component:List.of(TEMPLATE,BROWSER)){
+            String token=historyToken(stack.history().get(0),1,component);
+            if(token!=null && !rewards.diagnosticActivityMatches(token,component,focus.task())
+                    && member(stack,0,1,token,component,false,profile))return true;
+        }
+        return false;
+    }
+
+    // A cover can only justify observing another frame. The unmodified parser must later grant READY.
+    private boolean coveredViewer(String windows,String activities,Stack stack,BingForegroundSnapshot.Snapshot focus,Profile profile){
+        String[] top=one(activities,"^ *topResumedActivity=ActivityRecord\\{("+TOKEN+") u0 ([^\\s}]+) t(\\d+)\\} *$",3);
+        if(top==null || !focus.activity().equals(top[0]) || !focus.component().equals(top[1]) || !focus.task().equals(top[2])
+                || activityState(stack.history().get(0),focus.activity(),focus.component(),focus.task(),profile.bingUid(),false)!=Status.READY)
+            return false;
+        boolean found=false,covered=false;
+        for(var section:sections(windows," *Window #\\d+ Window\\{.*")){
+            String[] id=one(section.header(),"^Window #\\d+ Window\\{("+TOKEN+") u0 ([^}\\r\\n]+)\\}:$",2);
+            if(id==null)return false;
+            var block=new Block(id[0],id[1],null,section.body());
+            if(focus.window().equals(id[0])){
+                String[] link=one(section.body(),"^ *mActivityRecord=ActivityRecord\\{("+TOKEN+") u0 ([^\\s}]+) t(\\d+)\\} *$",3);
+                if(found || !focus.component().equals(id[1]) || !appWindow(block,profile,focus.task(),!BROWSER.equals(focus.component()))
+                        || link==null || !focus.activity().equals(link[0]) || !focus.component().equals(link[1])
+                        || !focus.task().equals(link[2]))return false;
+                found=true;continue;
+            }
+            if(safelyInvisible(block)||"StatusBar".equals(id[1]))continue;
+            // A different app or an identifiable interactive system/consent screen ends the visit.
+            String name=id[1].toLowerCase(java.util.Locale.ROOT);
+            String[] owner=one(section.body(),"^ *mOwnerUid=(\\d+)\\b[^\\r\\n]*\\bpackage=([^\\s]+)\\s+appop=([^\\s]+)[^\\r\\n]*$",3);
+            if(name.contains("/") || name.contains("permission") || name.contains("keyguard") || name.contains("credential")
+                    || section.body().matches("(?s).*\\bty=(?:SYSTEM_DIALOG|SYSTEM_ERROR|KEYGUARD_DIALOG)\\b.*")
+                    || name.contains("signin") || name.contains("captcha") || owner!=null && !(PKG.equals(owner[1])
+                    && Integer.toString(profile.bingUid()).equals(owner[0]) || "android".equals(owner[1]) || "com.android.systemui".equals(owner[1])))
+                return false;
+            covered=true;
+        }
+        return found&&covered;
+    }
 
     private Observation departing(Result parsed,Stack stack,BingForegroundSnapshot.Snapshot focus,
             String windows,String activities,Profile profile,ReadOnlyGuard guard,Ready departing,long observed){

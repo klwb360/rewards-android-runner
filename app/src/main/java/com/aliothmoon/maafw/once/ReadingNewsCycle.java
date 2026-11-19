@@ -10,7 +10,7 @@ final class ReadingNewsCycle {
     static final long RUN_MILLIS = 30 * 60_000L;
     enum Kind { ARTICLE, AD, UNKNOWN, END }
     enum Page { ARTICLE, FEED, BLOCKED, UNKNOWN }
-    enum Status { READY, RUNNING, DAILY_LIMIT, FEED_END, NO_MOVEMENT, PILOT_UNCONFIRMED, STOPPED }
+    enum Status { READY, RUNNING, DAILY_LIMIT, FIVE_LIMIT, PROGRESS_CHECK_REQUIRED, FEED_END, NO_MOVEMENT, PILOT_UNCONFIRMED, STOPPED }
     static final class CardChangedBeforeDispatch extends Exception {
         private static final long serialVersionUID=1L;
         CardChangedBeforeDispatch(){super("NEWS_CARD_CHANGED_BEFORE_DISPATCH");}
@@ -36,6 +36,7 @@ final class ReadingNewsCycle {
         void assertFeed() throws Exception;
         CardProof readCard() throws Exception;
         long tapArticle(CardProof card, BurnGate gate) throws Exception;
+        default void observeArticleOpen(CardProof card) throws Exception {}
         Page pageAfterWait(CardProof card) throws Exception;
         void back(CardProof card, BurnGate gate) throws Exception;
         void advance(CardProof current) throws Exception;
@@ -85,6 +86,11 @@ final class ReadingNewsCycle {
 
     Summary snapshot() { return published; }
 
+    static Status reachedLimit(ReadingNewsLedger ledger)throws java.io.IOException{
+        if(ledger.used()>=ReadingNewsLedger.DAILY_LIMIT)return Status.DAILY_LIMIT;
+        return ledger.progressBatch && ledger.progressUsed()>=ReadingNewsLedger.PROGRESS_LIMIT?Status.FIVE_LIMIT:null;
+    }
+
     Summary run(Ports ports) throws Exception {
         if (ports == null || !started.compareAndSet(false, true)) throw new IllegalStateException("One news run required");
         startedAt = ports.now();
@@ -94,16 +100,23 @@ final class ReadingNewsCycle {
             requireCurrent(ports);
             ports.assertFeed();
             requireCurrent(ports);
-            if (ledger.used() >= ReadingNewsLedger.DAILY_LIMIT) return stop(Status.DAILY_LIMIT);
+            Status limit=reachedLimit(ledger);
+            if(limit!=null)return stop(limit);
             CardProof card = read(ports);
             while (true) {
                 requireCurrent(ports);
                 if (card.kind() == Kind.END) return stop(Status.FEED_END);
-                if (ledger.used() >= ReadingNewsLedger.DAILY_LIMIT) return stop(Status.DAILY_LIMIT);
+                limit=reachedLimit(ledger);
+                if(limit!=null)return stop(limit);
                 if (card.kind() == Kind.ARTICLE && !ledger.attempted(card.key())) {
                     VisitResult result = visit(ports, card);
+                    if(ledger.progressBatch && result!=VisitResult.CHANGED_BEFORE_DISPATCH){
+                        limit=reachedLimit(ledger);
+                        return stop(limit==null?Status.PROGRESS_CHECK_REQUIRED:limit);
+                    }
                     if (result == VisitResult.AUTO_RETURN && completed < 2) return stop(Status.PILOT_UNCONFIRMED);
-                    if (ledger.used() >= ReadingNewsLedger.DAILY_LIMIT) return stop(Status.DAILY_LIMIT);
+                    limit=reachedLimit(ledger);
+                    if(limit!=null)return stop(limit);
                     // Returning can reorder/repopulate the list. A pre-tap proof can never authorize a swipe.
                     CardProof returned = read(ports);
                     if (result != VisitResult.CHANGED_BEFORE_DISPATCH && !card.sameCard(returned) && returned.atEnd()) {
@@ -171,6 +184,7 @@ final class ReadingNewsCycle {
         owner[0].tapConfirmed(success);
         requireCurrent(ports);
         publish();
+        ports.observeArticleOpen(card);
         long waited = waitAfterTap(ports, success);
         Page destination = ports.pageAfterWait(card);
         requireCurrent(ports);

@@ -18,7 +18,7 @@ final class AndroidNewsTreeReader {
     private static volatile Object quarantine;
     static boolean knownClean() { return quarantine == null; }
 
-    static NewsTreeWire.Tree read(Context context, NewsAndroidPort.TreeGrant grant) throws Exception {
+    static NewsTreeWire.Tree read(Context context, NewsAndroidPort.TreeGrant grant, boolean article) throws Exception {
         if (grant == null || !grant.current() || !knownClean() || !AndroidLiveUiReader.knownClean()
                 || Build.VERSION.SDK_INT < 34 || !AndroidLiveUiReader.authority(context))
             throw new SecurityException("NEWS_TREE_AUTHORITY");
@@ -28,7 +28,7 @@ final class AndroidNewsTreeReader {
         var service = IShizukuService.Stub.asInterface(binder);
         if (service == null) throw new SecurityException("NEWS_TREE_SERVICE");
         String[] command = {"/system/bin/app_process","-cp",apk,"/system/bin",HELPER,
-                grant.nonce,Long.toString(grant.deadline),"READING_NEWS_TREE_V1"};
+                grant.nonce,Long.toString(grant.deadline),article?NewsTreeWire.ARTICLE_ARGUMENT:"READING_NEWS_TREE_V1"};
         var stream = new LiveUiReadStream();
         byte[] bytes = new byte[NewsTreeWire.MAX_WIRE + 1];
         IRemoteProcess child = null;
@@ -59,7 +59,9 @@ final class AndroidNewsTreeReader {
                         public int exitValue() throws Exception { return process.exitValue(); }
                     },Thread::sleep);
             if (status != null) throw new IOException("NEWS_TREE_" + status.name());
-            var tree = NewsTreeWire.parse(bytes,stream.count,grant.nonce,dispatch,grant.deadline,SystemClock.elapsedRealtime());
+            long now=SystemClock.elapsedRealtime();
+            var tree = article ? NewsTreeWire.parseArticle(bytes,stream.count,grant.nonce,dispatch,grant.deadline,now)
+                    : NewsTreeWire.parse(bytes,stream.count,grant.nonce,dispatch,grant.deadline,now);
             stream.frameCleanup = tree.source().cleanup();
             stream.helperReason = tree.source().reason();
             stream.completeReceipt = true;

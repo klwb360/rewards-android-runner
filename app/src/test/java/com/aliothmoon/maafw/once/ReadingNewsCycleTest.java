@@ -18,6 +18,9 @@ public final class ReadingNewsCycleTest {
     private static ReadingNewsLedger ledger(LiveRewardsLedger.Store store) throws IOException {
         return new ReadingNewsLedger(store, DAY, UUID.randomUUID().toString());
     }
+    private static ReadingNewsLedger progressLedger(LiveRewardsLedger.Store store)throws IOException{
+        return new ReadingNewsLedger(store,DAY,UUID.randomUUID().toString(),true);
+    }
     private static ReadingNewsCycle.CardProof card(ReadingNewsCycle.Kind kind, String id) {
         return new ReadingNewsCycle.CardProof(kind, kind == ARTICLE ? hash(id) : "", hash("layout-" + id), false);
     }
@@ -33,6 +36,8 @@ public final class ReadingNewsCycleTest {
         ReadingNewsCycle.CardProof fresh, clicked;
         ReadingNewsCycle.BurnGate storedGate;
         long clock = 1_000, success;
+        long openingSampleMillis;
+        boolean openingDenied;
         int anchor, moves, backCalls, inFlight, autoAt, failAt, reorderAfter, pageChecks;
         boolean revoked, revokeDuringWait, shortSleep, stalled, bypassTap, returnUncertain, clean = true;
         boolean changedBeforeTap, changedAfterReserve;
@@ -76,6 +81,10 @@ public final class ReadingNewsCycleTest {
             clock += 300;
             success = now();
             return success;
+        }
+        public void observeArticleOpen(ReadingNewsCycle.CardProof c){
+            assertSame(clicked,c);clock+=openingSampleMillis;
+            if(openingDenied)throw new SecurityException("NEWS_ROUTE_FOREIGN_FOCUS");
         }
         public ReadingNewsCycle.Page pageAfterWait(ReadingNewsCycle.CardProof c) {
             assertSame(clicked, c);
@@ -130,6 +139,18 @@ public final class ReadingNewsCycleTest {
         for (var visit : result.visits()) assertEquals(10_000, visit.waitMillis());
         assertThrows(IllegalStateException.class, () -> cycle.run(feed));
         assertThrows(SecurityException.class, feed.storedGate::burn);
+    }
+    @Test public void optionalOpeningObservationUsesTimeSinceClickAndKeepsConfirmedTapOnFailure()throws Exception{
+        for(long sample:new long[]{0,3500,11000}){
+            var feed=new Feed(articles(1));feed.openingSampleMillis=sample;
+            var result=new ReadingNewsCycle(ledger(new LiveRewardsLedger.MemoryStore())).run(feed);
+            assertEquals(1,result.backs());assertEquals(Math.max(10000,sample),result.visits().get(0).waitMillis());
+        }
+        var journal=ledger(new LiveRewardsLedger.MemoryStore());
+        var denied=new Feed(articles(1));denied.openingDenied=true;
+        var cycle=new ReadingNewsCycle(journal);
+        assertThrows(SecurityException.class,()->cycle.run(denied));
+        assertEquals(1,cycle.snapshot().taps());assertEquals(0,denied.backCalls);assertEquals(1,journal.used());
     }
 
     @Test public void adsUnreadableAndDuplicatesConsumeNoTapBudget() throws Exception {
@@ -307,5 +328,46 @@ public final class ReadingNewsCycleTest {
             assertEquals(0,nextDay.used());
             assertFalse(nextDay.attempted(hash("candidate-1")));
         } finally { pool.shutdownNow(); }
+    }
+
+    @Test public void progressModeStopsAfterOneNewArticleAndSharesFiveAcrossFreshRuns()throws Exception{
+        var store=new LiveRewardsLedger.MemoryStore();
+        for(int batch=1;batch<=5;batch++){
+            var journal=progressLedger(store);
+            var feed=new Feed(articles(16));
+            if(batch==2)feed.autoAt=1;
+            var result=new ReadingNewsCycle(journal).run(feed);
+            assertEquals(batch==5?ReadingNewsCycle.Status.FIVE_LIMIT:ReadingNewsCycle.Status.PROGRESS_CHECK_REQUIRED,result.status());
+            assertEquals(1,result.attempts());assertEquals(1,result.taps());
+            assertEquals(batch==2?0:1,result.backs());assertFalse(result.pilotPassed());
+            assertEquals(List.of(hash("article-"+(batch-1))),feed.tapped);
+            assertEquals(batch,journal.progressUsed());assertEquals(batch,journal.used());
+        }
+        var next=new ReadingNewsCycle(progressLedger(store)).run(new Feed(articles(16)));
+        assertEquals(ReadingNewsCycle.Status.FIVE_LIMIT,next.status());assertEquals(0,next.taps());
+        var legacy=new ReadingNewsCycle(ledger(store)).run(new Feed(articles(16)));
+        assertEquals(ReadingNewsCycle.Status.DAILY_LIMIT,legacy.status());
+        assertEquals(8,legacy.taps());assertEquals(5,progressLedger(store).progressUsed());
+        var followingDay=new ReadingNewsLedger(store,"2026-11-20",UUID.randomUUID().toString(),true);
+        assertEquals(0,followingDay.progressUsed());
+    }
+
+    @Test public void mixedRunsKeepTheirDailyLimitAndConcurrentProgressTapsCannotExceedFive()throws Exception{
+        var usedDay=new LiveRewardsLedger.MemoryStore();
+        for(int i=0;i<12;i++)ledger(usedDay).reserve(hash("prior-"+i));
+        var last=new ReadingNewsCycle(progressLedger(usedDay)).run(new Feed(articles(2)));
+        assertEquals(ReadingNewsCycle.Status.DAILY_LIMIT,last.status());assertEquals(1,last.taps());
+        var shared=new LiveRewardsLedger.MemoryStore();
+        var pool=Executors.newFixedThreadPool(6);
+        try{
+            List<Callable<Boolean>> work=new ArrayList<>();
+            for(int i=0;i<20;i++){
+                String key=hash("limited-"+i);var journal=progressLedger(shared);
+                work.add(()->{try{journal.reserve(key);return true;}catch(IOException occupied){return false;}});
+            }
+            int granted=0;
+            for(var future:pool.invokeAll(work))if(future.get())granted++;
+            assertEquals(5,granted);assertEquals(5,ledger(shared).used());assertEquals(5,progressLedger(shared).progressUsed());
+        }finally{pool.shutdownNow();}
     }
 }
