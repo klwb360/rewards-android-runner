@@ -10,6 +10,63 @@ import static org.junit.Assert.*;
 public class NewsDeviceEvidenceTest {
     private static final String NONCE="0123456789abcdef0123456789abcdef";
 
+    @Test public void carouselHasOnlyAScrollProofAndCannotOwnAStoryTap(){
+        var rotating=NewsFeedModel.inspect(NewsFeedModelTest.list(true),1000,2000,-1,null);
+        var ordinary=NewsFeedModel.inspect(NewsFeedModelTest.list(false),1000,2000,-1,null);
+        var proof=NewsAndroidPort.skippedCarousel(rotating);
+        assertEquals(ReadingNewsCycle.Kind.UNKNOWN,proof.kind());
+        assertEquals("",proof.key());
+        assertEquals(rotating.card().layoutKey(),proof.layoutKey());
+        assertNull(NewsAndroidPort.skippedCarousel(ordinary));
+        assertThrows(SecurityException.class,()->new NewsAndroidPort.StoryTapCheck(rotating,LiveRewardsTypes.hash("story")));
+    }
+
+    @Test public void actorRejectsChangedImageAndAdWithoutEnteringStoryBudgetOrDispatch(){
+        var key=LiveRewardsTypes.hash("first");
+        var changed=LiveRewardsTypes.hash("replacement");
+        var slot=NewsFeedModel.inspect(NewsFeedModelTest.list(false),1000,2000,-1,null);
+        var point=new ReviewShizukuTapActor.TapTarget(200,500,1000,2000,0);
+        var rows=List.of(
+                new NewsLocalOcr.Result(NewsFeedModel.Kind.AD,key,-1,-1,"AD_BADGE",true,""),
+                new NewsLocalOcr.Result(NewsFeedModel.Kind.ARTICLE,changed,200,500,"BADGE_ABSENT",true,""),
+                new NewsLocalOcr.Result(NewsFeedModel.Kind.UNKNOWN,"",-1,-1,"BADGE_ROW_UNCERTAIN",true,""));
+        for(var row:rows){
+            var story=new NewsAndroidPort.StoryTapCheck(slot,key);
+            var actor=new ReviewShizukuTapActor(()->new ReviewShizukuTapActor.Session(){
+                public boolean stillReady(){return true;}
+                public ReviewShizukuTapActor.DisplayShape display(){return new ReviewShizukuTapActor.DisplayShape(1000,2000,0);}
+                public ReviewShizukuTapActor.PendingTap dispatch(ReviewShizukuTapActor.TapTarget t,
+                        ReviewShizukuTapActor.FinalGate finalGate){throw new AssertionError("Unexpected dispatch");}
+            });
+            var result=actor.tap(point,new ReviewShizukuTapActor.DispatchGate(){
+                public boolean consume(ReviewShizukuTapActor.TapTarget target)throws Exception{
+                    return story.checkAndBurn(row,target,()->{throw new AssertionError("Unexpected daily budget burn");});
+                }
+                public boolean stillValid(ReviewShizukuTapActor.TapTarget target){throw new AssertionError("After rejected gate");}
+            });
+            assertFalse(result.invocationAttempted());
+            assertTrue(actor.knownClean());
+            assertEquals(row.kind()!=NewsFeedModel.Kind.UNKNOWN,story.confirmedSkip(result,false));
+            assertFalse(story.confirmedSkip(result,true));
+            assertFalse(story.confirmedSkip(new ReviewShizukuTapActor.Result(ReviewShizukuTapActor.Kind.REJECTED,
+                    ReviewShizukuTapActor.NO_EXIT,false,true,ReviewShizukuTapActor.Reason.DISPLAY_CHANGED),false));
+        }
+    }
+
+    @Test public void storyBudgetRequiresSameImageClearBadgeAndExactFinalPoint()throws Exception{
+        var key=LiveRewardsTypes.hash("first");
+        var slot=NewsFeedModel.inspect(NewsFeedModelTest.list(false),1000,2000,-1,null);
+        var point=new ReviewShizukuTapActor.TapTarget(200,500,1000,2000,0);
+        var story=new NewsAndroidPort.StoryTapCheck(slot,key);
+        var burns=new java.util.concurrent.atomic.AtomicInteger();
+        var movedPoint=new NewsLocalOcr.Result(NewsFeedModel.Kind.ARTICLE,key,230,500,"BADGE_ABSENT",true,"");
+        assertThrows(SecurityException.class,()->story.checkAndBurn(movedPoint,point,burns::incrementAndGet));
+        assertEquals(0,burns.get());
+        var exact=new NewsLocalOcr.Result(NewsFeedModel.Kind.ARTICLE,key,200,500,"BADGE_ABSENT",true,"");
+        assertTrue(story.checkAndBurn(exact,point,burns::incrementAndGet));
+        assertEquals(1,burns.get());
+    }
+
     private static NativeUiStructureProtocol.Report source(int chars) {
         var idle=new NativeUiReadyDiagnostics.Result(NativeUiReadyDiagnostics.Idle.IDLE_OBSERVED,1,0,0,0,0,0,0,0);
         var unknown=NativeUiStructureProtocol.Task.unknown();

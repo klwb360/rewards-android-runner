@@ -183,25 +183,30 @@ final class ReviewBingNavigation {
         catch(RuntimeException unknown){return false;}
     }
     record LiveRead(BingNavigationSnapshot.Result template,BingNavigationSnapshot.LiveVisitResult visit,
-            boolean clean,boolean displayRecheckAllowed){
+            boolean clean,boolean displayRecheckAllowed,ReadingNewsSource.Observation reading){
         private LiveRead(BingNavigationSnapshot.Result template,BingNavigationSnapshot.LiveVisitResult visit,boolean clean){
-            this(template,visit,clean,false);
+            this(template,visit,clean,false,null);
         }
     }
     LiveRead readLiveRun(BingNavigationSnapshot.Shape shape,BingNavigationSnapshot.Ready original){
-        return readLiveRun(shape,original,null);
+        return readLiveRun(shape,original,null,null);
     }
     LiveRead readLiveObservation(BingNavigationSnapshot.Shape shape,BingNavigationSnapshot.Ready anchor){
-        return readLiveRun(shape,null,anchor);
+        return readLiveRun(shape,null,anchor,null);
+    }
+    LiveRead readNewsSource(BingNavigationSnapshot.Shape shape,BingNavigationSnapshot.Ready original,ReadingNewsSource route){
+        if(route==null||!route.owns(original))throw new SecurityException("NEWS_ROUTE_OWNER");
+        return readLiveRun(shape,original,null,route);
     }
     private LiveRead readLiveRun(BingNavigationSnapshot.Shape shape,BingNavigationSnapshot.Ready original,
-            BingNavigationSnapshot.Ready observationAnchor){
+            BingNavigationSnapshot.Ready observationAnchor,ReadingNewsSource route){
         lastLiveNavigationDiagnostic=null;
         long diagnosticStarted=LiveNavigationDiagnostic.clock();
         var diagnostic=LiveNavigationDiagnostic.begin(original==null?LiveNavigationDiagnostic.Call.TEMPLATE:LiveNavigationDiagnostic.Call.VISIT);
         byte[] windows=null,activities=null;
         BingNavigationSnapshot.Result template=BingNavigationSnapshot.Result.unknown();
         BingNavigationSnapshot.LiveVisitResult visit=BingNavigationSnapshot.LiveVisitResult.unknown(BingNavigationSnapshot.LiveVisitGate.INPUT);
+        ReadingNewsSource.Observation reading=null;
         BingFocusDiagnostic focus=null;int focusPair=-1;
         FixedRead focusWindows=diagnosticNotRun,focusActivities=diagnosticNotRun;
         boolean focusParsed=false,parserReady=false,returnedReady=false;
@@ -229,7 +234,12 @@ final class ReviewBingNavigation {
             if(activities==null||!liveRunCurrent()||!authorityMatches(shape)||!knownClean())return new LiveRead(template,visit,knownClean());
             String w=new String(windows,java.nio.charset.StandardCharsets.UTF_8),a=new String(activities,java.nio.charset.StandardCharsets.UTF_8);
             long observed=SystemClock.elapsedRealtime();var profile=new BingNavigationSnapshot.Profile(bingUid,systemUiUid,shape);
-            if(original==null){
+            if(route!=null){
+                reading=route.inspect(w,a,profile,readOnlyGuard,lower,observed);
+                LiveNavigationDiagnostic.parser(diagnostic,reading.parsed());
+                focusParsed=true;focusStatus=reading.source()!=null?"READY":reading.waitable()?"BING_TRANSITION":"UNKNOWN";
+                focusGate=reading.parsed().firstGate().name();parserReady=reading.source()!=null;
+            }else if(original==null){
                 var parsed=BingNavigationSnapshot.parseCurrentTemplate(w,a,profile,readOnlyGuard,lower,observed);
                 template=new BingNavigationSnapshot.Result(parsed.status(),parsed.source()==null?null:parsed.source().ready(),parsed.readOnlyGate(),parsed.firstGate());
                 LiveNavigationDiagnostic.parser(diagnostic,template);
@@ -249,7 +259,7 @@ final class ReviewBingNavigation {
                     BingNavigationSnapshot.LiveVisitResult.unknown(BingNavigationSnapshot.LiveVisitGate.STRICT_SOURCE),knownClean());
             LiveNavigationDiagnostic.pairGate(diagnostic,PairGate.PARSED);
             returnedReady=parserReady;
-            return new LiveRead(template,visit,knownClean(),recheck);
+            return new LiveRead(template,visit,knownClean(),recheck,reading);
         }catch(RuntimeException|Error failure){LiveNavigationDiagnostic.metadataException(diagnostic,failure);throw failure;}
         finally{
             if(windows!=null)Arrays.fill(windows,(byte)0);if(activities!=null)Arrays.fill(activities,(byte)0);

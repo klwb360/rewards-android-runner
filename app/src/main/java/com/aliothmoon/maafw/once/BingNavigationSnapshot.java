@@ -220,7 +220,7 @@ final class BingNavigationSnapshot {
         boolean fresh(long now){return lower>=0&&observed>=lower&&now>=observed&&now-lower<=5_000;}
         // No generated toString(): do not export tokens/window/Activity metadata.
     }
-    private record Block(String token,String name,String task,String text) {}
+    record Block(String token,String name,String task,String text) {}
     private static final Pattern WINDOW=Pattern.compile("(?m)^\\s*Window #\\d+ Window\\{([a-fA-F0-9]+) u\\d+ ([^}\\r\\n]+)\\}:\\s*$");
     private static final Pattern HIST=Pattern.compile("(?m)^\\s*\\* Hist\\s+#\\d+: ActivityRecord\\{([a-fA-F0-9]+) u\\d+ ([^\\s}]+) t([0-9]+)(?:[^}]*?)\\}\\s*$");
     private static final Pattern TOP=Pattern.compile("(?m)^\\s*topResumedActivity=ActivityRecord\\{([a-fA-F0-9]+) u0 (com\\.microsoft\\.bing/[^\\s}]+) t([0-9]+)(?:[^}]*?)\\}\\s*$");
@@ -238,7 +238,7 @@ final class BingNavigationSnapshot {
     private static int count(String text,String token){int n=0,at=0;while((at=text.indexOf(token,at))>=0){n++;at+=token.length();}return n;}
     private static boolean token(String text,String key,String value){return Pattern.compile("(?<![A-Za-z0-9_])"+Pattern.quote(key)+"="+Pattern.quote(value)+"(?![A-Za-z0-9_])").matcher(text).find();}
     private static boolean exactTrue(String text,String key){return token(text,key,"true")&&!token(text,key,"false");}
-    private static String[] one(String text,String pattern,int groups){
+    static String[] one(String text,String pattern,int groups){
         Matcher m=Pattern.compile(pattern,Pattern.MULTILINE).matcher(text);if(!m.find())return null;
         String[] values=new String[groups];for(int i=0;i<groups;i++)values[i]=m.group(i+1);
         return m.find()?null:values;
@@ -247,11 +247,11 @@ final class BingNavigationSnapshot {
     private static boolean entryComponent(String component){return TEMPLATE.equals(component)||MAIN.equals(component);}
     private static boolean visible(Block block){return token(block.text,"isVisible","true")||token(block.text,"isOnScreen","true")
         ||Pattern.compile("(?m)^\\s*Surface: shown=true\\b").matcher(block.text).find();}
-    private static boolean safelyInvisible(Block block){return token(block.text,"isOnScreen","false")&&!token(block.text,"isOnScreen","true")
+    static boolean safelyInvisible(Block block){return token(block.text,"isOnScreen","false")&&!token(block.text,"isOnScreen","true")
         &&token(block.text,"isVisible","false")&&!token(block.text,"isVisible","true")
         &&(token(block.text,"mHasSurface","false")||Pattern.compile("(?m)^\\s*Surface: shown=false\\b").matcher(block.text).find());}
     private static boolean appWindow(Block b,Profile p,String task){return appWindow(b,p,task,false);}
-    private static boolean appWindow(Block b,Profile p,String task,boolean entry){
+    static boolean appWindow(Block b,Profile p,String task,boolean entry){
         String[] display=one(b.text,"^\\s*mDisplayId=(\\d+)\\s+rootTaskId=(\\d+)\\b.*$",2);
         String[] owner=one(b.text,"^\\s*mOwnerUid=(\\d+)\\b[^\\r\\n]*\\bpackage=([^\\s]+)\\s+appop=([^\\s]+)[^\\r\\n]*$",3);
         String[] requested=one(b.text,"^\\s*Requested w=(\\d+) h=(\\d+)(?:\\s.*)?$",2);
@@ -543,9 +543,9 @@ final class BingNavigationSnapshot {
         return b.name.equals(g.ownComponent)&&display!=null&&display[0].equals("0")&&display[1].equals(Integer.toString(g.ownTaskId))
             &&owner!=null&&owner[0].equals(Integer.toString(g.ownUid))&&owner[1].equals(OWN_PACKAGE)&&owner[2].equals("NONE");
     }
-    private record Section(String header,String body,int indent) {}
+    record Section(String header,String body,int indent) {}
     // Indentation-bounded sections prevent later Task/Activity/summary fields bleeding into a window.
-    private static List<Section> sections(String document,String headerPattern){
+    static List<Section> sections(String document,String headerPattern){
         String[] lines=document.split("\\r?\\n",-1);List<Section> result=new ArrayList<>();Pattern pattern=Pattern.compile(headerPattern);
         for(int i=0;i<lines.length;i++)if(pattern.matcher(lines[i]).matches()){
             int indent=indent(lines[i]);if(indent<0||result.size()>=128)return List.of();
@@ -559,7 +559,7 @@ final class BingNavigationSnapshot {
         return result;
     }
     private static int indent(String line){int n=0;while(n<line.length()&&line.charAt(n)==' ')n++;return n<line.length()&&line.charAt(n)=='\t'?-1:n;}
-    private static Section uniqueSection(List<Section> sections,String header){
+    static Section uniqueSection(List<Section> sections,String header){
         Section found=null;for(Section s:sections)if(s.header.matches(header)){if(found!=null)return null;found=s;}return found;
     }
     private static String value(String text,String name){
@@ -603,7 +603,7 @@ final class BingNavigationSnapshot {
             status=combine(status,Status.BING_TRANSITION);
         return status;
     }
-    private static Status activityState(Section activity,String token,String component,String task,int uid,boolean hidden){
+    static Status activityState(Section activity,String token,String component,String task,int uid,boolean hidden){
         String pkg=component.substring(0,component.indexOf('/'));
         String[] linked=one(activity.body,"^ *rootOfTask=(?:true|false) task=Task\\{([a-fA-F0-9]+) #(\\d+) type=standard A=(\\d+):([^}]+)\\} *$",4);
         if(linked==null||!linked[1].equals(task)||!linked[2].equals(Integer.toString(uid))||!linked[3].equals(pkg))return Status.UNKNOWN;

@@ -118,6 +118,16 @@ final class LiveRewardsNavigation {
     boolean currentTemplateMatches(BingNavigationSnapshot.Ready source){
         try{return source!=null&&source.sameSource(template())&&current();}catch(RuntimeException unknown){return false;}
     }
+    ReadingNewsSource.Observation reading(ReadingNewsSource route){
+        if(route==null||!route.owns(baseline)||!current())throw new SecurityException("NEWS_ROUTE_OWNER");
+        var diagnostic=LiveNavigationDiagnostic.begin(LiveNavigationDiagnostic.Call.VISIT);
+        long began=LiveNavigationDiagnostic.clock();
+        try{
+            var result=reader.readNewsSource(shape,baseline,route);
+            if(!result.clean()||!current()||result.reading()==null)throw new SecurityException("NEWS_ROUTE_READ");
+            return result.reading();
+        } finally {saveDiagnostic(diagnostic,true,began);}
+    }
     BingNavigationSnapshot.LiveVisitResult visit(BingNavigationSnapshot.Ready original){
         passiveFocusDiagnosticPending=false;
         lastDiagnostic=null;
