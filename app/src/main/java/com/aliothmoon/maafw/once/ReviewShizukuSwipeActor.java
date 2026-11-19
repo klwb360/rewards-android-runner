@@ -25,7 +25,11 @@ final class ReviewShizukuSwipeActor {
     boolean knownClean(){return resourcesKnownClean;}
 
     enum Direction { UP, DOWN }
-    record SwipeTarget(int fullDisplayWidth, int fullDisplayHeight, int rotation, Direction direction, int distance) {
+    record SwipeTarget(int fullDisplayWidth, int fullDisplayHeight, int rotation, Direction direction, int distance,
+                       boolean measuredNewsStride) {
+        SwipeTarget(int width,int height,int rotation,Direction direction,int distance) {
+            this(width,height,rotation,direction,distance,false);
+        }
         SwipeTarget(int fullDisplayWidth,int fullDisplayHeight,int rotation,Direction direction){
             this(fullDisplayWidth,fullDisplayHeight,rotation,direction,standardDistance(fullDisplayHeight));
         }
@@ -36,7 +40,10 @@ final class ReviewShizukuSwipeActor {
         int fromY(){return direction==Direction.DOWN?upperY():lowerY();}
         int toY(){return direction==Direction.DOWN?lowerY():upperY();}
         private int lowerY(){return upperY()+distance;}
-        private int upperY(){return (int)((long)fullDisplayHeight*7/20)+(standardDistance(fullDisplayHeight)-distance)/2;}
+        private int upperY(){
+            if (measuredNewsStride) return (int)((long)fullDisplayHeight * 21 / 40) - distance / 2;
+            return (int)((long)fullDisplayHeight*7/20)+(standardDistance(fullDisplayHeight)-distance)/2;
+        }
     }
     record DisplayShape(int width, int height, int rotation) {}
     enum Kind { REJECTED, COMMAND_EXITED, DISPATCH_UNKNOWN }
@@ -85,8 +92,21 @@ final class ReviewShizukuSwipeActor {
     private OverviewScanIntent.ScrollPermit overviewPermit;
     private CardRevealProbeIntent.ScrollPermit cardRevealPermit;
     private LiveRunAuthority.ScrollPermit liveRunPermit;
+    private NewsAndroidPort.Input news;
+    static boolean newsClean() { return PROCESS.quarantine == null; }
+    static Result newsSwipe(Context context, NewsAndroidPort.Input grant, SwipeTarget target) {
+        if (grant == null || !newsClean() || !grant.claim(target)) throw new SecurityException("NEWS_SWIPE_NOT_BOUND");
+        var actor = new ReviewShizukuSwipeActor(new AndroidReviewShizukuSwipeBackend(context),
+                new AtomicBoolean(),true,PROCESS,target.direction());
+        actor.news = grant;
+        return actor.swipe(target,new DispatchGate() {
+            public boolean consume(SwipeTarget exact) throws Exception { return newsClean() && grant.consume(exact); }
+            public boolean stillValid(SwipeTarget exact) { return newsClean() && grant.valid(exact); }
+        });
+    }
     private boolean quarantined(){return processFence!=null&&processFence.quarantine!=null;}
     private boolean scopeCurrent(){
+        if(news!=null)return news.current();
         if(liveRunPermit!=null)return liveRunPermit.live()&&liveRunPermit.current(android.os.SystemClock.elapsedRealtime());
         if(cardRevealPermit!=null)return cardRevealPermit.intent.live()&&cardRevealPermit.current(android.os.SystemClock.elapsedRealtime());
         if(overviewPermit!=null)return overviewPermit.intent.live()&&overviewPermit.current(android.os.SystemClock.elapsedRealtime());
@@ -153,7 +173,7 @@ final class ReviewShizukuSwipeActor {
     }
     Result swipe(SwipeTarget target, DispatchGate gate) {
         if (!valid(target) || target.direction()!=allowedDirection || gate == null) return rejected(false, Reason.INVALID_INPUT);
-        if (liveRunPermit==null ? !target.standard() : !liveRunPermit.matchesTarget(target))
+        if (news == null && (target.measuredNewsStride() || (liveRunPermit==null ? !target.standard() : !liveRunPermit.matchesTarget(target))))
             return rejected(false, Reason.INVALID_INPUT);
         // Never restore this budget, even for preflight failure or an uncertain gate.
         if (!spent.compareAndSet(false, true)) return rejected(false, Reason.ALREADY_SPENT);
@@ -211,7 +231,8 @@ final class ReviewShizukuSwipeActor {
                 && (long)t.fullDisplayWidth() * t.fullDisplayHeight() <= 4L * 1024 * 1024
                 && t.rotation() == 0 && t.fullDisplayHeight()>t.fullDisplayWidth()
                 && t.x()>0&&t.x()<t.fullDisplayWidth()
-                && t.distance()>=MIN_DISTANCE && t.distance()<=SwipeTarget.standardDistance(t.fullDisplayHeight())
+                && t.distance()>=MIN_DISTANCE && t.distance()<=(t.measuredNewsStride()
+                    ? (long)t.fullDisplayHeight()*13/20 : SwipeTarget.standardDistance(t.fullDisplayHeight()))
                 && Math.min(t.fromY(),t.toY())>=(long)t.fullDisplayHeight()/5
                 && Math.max(t.fromY(),t.toY())<=(long)t.fullDisplayHeight()*17/20;
     }

@@ -201,7 +201,7 @@ final class RemainingCardNativeProcessor implements AutoCloseable {
     private static final class WipingOutput extends ByteArrayOutputStream {
         void wipe(){Arrays.fill(buf,(byte)0);reset();}
     }
-    private static final class OwnedGraySource implements BackendPorts.FrameSource {
+    static final class OwnedGraySource implements BackendPorts.FrameSource {
         private final byte[] gray;
         private final int width,height;
         private OnceBackend.Owner owner;

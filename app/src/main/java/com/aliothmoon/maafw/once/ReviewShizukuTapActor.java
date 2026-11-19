@@ -68,6 +68,18 @@ final class ReviewShizukuTapActor {
     private volatile boolean resourcesKnownClean=true;
     boolean knownClean(){return resourcesKnownClean&&(livePermit==null||!livePermit.live()||liveQuarantine==null);}
     /** New visibly issued run capability. Historical process-wide budgets are not reset. */
+    static boolean newsClean() { return liveQuarantine == null; }
+    static Result newsTap(Context context, NewsAndroidPort.Input grant, TapTarget target) {
+        if (grant == null || !newsClean() || !grant.claim(target)) throw new SecurityException("NEWS_TAP_NOT_BOUND");
+        var actor = new ReviewShizukuTapActor(new AndroidReviewShizukuTapBackend(context,
+                ServerMode.REWARDS_BUSINESS_ROOT_20261111),new AtomicBoolean());
+        var result = actor.tap(target,new DispatchGate() {
+            public boolean consume(TapTarget exact) throws Exception { return newsClean() && grant.consume(exact); }
+            public boolean stillValid(TapTarget exact) { return newsClean() && grant.valid(exact); }
+        });
+        if (!actor.knownClean()) liveQuarantine = actor;
+        return result;
+    }
     static ReviewShizukuTapActor forLiveRun(Context context,LiveActionPermit permit){
         if(permit==null||!permit.live()||liveQuarantine!=null
                 ||!permit.claimTapActor(android.os.SystemClock.elapsedRealtime()))

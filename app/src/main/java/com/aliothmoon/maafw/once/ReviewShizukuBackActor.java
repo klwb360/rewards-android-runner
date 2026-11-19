@@ -59,6 +59,15 @@ final class ReviewShizukuBackActor {
     private final AtomicBoolean spent;
     private LiveActionPermit livePermit;
     private java.util.function.LongSupplier liveClock;
+    static boolean newsClean() { return quarantine == null; }
+    static Result newsBack(Context context, NewsAndroidPort.Input grant, BackTarget target) {
+        if (grant == null || !newsClean() || !grant.claim(target)) throw new SecurityException("NEWS_RETURN_NOT_BOUND");
+        var actor = new ReviewShizukuBackActor(new AndroidReviewShizukuBackBackend(context),new AtomicBoolean());
+        return actor.back(target,new DispatchGate() {
+            public boolean consume(BackTarget exact) throws Exception { return newsClean() && grant.consume(exact); }
+            public boolean stillValid(BackTarget exact) { return newsClean() && grant.valid(exact); }
+        });
+    }
     static ReviewShizukuBackActor forLiveRun(Context context,LiveActionPermit permit){
         if(permit==null||!permit.live()||quarantine!=null
                 ||!permit.claimBackActor(android.os.SystemClock.elapsedRealtime()))

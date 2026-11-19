@@ -54,7 +54,9 @@ public class LiveRewardsEntryTest {
     @Test public void liveCropHasSeparateTypedAuthorityWhileLegacyCropRemainsOneShot()throws Exception{
         String transport=source("AndroidCardRegionCapture");
         String live=body(transport,"/** Independent live-run crop authority", "private static boolean live(CardRevealProbeIntent.UiPermit");
-        for(String required:new String[]{"LiveRunAuthority.CropPermit permit","!permit.live()","permit.bindRequest(",
+        assertEquals(java.util.Set.of(LiveRunAuthority.CropPermit.class,NewsAndroidPort.Crop.class),
+                java.util.Set.of(OwnedCardCropPermit.class.getPermittedSubclasses()));
+        for(String required:new String[]{"OwnedCardCropPermit permit","!permit.live()","permit.bindRequest(",
                 "gate.consume()","permit.claimDispatch(","process=service.newProcess("})assertTrue(required,live.contains(required));
         for(String bad:new String[]{"fixture","PROCESS_SPENT","set(false)","screencap","captureDisplayBitmap"})assertFalse(bad,live.contains(bad));
     }

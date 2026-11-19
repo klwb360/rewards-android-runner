@@ -25,6 +25,7 @@ import org.json.JSONObject;
 
 /** Explicit single-run owner for native local perception and typed live actions. */
 final class LiveRewardsRuntime {
+    static final class ReadingApproval { private ReadingApproval() {} }
     static final String PROFILE="LIVE_REWARDS_CYCLE_V1",DIRECTORY="rewards-live-cycle-v1";
     private final DormantCaptureConfirmationActivity activity;
     private final VisibleCaptureAuthority.LiveRewardsApproval approval;
@@ -47,6 +48,8 @@ final class LiveRewardsRuntime {
     private final boolean taskInputAllowed,singleTask;
     private final LiveRewardsTaskSelection selection;
     private final LiveMoreUiRecheck uiRecheck;
+    private final ReadingNewsChoice.Mode newsMode;
+    private NewsAndroidPort news;
     private LiveRewardsCoordinator.Summary summary;
     private LiveRewardsTypes.Preflight readOnlyPreflight;
     private boolean readOnlyPreflightStarted,readOnlyPreflightReturned;
@@ -64,12 +67,16 @@ final class LiveRewardsRuntime {
 
     private LiveRewardsRuntime(DormantCaptureConfirmationActivity activity,
             VisibleCaptureAuthority.LiveRewardsApproval approval,BingNavigationSnapshot.Shape shape,String runDay,
-            LiveRewardsTaskSelection selection,boolean moreUiRecheck){
+            LiveRewardsTaskSelection selection,boolean moreUiRecheck,ReadingNewsChoice.Mode newsMode){
         this.activity=activity;this.approval=approval;this.shape=shape;this.runDay=runDay;taskInputAllowed=approval.taskInputAllowed;
         singleTask=approval.singleTask;
         this.selection=selection;
         if(moreUiRecheck&&taskInputAllowed)throw new SecurityException("More UI recheck requires read-only approval");
         uiRecheck=moreUiRecheck?new LiveMoreUiRecheck():null;
+        this.newsMode=newsMode;
+        if(newsMode!=null&&(singleTask||selection.limited()||moreUiRecheck
+                ||(newsMode==ReadingNewsChoice.Mode.LIVE)!=taskInputAllowed))
+            throw new SecurityException("Dedicated news confirmation required");
     }
     static LiveRewardsRuntime start(DormantCaptureConfirmationActivity activity,
             DormantCaptureConfirmationActivity.LiveClick click,Object approvalOwner){
@@ -95,6 +102,7 @@ final class LiveRewardsRuntime {
         var selection=requestedTaskInputAllowed&&!approval.singleTask
                 ? LiveRewardsUi.takeSelection(activity) : LiveRewardsTaskSelection.ALL;
         boolean moreUiRecheck=!requestedTaskInputAllowed&&LiveRewardsUi.takeMoreUiRecheck(activity);
+        var newsMode=LiveRewardsUi.takeNewsMode(activity,requestedTaskInputAllowed,approval.singleTask||selection.limited()||moreUiRecheck);
         if(!selection.current(approvedDay))throw new SecurityException("Task selection day changed");
         var manager=activity.getSystemService(DisplayManager.class);var display=manager==null?null:manager.getDisplay(Display.DEFAULT_DISPLAY);
         if(display==null||display.getState()!=Display.STATE_ON||display.getRotation()!=Surface.ROTATION_0)
@@ -104,7 +112,7 @@ final class LiveRewardsRuntime {
         var bounds=wm.getMaximumWindowMetrics().getBounds();
         if(bounds.left!=0||bounds.top!=0||bounds.width()!=1440||bounds.height()!=2560)
             throw new SecurityException("Reviewed portrait shape required");
-        var run=new LiveRewardsRuntime(activity,approval,new BingNavigationSnapshot.Shape(bounds.width(),bounds.height(),0),approvedDay,selection,moreUiRecheck);
+        var run=new LiveRewardsRuntime(activity,approval,new BingNavigationSnapshot.Shape(bounds.width(),bounds.height(),0),approvedDay,selection,moreUiRecheck,newsMode);
         run.root=CaptureSessionRuntime.retainAlignment(run,approval.deadline,run::latchCancel,run::closeOnOwner,()->run.closed,run::postOwner);
         try{
             run.loop.start();run.owner=new Handler(run.loop.getLooper());run.root.arm();run.startedElapsed=approval.issued;
@@ -153,6 +161,7 @@ final class LiveRewardsRuntime {
         if(!workerStarted.compareAndSet(false,true)||closed)return;
         try{
             requireHidden();startedElapsed=SystemClock.elapsedRealtime();stage="PREPARING";
+            if(newsMode!=null){runNews();return;}
             if(!taskInputAllowed){runReadOnly();return;}
             artifacts=createArtifactDirectory();artifactKey=directoryKey(artifacts);
             ledger=new LiveRewardsLedger(activity.getNoBackupFilesDir().toPath(),authority.day(),runId);
@@ -206,6 +215,30 @@ final class LiveRewardsRuntime {
         finally{
             finishedElapsed=SystemClock.elapsedRealtime();workerReturned=true;
             closeOnOwner();
+        }
+    }
+    private void runNews()throws Exception{
+        requireHidden();
+        if(singleTask||uiRecheck!=null||input!=null||coordinator!=null||authority.taskScopeCount()!=0
+                ||authority.taskInputAllowed()!=(newsMode==ReadingNewsChoice.Mode.LIVE))
+            throw new SecurityException("News authority mismatch");
+        artifacts=createArtifactDirectory();artifactKey=directoryKey(artifacts);
+        ledger=new LiveRewardsLedger(activity.getNoBackupFilesDir().toPath(),authority.day(),runId);
+        authority.attachLedger(ledger);
+        navigation=new LiveRewardsNavigation(activity.getApplicationContext(),authority,activity.getTaskId(),
+                activity.getComponentName().flattenToString(),shape,this::hiddenCurrent);
+        stage="NEWS_READING_ENTRY";
+        news=new NewsAndroidPort(new ReadingApproval(),activity.getApplicationContext(),authority,navigation,shape,runId,
+                this::hiddenCurrent,this::publishArtifact);
+        try{
+            news.run();
+            requireHidden();
+            if(!nativeResourcesClosed())throw new SecurityException("News cleanup unconfirmed");
+            stage="COMPLETE";
+        }finally{
+            tapCalls=news.tapCalls();tapSuccesses=news.tapSuccesses();tapDispatches=news.tapDispatches();
+            returnCalls=news.backCalls();backSuccesses=news.backSuccesses();backDispatches=news.backDispatches();
+            returnSuccesses=backSuccesses;inputUnknown=news.inputUnknown();
         }
     }
     private void runReadOnly()throws Exception{
@@ -316,7 +349,7 @@ final class LiveRewardsRuntime {
                 .put("tapDispatchAttempts",tapDispatches).put("backDispatchAttempts",backDispatches).put("backCommandSuccesses",backSuccesses)
                 .put("inputOutcomeUnknown",inputUnknown)
                 .put("returnCommandConfirmed",returnSuccesses).put("captures",cropImages).put("markedImages",markedImages)
-                .put("startedElapsed",startedElapsed).put("finishedElapsed",finishedElapsed).put("minimumVisitDelayMs",LiveRewardsInput.RETURN_DELAY_MS)
+                .put("startedElapsed",startedElapsed).put("finishedElapsed",finishedElapsed).put("minimumVisitDelayMs",visitDelayMillis())
                 .put("visitDelayStartsAt","SUCCESSFUL_TAP_COMMAND_RETURN").put("accountCreditVerified",false)
                 .put("rawTextIncluded",false).put("rawDataUploaded",false).put("oldRecordsReset",false)
                 .put("outcomes",outcomes).put("artifacts",artifactsIndex).put("actions",actionIndex);
@@ -387,6 +420,7 @@ final class LiveRewardsRuntime {
         try(FileChannel parent=FileChannel.open(directory,StandardOpenOption.READ,LinkOption.NOFOLLOW_LINKS)){parent.force(true);}
     }
     private boolean nativeResourcesClosed(){return !constructionUnknown&&AndroidCardRegionCapture.knownClean()
+            &&(news==null||news.knownClean())
             &&AndroidOverviewUiReader.knownClean()&&AndroidUiStructureReader.processKnownClean()&&ReviewBingNavigation.knownClean()
             &&(navigation==null||navigation.knownClean())&&(perception==null||perception.knownClean())&&(input==null||input.knownClean());}
     private boolean nativeWorkClosed(){return nativeResourcesClosed()&&!appendActive.get();}
@@ -445,10 +479,11 @@ final class LiveRewardsRuntime {
             verifyArtifactRoot();writeFile(artifacts,"REPORT.json",bytes);verifyArtifactRoot();
             reportSha256=CardNativeMockReceipt.digest(bytes);reportPublished=true;
             writeForegroundReceipt();
-            if(uiRecheck!=null)writeUiRecheckReceipt();
+            if(newsMode!=null)writeNewsReceipt();
+            else if(uiRecheck!=null)writeUiRecheckReceipt();
             else if(!taskInputAllowed)writeReadOnlyReceipt();
             writeFocusReceipt();
-            if(taskInputAllowed && !singleTask)writeScrollTrace();
+            if(taskInputAllowed && !singleTask && newsMode==null)writeScrollTrace();
         }catch(Throwable failed){failure="REPORT_PUBLICATION_FAILED";}
     }
     private void writeScrollTrace()throws Exception{
@@ -470,6 +505,18 @@ final class LiveRewardsRuntime {
                 .put("scrollAllowed",true).put("issuedElapsed",approval.issued).put("deadlineElapsed",approval.deadline)
                 .put("reportSha256",reportSha256).put("rawTextIncluded",false).put("rawDataUploaded",false).put("oldRecordsReset",false);
         verifyArtifactRoot();writeFile(artifacts,"READONLY.json",receipt.toString().getBytes(StandardCharsets.UTF_8));verifyArtifactRoot();
+    }
+    private long visitDelayMillis(){
+        return newsMode==null?LiveRewardsInput.RETURN_DELAY_MS:ReadingNewsCycle.WAIT_MILLIS;
+    }
+    private void writeNewsReceipt()throws Exception{
+        JSONObject receipt=news==null?new JSONObject().put("status","NOT_STARTED").put("listConfirmed",false):news.report();
+        receipt.put("schemaVersion",1).put("profile",PROFILE).put("runId",runId).put("day",runDay)
+                .put("purpose",newsMode==ReadingNewsChoice.Mode.LIVE?"NEWS_LIVE":"NEWS_PREFLIGHT")
+                .put("taskInputAllowed",taskInputAllowed).put("knownClean",nativeResourcesClosed())
+                .put("reportSha256",reportSha256).put("rawTextIncluded",false).put("rawDataUploaded",false)
+                .put("oldRecordsReset",false).put("accountCreditVerified",false);
+        verifyArtifactRoot();writeFile(artifacts,"NEWS.json",receipt.toString().getBytes(StandardCharsets.UTF_8));verifyArtifactRoot();
     }
     private void writeUiRecheckReceipt()throws Exception{
         var attempts=new JSONArray();
@@ -505,7 +552,7 @@ final class LiveRewardsRuntime {
                 .put("destroyedElapsed",exact==null?-1:exact.destroyedElapsed())
                 .put("state",exact==null?"NOT_STARTED":exact.state().name()).put("reason",exact==null?"NONE":exact.reason().name())
                 .put("nativeCleanup",nativeWorkClosed()?"CONFIRMED":"UNKNOWN").put("reportSha256",reportSha256)
-                .put("minimumVisitDelayMs",LiveRewardsInput.RETURN_DELAY_MS)
+                .put("minimumVisitDelayMs",visitDelayMillis())
                 .put("rawTextIncluded",false).put("rawDataUploaded",false).put("oldRecordsReset",false);
         verifyArtifactRoot();writeFile(artifacts,"FOREGROUND.json",receipt.toString().getBytes(StandardCharsets.UTF_8));verifyArtifactRoot();
     }
@@ -519,14 +566,14 @@ final class LiveRewardsRuntime {
                 .put("terminal",true).put("released",true).put("rootEpochReleased",true).put("cleanup","CONFIRMED")
                 .put("reportFile","REPORT.json").put("reportSha256",reportSha256)
                 .put("reportFinishedElapsed",finishedElapsed).put("releasedElapsed",releasedElapsed).put("failure",safeEnum(failure))
-                .put("minimumVisitDelayMs",LiveRewardsInput.RETURN_DELAY_MS)
+                .put("minimumVisitDelayMs",visitDelayMillis())
                 .put("rawTextIncluded",false).put("rawDataUploaded",false).put("oldRecordsReset",false);
         if(!releaseConfirmed())throw new SecurityException("Release proof changed");
         writeFile(artifacts,"RELEASE.json",receipt.toString().getBytes(StandardCharsets.UTF_8));verifyArtifactRoot();
     }
     private void notifyFinished(){if(notified)return;notified=true;activity.liveRewardsFinished(this,fixedSummary());}
     boolean finishedAndReleased(){return workerReturned&&closed&&released;}
-    private String perceptionState(){return perception==null?"NOT_CREATED":safeEnum(perception.safeState());}
+    private String perceptionState(){return news!=null?safeEnum(news.state()):perception==null?"NOT_CREATED":safeEnum(perception.safeState());}
     String fixedSummary(){return "profile="+PROFILE+" stage="+stage+" terminal="+workerReturned+" released="+released
             +" cleanup="+(allResourcesClosed()?"CONFIRMED":"UNKNOWN")+" failure="+safeEnum(failure)
             +" reportPublished="+reportPublished+" releaseReceiptPublished="+releaseReceiptPublished
@@ -536,7 +583,8 @@ final class LiveRewardsRuntime {
             +(uiRecheck==null?"":" uiRecheckStep="+uiRecheck.step()+" uiRecheckResult="+uiRecheck.lastResult())
             +" tapCalls="+tapCalls+" tapCommandSuccesses="+tapSuccesses+" returnCalls="+returnCalls+" returnCommandConfirmed="+returnSuccesses
             +" tapDispatchAttempts="+tapDispatches+" backDispatchAttempts="+backDispatches+" backCommandSuccesses="+backSuccesses+" inputOutcomeUnknown="+inputUnknown
-            +" captures="+cropImages+" marks="+markedImages+" fullScreenCaptures=0 minimumVisitDelayMs="+LiveRewardsInput.RETURN_DELAY_MS
+            +(newsMode==null?"":" newsMode="+newsMode)
+            +" captures="+cropImages+" marks="+markedImages+" fullScreenCaptures=0 minimumVisitDelayMs="+visitDelayMillis()
             +" waitFrom=SUCCESSFUL_TAP_COMMAND_RETURN accountCreditVerified=false rawDataUploaded=false oldRecordsReset=false artifacts="+runId
             +(summary==null?"":" "+summary.fixedSummary().substring(("profile="+PROFILE+" ").length()));}
 }

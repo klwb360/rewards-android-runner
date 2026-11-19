@@ -20,7 +20,7 @@ import java.util.Set;
 /** New day-level one-shot journal. It never reads, repairs or resets any historical namespace. */
 final class LiveRewardsLedger {
     static final String DIRECTORY="rewards-live-cycle-v1";
-    private interface Store { boolean exists(String path)throws IOException;void create(String path,String data)throws IOException; }
+    interface Store { boolean exists(String path)throws IOException;void create(String path,String data)throws IOException; }
     private final Store store;
     private final String day,runId,dayRoot,runRoot;
     private final boolean production;
@@ -88,14 +88,14 @@ final class LiveRewardsLedger {
             throw new IOException("Bounded scalar read slot required");
         readSlots++;store.create(runRoot+"/reads/"+safeSlot+".burned","slot="+safeSlot+" inputAuthority=false\n");
     }
-    private static final class MemoryStore implements Store {
+    static final class MemoryStore implements Store {
         private final Map<String,String> entries=new HashMap<>();
         public synchronized boolean exists(String path){return entries.containsKey(path);}
         public synchronized void create(String path,String value)throws IOException{
             if(entries.putIfAbsent(path,value)!=null)throw new FileAlreadyExistsException(path);
         }
     }
-    private static final class FileStore implements Store {
+    static final class FileStore implements Store {
         private final Path root;
         private final Object rootIdentity;
         FileStore(Path root)throws IOException{
