@@ -200,23 +200,41 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
         backs++;
         char letter = submitted;
         need(allowedLetter(letter) && now() - successAt >= 5000, "SEARCH_BACK_EARLY");
-        var result = source();
-        need(!result.equals(origin) && !result.equals(editor), "SEARCH_RESULT_UNBOUND");
-        if (BingNavigationSnapshot.BROWSER.equals(result.component())) {
-            need("MATCH".equals(probe(result, "QUERY", letter).state), "SEARCH_RESULT_QUERY");
-        } else {
-            need(RESULTS.equals(result.component()), "SEARCH_RESULT_COMPONENT");
-        }
+        var result = clearResultSource();
+        need(boundResult(origin, editor, result), "SEARCH_RESULT_UNBOUND");
         submitted = 0;
         action(Input.BACK, result, letter, 0, 0);
         reusableEditor = true;
         pause(500);
     }
 
+    static boolean boundResult(BingForegroundSnapshot.Snapshot origin, BingForegroundSnapshot.Snapshot editor,
+                               BingForegroundSnapshot.Snapshot result) {
+        return origin != null && editor != null && result != null
+                && origin.task().equals(editor.task()) && origin.task().equals(result.task())
+                && !origin.activity().equals(result.activity()) && !editor.activity().equals(result.activity())
+                && !origin.window().equals(result.window()) && !editor.window().equals(result.window())
+                && (RESULTS.equals(result.component()) || BingNavigationSnapshot.BROWSER.equals(result.component()));
+    }
+
+    private BingForegroundSnapshot.Snapshot clearResultSource() throws Exception {
+        long end = Math.min(authority.deadline(), now()+5000);
+        while (true) {
+            try {
+                return source();
+            } catch (SecurityException blocked) {
+                String reason = blocked.getMessage();
+                if (now() >= end || !("SEARCH_COVERED".equals(reason) || "SEARCH_BING_WINDOW_OVERLAP".equals(reason)))
+                    throw blocked;
+                pause(150);
+            }
+        }
+    }
+
     private enum Input { OPEN, SELECT_ALL, TYPE, SUBMIT, BACK }
 
     private void action(Input input, BingForegroundSnapshot.Snapshot owner, char letter, int x, int y) throws Exception {
-        need(allowedLetter(letter) && owner.equals(source()), "SEARCH_DISPATCH_SOURCE");
+        need(allowedLetter(letter) && owner.equals(input == Input.BACK ? clearResultSource() : source()), "SEARCH_DISPATCH_SOURCE");
         String[] command = switch (input) {
             case OPEN -> {
                 need(x > 0 && y > 0 && x < shape.width() && y < shape.height()/2, "SEARCH_BAR_BOUNDS");
@@ -241,7 +259,7 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
         Projection accept(String line, String nonce, String operation, int width, int height) {
             need(invoked && !acknowledged && NativeUiStructureProtocol.validNonce(nonce)
                     && width > 0 && width <= 8192 && height > 0 && height <= 8192
-                    && ("BAR".equals(operation) || "QUERY".equals(operation)
+                    && ("BAR".equals(operation)
                     || "EDITOR".equals(operation) || "SELECTION".equals(operation))
                     && line != null && line.length() <= 300 && line.endsWith("\n"), "SEARCH_PROBE_PROTOCOL");
             String[] f = line.substring(0,line.length()-1).split("\\|",-1);
@@ -255,7 +273,6 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
                 int x = Integer.parseInt(f[3]), y = Integer.parseInt(f[4]);
                 boolean valid = switch (operation) {
                     case "BAR" -> f[5].equals("BAR");
-                    case "QUERY" -> f[5].equals("MATCH");
                     case "EDITOR", "SELECTION" -> f[5].equals("EMPTY") || f[5].equals("OTHER") || f[5].equals("MATCH")
                             || operation.equals("SELECTION") && f[5].equals("SELECTED");
                     default -> false;
@@ -547,9 +564,7 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
                         && Math.max(field.getTextSelectionStart(),field.getTextSelectionEnd())==value.length()) state="SELECTED";
                 return new Projection(rect.centerX(),rect.centerY(),state);
             }
-            boolean bar = "BAR".equals(operation) && landing(component);
-            boolean query = "QUERY".equals(operation) && BingNavigationSnapshot.BROWSER.equals(component);
-            need(bar || query,"MODE");
+            need("BAR".equals(operation) && landing(component),"MODE");
             var visit = new ArrayDeque<AccessibilityNodeInfo>();
             visit.add(root);
             AccessibilityNodeInfo match=null;
@@ -561,13 +576,10 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
                 String id=n.getViewIdResourceName();
                 if(n.isVisibleToUser()) {
                     if("compose_home_root".equals(id))homeAnchor=true;
-                    if(ADDRESS_TEXT.equals(id)){
-                        if(!query || n.getText()!=null && n.getText().length()==1 && n.getText().charAt(0)==letter)title=true;
-                    }
-                    boolean candidate = query ? ADDRESS_TEXT.equals(id) :
-                            BingNavigationSnapshot.MAIN.equals(component) ? "search_bar".equals(id) : ADDRESS.equals(id);
+                    if(ADDRESS_TEXT.equals(id)) title=true;
+                    boolean candidate = BingNavigationSnapshot.MAIN.equals(component) ? "search_bar".equals(id) : ADDRESS.equals(id);
                     if(candidate) {
-                        need(match==null && n.isEnabled() && (query || n.isClickable()),"DUPLICATE_OR_DISABLED");
+                        need(match==null && n.isEnabled() && n.isClickable(),"DUPLICATE_OR_DISABLED");
                         match=n;
                     }
                 }
@@ -583,7 +595,7 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
             }
             need(match!=null && (BingNavigationSnapshot.MAIN.equals(component) ? homeAnchor : title),"CHROME");
             var rect=chromeBounds(match,width,height);
-            return new Projection(rect.centerX(),rect.centerY(),query?"MATCH":"BAR");
+            return new Projection(rect.centerX(),rect.centerY(),"BAR");
         }
 
         private static Rect chromeBounds(AccessibilityNodeInfo n,int width,int height) {
