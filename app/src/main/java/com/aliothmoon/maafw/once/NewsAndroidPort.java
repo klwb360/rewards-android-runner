@@ -32,13 +32,17 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
     private final LiveRewardsLedger.Store files;
     private final String preparation;
     private final boolean progressBatch;
+    private final ReadingNewsChoice.Mode mode;
     private volatile int progressSlotsAtStart=-1;
+    private volatile int dailySlotsAtStart=-1;
     private volatile NativeUiStructureProtocol.Task progressAtEntry;
     private final AtomicBoolean started = new AtomicBoolean();
     private BingNavigationSnapshot.Ready original;
     private ReadingNewsSource readingSource;
     private boolean awaitingFeed;
     private boolean observingArticle;
+    private int rejectedArticleTreeReads;
+    private NativeUiStructureProtocol.Reason lastArticleTreeRejection;
     private ArticleWindow articleWindow;
     private Snapshot returnCandidate;
     private int anchorY = -1;
@@ -65,7 +69,8 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
                 || !UUID.fromString(runId).toString().equals(runId)) throw reject("READING_OWNER");
         this.context=context.getApplicationContext(); this.authority=authority; this.navigation=navigation;
         this.shape=shape; this.runId=runId; this.hidden=hidden; this.artifacts=artifacts;
-        progressBatch=selected.mode==ReadingNewsChoice.Mode.PROGRESS_FIVE;
+        mode=selected.mode;
+        progressBatch=mode==ReadingNewsChoice.Mode.PROGRESS_FIVE;
         files=new LiveRewardsLedger.FileStore(context.getNoBackupFilesDir().toPath());
         preparation=ReadingNewsLedger.DIRECTORY+"/"+authority.day()+"/preparations/"+runId+"/";
     }
@@ -97,9 +102,10 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
             if (entry==null || entry.frame().entry()==null) throw reject("ENTRY_NOT_VISIBLE");
             if (entry.frame().entryComplete()) { outcome=step="ENTRY_ALREADY_COMPLETE"; return; }
             ReadingNewsLedger ledger=null;
-            if(progressBatch){
-                ledger=new ReadingNewsLedger(files,authority.day(),runId,true);
+            if(progressBatch || mode==ReadingNewsChoice.Mode.SEVEN){
+                ledger=new ReadingNewsLedger(files,authority.day(),runId,mode);
                 progressSlotsAtStart=ledger.progressUsed();
+                dailySlotsAtStart=ledger.used();
                 var limit=ReadingNewsCycle.reachedLimit(ledger);
                 if(limit!=null){outcome=step=limit.name();return;}
             }
@@ -122,6 +128,7 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
             var result=cycle.run(this);
             outcome=result.status().name(); step=outcome;
             if(result.status()!=ReadingNewsCycle.Status.DAILY_LIMIT && result.status()!=ReadingNewsCycle.Status.FEED_END
+                    && !(mode==ReadingNewsChoice.Mode.SEVEN && result.status()==ReadingNewsCycle.Status.SEVEN_LIMIT)
                     && !(progressBatch && (result.status()==ReadingNewsCycle.Status.FIVE_LIMIT
                     ||result.status()==ReadingNewsCycle.Status.PROGRESS_CHECK_REQUIRED)))
                 throw reject(outcome);
@@ -193,11 +200,16 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
     @FunctionalInterface interface PassivePause{void sleep(long millis)throws Exception;}
     static <T> T awaitClearArticle(ArticleRead<T> read,PassivePause pause,java.util.function.LongSupplier clock)throws Exception{
         long start=clock.getAsLong();
+        int treeResamples=0;
         for(int sample=0;;sample++){
             try{return read.read();}
-            catch(ArticleCovered cover){
+            catch(ArticleCovered | AndroidNewsTreeReader.UnqualifiedTree incomplete){
                 long elapsed=clock.getAsLong()-start;
-                if(sample>=5 || elapsed<0 || elapsed+500>=10_000)throw reject("NEWS_ARTICLE_OVERLAY_PERSISTED");
+                boolean expired=sample>=5 || elapsed<0 || elapsed+500>=10_000;
+                if(incomplete instanceof AndroidNewsTreeReader.UnqualifiedTree tree){
+                    if(!tree.canResampleArticle || expired || treeResamples>=2)throw tree;
+                    treeResamples++;
+                }else if(expired)throw reject("NEWS_ARTICLE_OVERLAY_PERSISTED");
                 pause.sleep(500);
             }
         }
@@ -230,7 +242,13 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
         check();
         var before=source();
         boolean child=article!=null && readingSource!=null && readingSource.isCheckedViewer(before);
-        var tree=AndroidNewsTreeReader.read(context,new TreeGrant(before),child);
+        NewsTreeWire.Tree tree;
+        try{
+            tree=AndroidNewsTreeReader.read(context,new TreeGrant(before),child);
+        }catch(AndroidNewsTreeReader.UnqualifiedTree failure){
+            if(child){rejectedArticleTreeReads++;lastArticleTreeRejection=failure.reason;}
+            throw failure;
+        }
         var after=source();
         var data=tree.source();
         NewsFeedModel.Frame frame;
@@ -515,6 +533,7 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
         private final StoryTapCheck story;
         private boolean claimed,prepared,spent;
         private Snapshot checked;
+        private String returnFailure;
         private Input(Object target,Snapshot expected,ReadingNewsCycle.BurnGate burn,StoryTapCheck story){
             this.target=target;this.expected=expected;this.burn=burn;this.story=story;
         }
@@ -552,8 +571,11 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
                 try{
                     checked=verifiedReturn();
                     return checked.source().fresh(now()) && current();
-                }catch(InterruptedException interrupted){Thread.currentThread().interrupt();throw reject("NEWS_RETURN_INTERRUPTED");}
-                catch(Exception failure){throw new SecurityException("NEWS_RETURN_FINAL_RECHECK",failure);}
+                }catch(Exception failure){
+                    if(failure instanceof InterruptedException)Thread.currentThread().interrupt();
+                    returnFailure=returnFailureCode(failure);
+                    throw new SecurityException(returnFailure,failure);
+                }
             }
             if(exact!=target || !spent || !current() || checked==null || !checked.source().fresh(now()))return false;
             sameSource(checked.source());
@@ -744,6 +766,23 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
     private boolean articleDue(ReadingNewsCycle.CardProof card){
         return ownsArticle(card) && now()-tapReturned>=ReadingNewsCycle.WAIT_MILLIS;
     }
+    // Limit public diagnostics to protocol enums and fixed local guard names.
+    static String returnFailureCode(Exception failure){
+        if(failure instanceof AndroidNewsTreeReader.UnqualifiedTree tree)return "NEWS_RETURN_TREE_"+tree.reason.name();
+        if(failure instanceof InterruptedException)return "NEWS_RETURN_INTERRUPTED";
+        if(failure instanceof IOException)return "NEWS_RETURN_TREE_IO";
+        if(failure instanceof IllegalArgumentException)return "NEWS_RETURN_TREE_PROTOCOL";
+        String code=failure.getMessage();
+        if(code==null)return "NEWS_RETURN_FINAL_RECHECK";
+        return switch(code){
+            case "NEWS_ARTICLE_WINDOW_CHANGED","NEWS_ARTICLE_SOURCE_BRACKET","NEWS_ARTICLE_WINDOW_UNBOUND",
+                 "NEWS_ARTICLE_OVERLAY_PERSISTED","NEWS_ROUTE_ARTICLE_OVERLAY_UNTRUSTED","NEWS_ROUTE_ARTICLE_SUBSTITUTED",
+                 "NEWS_ROUTE_FOREIGN_TASK","NEWS_ROUTE_FOREIGN_FOCUS","READING_OWNERSHIP_OR_CLEANUP",
+                 "NEWS_TREE_AUTHORITY","NEWS_TREE_BINDER","NEWS_TREE_SERVICE","NEWS_TREE_STALE","NEWS_TREE_LEASE",
+                 "NEWS_WINDOW_CHANGED","NEWS_BACK_EARLY_OR_UNBOUND" -> code;
+            default -> "NEWS_RETURN_FINAL_RECHECK";
+        };
+    }
     private Snapshot verifiedReturn()throws Exception{
         if(tapReturned<0 || now()-tapReturned<ReadingNewsCycle.WAIT_MILLIS || articleWindow==null)
             throw reject("NEWS_BACK_EARLY_OR_UNBOUND");
@@ -763,6 +802,8 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
         var result=ReviewShizukuBackActor.newsBack(context,grant,target);
         if(result.invocationAttempted())backInvoked++;
         if(result.kind()==ReviewShizukuBackActor.Kind.DISPATCH_UNKNOWN)uncertain=true;
+        if(!result.invocationAttempted() && result.reason()==ReviewShizukuBackActor.Reason.AUTHORITY_RECHECK_UNKNOWN
+                && grant.returnFailure!=null && knownClean())throw reject(grant.returnFailure);
         if(!result.commandExitZero()||!knownClean())throw reject("NEWS_BACK_"+result.reason().name());
         backSuccess++; tapReturned=-1;
         readingSource.backSucceeded(article.source(),now());
@@ -790,12 +831,18 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
     JSONObject report()throws JSONException{
         var s=cycle==null?null:cycle.snapshot();
         var entry=progressAtEntry;
+        Integer attemptLimit=switch(mode){
+            case SEVEN -> ReadingNewsLedger.SEVEN_LIMIT;
+            case PROGRESS_FIVE -> ReadingNewsLedger.PROGRESS_LIMIT;
+            default -> null;
+        };
+        Integer batchArticleLimit=progressBatch?Integer.valueOf(1):attemptLimit;
         var visits=new JSONArray();
         if(s!=null)for(var visit:s.visits())visits.put(new JSONObject().put("key",visit.articleKey())
                 .put("tapElapsed",visit.tapElapsed()).put("waitMillis",visit.waitMillis()).put("automatic",visit.automatic()));
         return new JSONObject().put("schemaVersion",1).put("profile",authority.taskInputAllowed()?"READING_NEWS_V1":"READING_NEWS_PREFLIGHT")
-                .put("batchArticleLimit",progressBatch?Integer.valueOf(1):null)
-                .put("progressAttemptLimit",progressBatch?Integer.valueOf(ReadingNewsLedger.PROGRESS_LIMIT):null)
+                .put("batchArticleLimit",batchArticleLimit).put("progressAttemptLimit",attemptLimit)
+                .put("dailySlotsAtStart",dailySlotsAtStart>=0?Integer.valueOf(dailySlotsAtStart):null)
                 .put("progressSlotsAtStart",progressSlotsAtStart>=0?Integer.valueOf(progressSlotsAtStart):null)
                 .put("readingPointsBefore",entry==null?null:Integer.valueOf(entry.current()))
                 .put("readingPointsTarget",entry==null?null:Integer.valueOf(entry.target()))
@@ -807,6 +854,8 @@ final class NewsAndroidPort implements ReadingNewsCycle.Ports {
                 .put("autoReturns",s==null?0:s.autoReturns()).put("duplicateArticles",s==null?0:s.duplicateArticles())
                 .put("unreadable",s==null?0:s.unreadable()).put("swipes",swipes).put("treeReads",treeReads)
                 .put("captures",crops).put("marks",marked).put("lastNodeCount",lastNodes).put("lastCardStridePx",lastStride)
+                .put("rejectedArticleTreeReads",rejectedArticleTreeReads)
+                .put("lastArticleTreeRejection",lastArticleTreeRejection==null?"NONE":lastArticleTreeRejection.name())
                 .put("minimumVisitDelayMs",ReadingNewsCycle.WAIT_MILLIS).put("rawTextIncluded",false).put("rawDataUploaded",false);
     }
 }

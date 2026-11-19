@@ -3,7 +3,8 @@ package com.aliothmoon.maafw.once;
 /** Additional purpose bound to the existing synchronous, visible owner confirmation. */
 final class ReadingNewsChoice {
     enum Mode {
-        PREFLIGHT(false,"NEWS_PREFLIGHT"), LIVE(true,"NEWS_LIVE"), PROGRESS_FIVE(true,"NEWS_PROGRESS_FIVE");
+        PREFLIGHT(false,"NEWS_PREFLIGHT"), LIVE(true,"NEWS_LIVE"), PROGRESS_FIVE(true,"NEWS_PROGRESS_FIVE"),
+        SEVEN(true,"NEWS_SEVEN");
         final boolean live;
         final String purpose;
         Mode(boolean live,String purpose){this.live=live;this.purpose=purpose;}

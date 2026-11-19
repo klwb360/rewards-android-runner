@@ -352,6 +352,30 @@ public final class ReadingNewsCycleTest {
         assertEquals(0,followingDay.progressUsed());
     }
 
+    @Test public void sevenNewArticlesRunContinuouslyAfterFiveAndBothBudgetsSurviveRestart()throws Exception{
+        var store=new LiveRewardsLedger.MemoryStore();
+        for(int i=0;i<5;i++)progressLedger(store).reserve(hash("article-"+i));
+        var seven=new ReadingNewsLedger(store,DAY,UUID.randomUUID().toString(),ReadingNewsChoice.Mode.SEVEN);
+        var feed=new Feed(articles(16));
+        var result=new ReadingNewsCycle(seven).run(feed);
+        assertEquals(ReadingNewsCycle.Status.SEVEN_LIMIT,result.status());
+        assertEquals(7,result.taps());assertEquals(7,result.backs());assertEquals(7,result.openedAndReturned());
+        for(int i=0;i<7;i++)assertEquals(hash("article-"+(i+5)),feed.tapped.get(i));
+        assertTrue(feed.dwell.stream().allMatch(ms->ms>=10_000));
+        assertEquals(12,seven.used());assertEquals(7,seven.progressUsed());assertEquals(5,progressLedger(store).progressUsed());
+        var restarted=new ReadingNewsLedger(store,DAY,UUID.randomUUID().toString(),ReadingNewsChoice.Mode.SEVEN);
+        var stopped=new ReadingNewsCycle(restarted).run(new Feed(articles(20)));
+        assertEquals(ReadingNewsCycle.Status.SEVEN_LIMIT,stopped.status());assertEquals(0,stopped.taps());
+        assertThrows(IOException.class,()->restarted.reserve(hash("overflow")));
+    }
+    @Test public void continuousSevenStopsAtSharedDailyLimitWhenFewerThanSevenSlotsRemain()throws Exception{
+        var store=new LiveRewardsLedger.MemoryStore();
+        for(int i=0;i<11;i++)ledger(store).reserve(hash("previous-"+i));
+        var seven=new ReadingNewsLedger(store,DAY,UUID.randomUUID().toString(),ReadingNewsChoice.Mode.SEVEN);
+        var result=new ReadingNewsCycle(seven).run(new Feed(articles(12)));
+        assertEquals(ReadingNewsCycle.Status.DAILY_LIMIT,result.status());assertEquals(2,result.taps());
+        assertEquals(2,seven.progressUsed());assertEquals(0,progressLedger(store).progressUsed());
+    }
     @Test public void mixedRunsKeepTheirDailyLimitAndConcurrentProgressTapsCannotExceedFive()throws Exception{
         var usedDay=new LiveRewardsLedger.MemoryStore();
         for(int i=0;i<12;i++)ledger(usedDay).reserve(hash("prior-"+i));

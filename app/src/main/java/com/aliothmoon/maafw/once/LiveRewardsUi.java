@@ -21,6 +21,8 @@ final class LiveRewardsUi {
     static final String RUN_NEWS_LIVE="确认阅读试验（先2篇，最多13篇）";
     static final String OPEN_NEWS_PROGRESS="打开阅读进度分次试验（最多5篇）";
     static final String RUN_NEWS_PROGRESS="确认只读1篇并复查积分";
+    static final String OPEN_NEWS_SEVEN="打开连续阅读七篇";
+    static final String RUN_NEWS_SEVEN="确认连续阅读最多七篇";
     private static final ReadingNewsChoice newsChoice = new ReadingNewsChoice();
     static final String OPEN_SINGLE_TASK="打开一次任务试点（尚不执行）";
     static final String RUN_SINGLE_TASK="确认只点击一个任务";
@@ -47,11 +49,10 @@ final class LiveRewardsUi {
         b.setOnClickListener(v->{if(b.isEnabled()){b.setEnabled(false);action.run();}});box.addView(b);
     }
     static void choice(Activity a,boolean ready,Runnable run,Runnable close){
-        if(a.getWindow().getDecorView().findViewWithTag(ReadingNewsChoice.Mode.LIVE)!=null){
-            newsPage(a,ready,run,close,ReadingNewsChoice.Mode.LIVE);return;
-        }
-        if(a.getWindow().getDecorView().findViewWithTag(ReadingNewsChoice.Mode.PROGRESS_FIVE)!=null){
-            newsPage(a,ready,run,close,ReadingNewsChoice.Mode.PROGRESS_FIVE);return;
+        for(var mode:ReadingNewsChoice.Mode.values()){
+            if(mode.live && a.getWindow().getDecorView().findViewWithTag(mode)!=null){
+                newsPage(a,ready,run,close,mode);return;
+            }
         }
         var tagged=a.getWindow().getDecorView().findViewWithTag(PAIR_FIELD);
         if(tagged instanceof EditText editing){
@@ -70,6 +71,7 @@ final class LiveRewardsUi {
         button(a,box,OPEN_MORE_PAIR,ready,()->morePairChoice(a,ready,run,close,""));
         button(a,box,OPEN_NEWS_LIVE,ready,()->newsPage(a,ready,run,close,ReadingNewsChoice.Mode.LIVE));
         button(a,box,OPEN_NEWS_PROGRESS,ready,()->newsPage(a,ready,run,close,ReadingNewsChoice.Mode.PROGRESS_FIVE));
+        button(a,box,OPEN_NEWS_SEVEN,ready,()->newsPage(a,ready,run,close,ReadingNewsChoice.Mode.SEVEN));
         button(a,box,"关闭",true,close);
     }
 
@@ -137,10 +139,11 @@ final class LiveRewardsUi {
             case LIVE -> "阅读新闻试验\n进入新闻列表后开始。先读两篇，再自动继续，当天最多尝试13篇。每篇停留至少10秒，最多返回一次。广告与已尝试文章跳过。";
             case PREFLIGHT -> "阅读入口只读定位\n在 Rewards 主页滚动至阅读卡片完整露出，核验局部图像并保存标记。";
             case PROGRESS_FIVE -> "阅读进度分次试验\n每次从 Rewards 主页核对阅读进度。未满时最多打开1篇新闻，停留至少10秒后返回列表并结束本批。下一批从 Rewards 主页重新核对，满额即停。当天此模式最多尝试5篇，计入原有每日13篇限额。";
+            case SEVEN -> "连续阅读七篇\n进入新闻列表后连续阅读新文章。每篇停留至少10秒，最多返回一次。自动跳过广告和当天已尝试的文章。此入口每天最多尝试7篇，共用当天13篇总上限。整轮结束后再查分。";
         };
         LinearLayout box=page(a,description);
         box.setTag(mode);
-        String label=switch(mode){case LIVE->RUN_NEWS_LIVE;case PREFLIGHT->RUN_NEWS_PREFLIGHT;case PROGRESS_FIVE->RUN_NEWS_PROGRESS;};
+        String label=switch(mode){case LIVE->RUN_NEWS_LIVE;case PREFLIGHT->RUN_NEWS_PREFLIGHT;case PROGRESS_FIVE->RUN_NEWS_PROGRESS;case SEVEN->RUN_NEWS_SEVEN;};
         button(a,box,label,ready,()->newsChoice.confirm(a,mode,()->{
             if(mode.live)visibleChoice.confirm(a,LiveRewardsTaskSelection.ALL,run);
             else recheckChoice.confirm(a,false,run);
