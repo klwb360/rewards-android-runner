@@ -8,6 +8,19 @@ public class AlphabetSearchDeviceTest {
     private static final BingNavigationSnapshot.Profile PROFILE = new BingNavigationSnapshot.Profile(
             10501, 10502, new BingNavigationSnapshot.Shape(1440,2560,0));
 
+    @Test public void aTemporaryHostViewCanOnlyWaitForTheExactEditableFocusedField() {
+        var wait = AlphabetSearchDevice.EditorFocus.WAIT;
+        var reject = AlphabetSearchDevice.EditorFocus.REJECT;
+        var field = AlphabetSearchDevice.EditorFocus.FIELD;
+        assertEquals(wait, AlphabetSearchDevice.classifyEditorFocus(false,false,"",false,false));
+        assertEquals(wait, AlphabetSearchDevice.classifyEditorFocus(true,true,"android.view.View",false,false));
+        assertEquals(field, AlphabetSearchDevice.classifyEditorFocus(true,true,"android.widget.EditText",true,true));
+        assertEquals(reject, AlphabetSearchDevice.classifyEditorFocus(true,false,"android.view.View",false,false));
+        assertEquals(reject, AlphabetSearchDevice.classifyEditorFocus(true,false,"android.widget.EditText",true,true));
+        assertEquals(reject, AlphabetSearchDevice.classifyEditorFocus(true,true,"android.widget.Button",true,false));
+        assertEquals(reject, AlphabetSearchDevice.classifyEditorFocus(true,true,"android.widget.EditText",false,true));
+    }
+
     @Test public void exactImeOwnerComesFromOneRowForTheSelectedPackage() {
         String rows = "package:example.keyboard.addon uid:10510\npackage:example.keyboard uid:10031\n";
         assertEquals(10031, AlphabetSearchDevice.exactPackageUid(rows, "example.keyboard"));

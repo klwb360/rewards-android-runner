@@ -110,6 +110,16 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
     }
     @Override public void pause(long millis) throws InterruptedException { Thread.sleep(millis); }
 
+    enum EditorFocus { FIELD, WAIT, REJECT }
+    static EditorFocus classifyEditorFocus(boolean present, boolean sameWindow, String className,
+                                          boolean focused, boolean editable) {
+        if (!present) return EditorFocus.WAIT;
+        if (!sameWindow) return EditorFocus.REJECT;
+        if (focused && editable && "android.widget.EditText".equals(className)) return EditorFocus.FIELD;
+        if (!focused && !editable && "android.view.View".equals(className)) return EditorFocus.WAIT;
+        return EditorFocus.REJECT;
+    }
+
     static boolean allowedLetter(char letter) { return letter >= 'a' && letter <= 't'; }
     private static void need(boolean value, String reason) {
         if (!value) throw new SecurityException(reason);
@@ -512,10 +522,22 @@ final class AlphabetSearchDevice implements AlphabetSearchCycle.Ports {
                                          String component, char letter, int width, int height, long end) {
             if ("EDITOR".equals(operation) || "SELECTION".equals(operation)) {
                 need(EDITOR.equals(component),"EDITOR_ACTIVITY");
-                var field=nodes.own(ui.findFocus(AccessibilityNodeInfo.FOCUS_INPUT));
-                need(valid(field) && field.getWindowId()==root.getWindowId() && field.isVisibleToUser()
-                        && field.isEnabled() && field.isFocused() && field.isEditable() && !field.isPassword()
-                        && !field.isMultiLine() && "android.widget.EditText".contentEquals(field.getClassName()),"EDITOR");
+                // A new accessibility client can initially resolve Compose's host View, before
+                // the focused virtual EditText becomes available in this same connection.
+                long focusDeadline = Math.min(end - 150, SystemClock.elapsedRealtime() + 800);
+                AccessibilityNodeInfo field;
+                while (true) {
+                    field = nodes.own(ui.findFocus(AccessibilityNodeInfo.FOCUS_INPUT));
+                    boolean sameWindow = valid(field) && field.getWindowId() == root.getWindowId();
+                    EditorFocus state = classifyEditorFocus(field != null, sameWindow,
+                            field == null ? "" : String.valueOf(field.getClassName()),
+                            field != null && field.isFocused(), field != null && field.isEditable());
+                    if (state == EditorFocus.FIELD) break;
+                    need(state == EditorFocus.WAIT && SystemClock.elapsedRealtime() < focusDeadline, "EDITOR_FOCUS");
+                    SystemClock.sleep(50);
+                }
+                need(field.isVisibleToUser() && field.isEnabled() && !field.isPassword()
+                        && !field.isMultiLine(), "EDITOR");
                 var rect=chromeBounds(field,width,height);
                 CharSequence value=field.getText();
                 String state=field.isShowingHintText() || value==null || value.length()==0 ? "EMPTY"
